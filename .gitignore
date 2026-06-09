@@ -1,0 +1,45 @@
+# Локальные данные (НИКОГДА не коммитим)
+.env
+cookies.json
+cookies.json.tmp
+
+# БД с локальным состоянием
+state.db
+state.db-wal
+state.db-shm
+unlim_state.db
+unlim_state.db-wal
+unlim_state.db-shm
+
+# Логи и временные папки
+logs/
+downloads/
+*.log
+
+# Python кеш
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Виртуальные окружения
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# Сборки
+build/
+dist/
+*.egg-info/

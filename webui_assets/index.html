@@ -1,0 +1,1776 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Yandex.Disk Backup</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{
+    --bg:#000000;
+    --bg2:#0a0a0d;
+    --surface:#1c1c1e;
+    --surface2:#2c2c2e;
+    --surface3:#3a3a3c;
+    --hairline:rgba(255,255,255,.08);
+    --hairline-strong:rgba(255,255,255,.14);
+    --text:#f5f5f7;
+    --text-secondary:#aeaeb2;
+    --text-tertiary:#8e8e93;
+    --accent:#0a84ff;
+    --accent-hover:#3a9eff;
+    --green:#30d158;
+    --red:#ff453a;
+    --yellow:#ffd60a;
+    --orange:#ff9f0a;
+    --purple:#bf5af2;
+    --pink:#ff375f;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text','Helvetica Neue',Inter,system-ui,sans-serif;
+    font-weight:400;
+    line-height:1.47;
+    letter-spacing:-.01em;
+    min-height:100vh;
+    -webkit-font-smoothing:antialiased;
+    -moz-osx-font-smoothing:grayscale;
+    padding:32px 24px 80px;
+  }
+  .container{max-width:980px;margin:0 auto}
+
+  /* ── Header ── */
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:32px;gap:16px;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:14px}
+  .brand-logo{
+    width:36px;height:36px;border-radius:9px;
+    background:linear-gradient(135deg,#0a84ff,#bf5af2);
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 4px 14px rgba(10,132,255,.25);
+  }
+  .brand-name{font-size:21px;font-weight:600;letter-spacing:-.02em}
+  .brand-sub{font-size:13px;color:var(--text-tertiary);margin-top:1px;letter-spacing:0}
+
+  .pills{display:flex;gap:8px;flex-wrap:wrap}
+  .pill{
+    display:inline-flex;align-items:center;gap:7px;
+    padding:6px 13px;border-radius:99px;
+    font-size:13px;font-weight:500;
+    background:var(--surface);
+    color:var(--text-secondary);
+    border:0.5px solid var(--hairline-strong);
+  }
+  .pill .dot{width:7px;height:7px;border-radius:50%;background:var(--text-tertiary)}
+  .pill.ok{color:var(--green)}
+  .pill.ok .dot{background:var(--green);box-shadow:0 0 8px rgba(48,209,88,.5)}
+  .pill.err{color:var(--red)}
+  .pill.err .dot{background:var(--red);box-shadow:0 0 8px rgba(255,69,58,.5)}
+  .pill.run{color:var(--yellow)}
+  .pill.run .dot{background:var(--yellow);animation:pulse 1.4s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+  /* ── Tabs (segmented control) ── */
+  .tabs{
+    display:flex;gap:2px;
+    background:var(--surface);
+    padding:3px;border-radius:10px;
+    margin-bottom:28px;overflow-x:auto;
+    border:0.5px solid var(--hairline);
+  }
+  .tab{
+    flex:1;min-width:80px;
+    padding:8px 14px;text-align:center;
+    border-radius:8px;cursor:pointer;
+    font-size:13.5px;font-weight:500;
+    color:var(--text-secondary);
+    transition:color .15s,background .15s;
+    white-space:nowrap;
+  }
+  .tab:hover{color:var(--text)}
+  .tab.active{
+    background:var(--surface3);
+    color:var(--text);
+    box-shadow:0 1px 2px rgba(0,0,0,.3);
+  }
+
+  /* ── Panel ── */
+  .panel{display:none}
+  .panel.active{display:block;animation:fadein .25s ease}
+  @keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+  /* ── Card ── */
+  .card{
+    background:var(--surface);
+    border:0.5px solid var(--hairline);
+    border-radius:14px;
+    padding:24px;
+    margin-bottom:16px;
+    transition:border-color .2s;
+  }
+  .card:hover{border-color:var(--hairline-strong)}
+  .card-title{font-size:20px;font-weight:600;letter-spacing:-.02em;margin-bottom:6px}
+  .card-sub{font-size:14px;color:var(--text-secondary);margin-bottom:18px}
+
+  .section-label{
+    font-size:11px;font-weight:600;color:var(--text-tertiary);
+    text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;
+  }
+
+  /* ── Inputs ── */
+  .input,input[type=text],input[type=password],textarea{
+    width:100%;
+    background:var(--surface2);
+    color:var(--text);
+    border:0.5px solid var(--hairline-strong);
+    border-radius:10px;
+    padding:11px 14px;
+    font-size:14.5px;
+    font-family:inherit;
+    transition:border-color .15s,background .15s;
+  }
+  input:focus,textarea:focus{
+    outline:none;
+    border-color:var(--accent);
+    background:var(--surface);
+  }
+  textarea{
+    min-height:120px;
+    font-family:'SF Mono','Menlo','Consolas',monospace;
+    font-size:12px;resize:vertical;
+  }
+  label.field-label{display:block;font-size:13px;color:var(--text-secondary);margin-bottom:6px;font-weight:500}
+
+  /* ── Buttons ── */
+  .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;align-items:center}
+  button,.btn{
+    background:var(--surface2);
+    color:var(--text);
+    border:0.5px solid var(--hairline-strong);
+    padding:10px 18px;
+    border-radius:10px;
+    font-size:14px;font-weight:500;
+    cursor:pointer;font-family:inherit;
+    transition:all .15s;
+    display:inline-flex;align-items:center;gap:7px;
+    white-space:nowrap;
+  }
+  button:hover:not(:disabled){background:var(--surface3)}
+  button:active:not(:disabled){transform:scale(.97)}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary:hover:not(:disabled){background:var(--accent-hover)}
+  button.success{background:rgba(48,209,88,.15);border-color:rgba(48,209,88,.4);color:var(--green)}
+  button.success:hover:not(:disabled){background:rgba(48,209,88,.25)}
+  button.danger{background:rgba(255,69,58,.15);border-color:rgba(255,69,58,.4);color:var(--red)}
+  button.danger:hover:not(:disabled){background:rgba(255,69,58,.25)}
+  button.ghost{background:transparent}
+
+  .btn-icon{width:18px;height:18px;flex-shrink:0}
+
+  /* ── Big Start ── */
+  .hero{
+    background:linear-gradient(135deg,rgba(10,132,255,.1),rgba(191,90,242,.08));
+    border:0.5px solid rgba(10,132,255,.25);
+    border-radius:18px;padding:36px;text-align:center;margin-bottom:20px;
+  }
+  .hero-title{font-size:28px;font-weight:600;letter-spacing:-.03em;margin-bottom:8px}
+  .hero-sub{color:var(--text-secondary);margin-bottom:24px;font-size:15px}
+  .big-btn{
+    font-size:17px;font-weight:600;letter-spacing:-.01em;
+    padding:14px 44px;border-radius:99px;
+    background:var(--accent);color:#fff;border:none;cursor:pointer;
+    box-shadow:0 8px 24px rgba(10,132,255,.35);
+    transition:all .15s;
+    display:inline-flex;align-items:center;gap:9px;
+  }
+  .big-btn:hover:not(:disabled){background:var(--accent-hover);transform:translateY(-1px);box-shadow:0 12px 32px rgba(10,132,255,.45)}
+  .big-btn:active{transform:translateY(0)}
+  .big-btn:disabled{opacity:.4;cursor:not-allowed;background:var(--surface2)}
+  .big-btn.danger{background:var(--red);box-shadow:0 8px 24px rgba(255,69,58,.35)}
+  .big-btn.danger:hover{background:#ff5a4f}
+
+  .opts{display:flex;justify-content:center;gap:8px;margin-top:18px;flex-wrap:wrap}
+  .opt-pill{
+    display:inline-flex;align-items:center;gap:7px;
+    padding:7px 14px;border-radius:99px;
+    background:var(--surface);border:0.5px solid var(--hairline-strong);
+    font-size:13px;cursor:pointer;color:var(--text-secondary);
+    transition:all .15s;
+  }
+  .opt-pill:has(input:checked){color:var(--text);border-color:var(--accent);background:rgba(10,132,255,.12)}
+  .opt-pill input{accent-color:var(--accent)}
+
+  /* ── Grid + stats ── */
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin-bottom:16px}
+  .grid-2{display:grid;gap:14px;grid-template-columns:1fr 1fr;margin-bottom:16px}
+  @media (max-width:680px){.grid-2{grid-template-columns:1fr}}
+
+  .stat{
+    background:var(--surface);border:0.5px solid var(--hairline);
+    border-radius:14px;padding:18px;
+  }
+  .stat-label{font-size:12px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;font-weight:600}
+  .stat-value{font-size:26px;font-weight:600;letter-spacing:-.02em;line-height:1.1}
+  .stat-sub{font-size:13px;color:var(--text-secondary);margin-top:4px}
+
+  /* ── Progress ── */
+  .progress{margin-top:14px}
+  .progress-label{display:flex;justify-content:space-between;font-size:12px;color:var(--text-tertiary);margin-bottom:6px}
+  .progress-track{background:var(--surface2);border-radius:99px;height:6px;overflow:hidden}
+  .progress-fill{background:var(--accent);height:100%;transition:width .5s ease;border-radius:99px}
+  .progress-fill.purple{background:var(--purple)}
+
+  /* ── List rows (Apple-style) ── */
+  .list{
+    background:var(--surface);
+    border:0.5px solid var(--hairline);
+    border-radius:14px;overflow:hidden;
+  }
+  .row{
+    display:flex;align-items:center;
+    padding:14px 18px;
+    border-bottom:0.5px solid var(--hairline);
+    gap:14px;
+    transition:background .15s;
+  }
+  .row:last-child{border-bottom:none}
+  .row:hover{background:var(--surface2)}
+  .row-icon{
+    width:36px;height:36px;border-radius:9px;
+    display:flex;align-items:center;justify-content:center;
+    flex-shrink:0;
+  }
+  .row-body{flex:1;min-width:0}
+  .row-title{font-size:15px;font-weight:500;color:var(--text)}
+  .row-sub{font-size:13px;color:var(--text-secondary);margin-top:2px}
+  .row-meta{font-size:13px;color:var(--text-tertiary);font-variant-numeric:tabular-nums}
+
+  /* iOS-style toggle */
+  .toggle{
+    position:relative;width:51px;height:31px;
+    background:var(--surface3);border-radius:99px;
+    cursor:pointer;transition:background .25s;flex-shrink:0;
+  }
+  .toggle.on{background:var(--green)}
+  .toggle::after{
+    content:'';position:absolute;top:2px;left:2px;
+    width:27px;height:27px;border-radius:50%;
+    background:#fff;
+    box-shadow:0 1px 4px rgba(0,0,0,.3);
+    transition:transform .25s;
+  }
+  .toggle.on::after{transform:translateX(20px)}
+
+  /* Category icons */
+  .icat{width:20px;height:20px}
+
+  /* ── Console ── */
+  .console{
+    background:#000;border:0.5px solid var(--hairline);
+    border-radius:10px;padding:14px;
+    font-family:'SF Mono','Menlo','Consolas',monospace;
+    font-size:12px;color:#e5e5e7;
+    height:240px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;
+  }
+  .console::-webkit-scrollbar{width:6px}
+  .console::-webkit-scrollbar-thumb{background:var(--surface3);border-radius:3px}
+  .console-empty{color:var(--text-tertiary);font-style:italic}
+
+  /* ── Recent items ── */
+  .recent-item{
+    font-family:'SF Mono',monospace;font-size:12px;
+    padding:6px 10px;background:var(--surface2);
+    border-radius:6px;margin-bottom:4px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    color:var(--text-secondary);
+  }
+  .recent-item .name{color:var(--text)}
+
+  /* ── Setup instructions ── */
+  .info{
+    background:rgba(10,132,255,.08);
+    border:0.5px solid rgba(10,132,255,.25);
+    padding:16px;border-radius:10px;margin-bottom:16px;font-size:14px;
+  }
+  .info ol{padding-left:22px;margin-top:8px;color:var(--text-secondary)}
+  .info li{margin-bottom:6px;padding-left:4px}
+  .info a{color:var(--accent);text-decoration:none}
+  .info a:hover{text-decoration:underline}
+  .info code{
+    background:var(--surface2);padding:1px 7px;border-radius:5px;
+    font-family:'SF Mono',monospace;font-size:12.5px;color:var(--purple);
+  }
+  .info strong{color:var(--text);font-weight:600}
+
+  /* ── Status badge ── */
+  .badge{
+    display:inline-flex;align-items:center;gap:6px;
+    padding:4px 11px;border-radius:99px;font-size:12.5px;font-weight:500;
+    background:var(--surface2);border:0.5px solid var(--hairline);
+    color:var(--text-secondary);
+  }
+  .badge.ok{background:rgba(48,209,88,.12);border-color:rgba(48,209,88,.3);color:var(--green)}
+  .badge.err{background:rgba(255,69,58,.12);border-color:rgba(255,69,58,.3);color:var(--red)}
+  .badge.run{background:rgba(255,214,10,.12);border-color:rgba(255,214,10,.3);color:var(--yellow)}
+
+  /* ── Footer ── */
+  footer{
+    margin-top:40px;text-align:center;
+    color:var(--text-tertiary);font-size:12px;
+  }
+
+  /* ── Toast ── */
+  #toast{
+    position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);
+    background:var(--surface2);
+    color:var(--text);
+    padding:13px 22px;border-radius:14px;
+    box-shadow:0 10px 40px rgba(0,0,0,.5);
+    z-index:1000;font-size:14px;font-weight:500;
+    opacity:0;transition:all .25s cubic-bezier(.4,0,.2,1);pointer-events:none;
+    max-width:90vw;
+    border:0.5px solid var(--hairline-strong);
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.ok{border-color:rgba(48,209,88,.4)}
+  #toast.err{border-color:rgba(255,69,58,.4)}
+
+  hr{border:none;border-top:0.5px solid var(--hairline);margin:18px 0}
+  .muted{color:var(--text-secondary);font-size:14px}
+  .num{font-variant-numeric:tabular-nums;font-weight:600}
+
+  /* Inline icon helper */
+  .ico{width:20px;height:20px;vertical-align:middle;flex-shrink:0}
+  .ico-sm{width:16px;height:16px}
+  .ico-lg{width:22px;height:22px}
+
+  /* Cat icon backgrounds */
+  .bg-photo{background:rgba(10,132,255,.15);color:var(--accent)}
+  .bg-video{background:rgba(191,90,242,.15);color:var(--purple)}
+  .bg-audio{background:rgba(255,159,10,.15);color:var(--orange)}
+  .bg-doc{background:rgba(255,214,10,.15);color:var(--yellow)}
+  .bg-archive{background:rgba(48,209,88,.15);color:var(--green)}
+  .bg-program{background:rgba(255,69,58,.15);color:var(--red)}
+  .bg-other{background:rgba(174,174,178,.15);color:var(--text-secondary)}
+
+  .total-row{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:14px 18px;background:var(--surface2);
+    border-radius:10px;margin-top:12px;
+    font-weight:600;
+  }
+
+  /* Spinner */
+  .spinner{
+    width:18px;height:18px;border-radius:50%;
+    border:2px solid var(--surface3);
+    border-top-color:var(--accent);
+    animation:spin 0.8s linear infinite;
+    flex-shrink:0;
+  }
+  .spinner-sm{width:14px;height:14px;border-width:2px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  /* Author badge */
+  .author{
+    background:linear-gradient(90deg,#0a84ff,#bf5af2);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+    font-weight:600;
+  }
+
+  /* Loading button state */
+  button.loading{pointer-events:none;opacity:.7}
+  button.loading svg{display:none}
+
+  /* Task status banner */
+  .task-banner{
+    background:linear-gradient(135deg,rgba(10,132,255,.12),rgba(191,90,242,.08));
+    border:0.5px solid rgba(10,132,255,.3);
+    border-radius:12px;
+    padding:14px 16px;
+    margin-top:14px;
+    display:flex;align-items:center;gap:14px;
+  }
+  .task-banner.done{background:rgba(48,209,88,.1);border-color:rgba(48,209,88,.3)}
+  .task-banner.err{background:rgba(255,69,58,.1);border-color:rgba(255,69,58,.3)}
+  .task-banner.stopped{background:rgba(174,174,178,.08);border-color:var(--hairline-strong)}
+  /* Прячем спиннер когда задача закончилась */
+  .task-banner.done .spinner,
+  .task-banner.err .spinner,
+  .task-banner.stopped .spinner{display:none}
+  .task-banner-body{flex:1;min-width:0}
+  .task-banner-title{font-size:14px;font-weight:600;letter-spacing:-.01em}
+  .task-banner-sub{font-size:12.5px;color:var(--text-secondary);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .task-banner-time{font-size:12px;color:var(--text-tertiary);font-variant-numeric:tabular-nums;flex-shrink:0}
+  .task-banner code{
+    background:var(--surface2);padding:1px 7px;border-radius:5px;
+    font-family:'SF Mono',monospace;font-size:11.5px;color:var(--purple);
+  }
+
+  /* Active tasks indicator in header */
+  .active-tasks{
+    display:none;
+    background:rgba(255,214,10,.15);
+    border:0.5px solid rgba(255,214,10,.4);
+    color:var(--yellow);
+    padding:6px 13px;border-radius:99px;
+    font-size:13px;font-weight:500;
+    align-items:center;gap:7px;
+  }
+  .active-tasks.show{display:inline-flex}
+</style>
+
+<!-- SVG sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-cloud" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M6.5 19q-2.275 0-3.887-1.575T1 13.575q0-1.95 1.175-3.488T5.25 8.15q.625-2.3 2.512-3.725T12 3q2.825 0 4.812 1.963T18.8 9.75q1.675.2 2.788 1.45T22.7 14.075q0 1.65-1.163 2.788T18.75 18q-.425 0-.713-.288T17.75 17q0-.425.288-.713T18.75 16q.825 0 1.413-.575T20.75 14q0-.825-.588-1.413T18.75 12H17.5q0-2.3-1.6-3.9T12 6.5T8.1 8.1T6.5 12H6q-1.45 0-2.475 1.025T2.5 15.5t1.025 2.475T6 19h.5q.425 0 .713.288T7.5 20q0 .425-.288.713T6.5 21M14 16.6l-1.3 1.275q-.275.275-.713.275t-.712-.275t-.275-.7t.275-.7L14.05 13.5q.275-.275.7-.275t.7.275l2.775 2.775q.275.275.275.7t-.275.7t-.7.275t-.7-.275L14.5 16.4V21q0 .425-.287.713T13.5 22q-.425 0-.713-.287T12.5 21v-4.4z"/>
+    </symbol>
+    <symbol id="i-play" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M8 5v14l11-7z"/>
+    </symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24">
+      <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-check" viewBox="0 0 24 24">
+      <path fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+    </symbol>
+    <symbol id="i-search" viewBox="0 0 24 24">
+      <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M21 21l-4.35-4.35M11 19a8 8 0 1 1 0-16 8 8 0 0 1 0 16z"/>
+    </symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 24 24">
+      <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 5v14m-7-7l7 7 7-7"/>
+    </symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24">
+      <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 0 1 15.5-6.3L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.5 6.3L3 16M3 21v-5h5"/>
+    </symbol>
+    <symbol id="i-save" viewBox="0 0 24 24">
+      <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h8"/>
+    </symbol>
+    <symbol id="i-photo" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M19 3H5C3.9 3 3 3.9 3 5v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/>
+    </symbol>
+    <symbol id="i-video" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11z"/>
+    </symbol>
+    <symbol id="i-audio" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3z"/>
+    </symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8zm-1 7V3.5L18.5 9z"/>
+    </symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M20 6h-3V4c0-1.1-.9-2-2-2H9c-1.1 0-2 .9-2 2v2H4c-1.1 0-2 .9-2 2v11c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-6 6h-4v-2h4z"/>
+    </symbol>
+    <symbol id="i-program" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM10 17l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8z"/>
+    </symbol>
+    <symbol id="i-other" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M19 13H5v-2h14z"/><circle cx="12" cy="6" r="2" fill="currentColor"/><circle cx="12" cy="18" r="2" fill="currentColor"/>
+    </symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.49 1a7.03 7.03 0 0 0-1.69-.98l-.38-2.65A.49.49 0 0 0 14 2h-4a.49.49 0 0 0-.49.42l-.38 2.65c-.61.25-1.17.58-1.69.98l-2.49-1a.5.5 0 0 0-.61.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46a.5.5 0 0 0 .61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.05.24.26.42.49.42h4c.23 0 .44-.18.49-.42l.38-2.65c.61-.25 1.17-.58 1.69-.98l2.49 1a.5.5 0 0 0 .61-.22l2-3.46a.5.5 0 0 0-.12-.64zM12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5z"/>
+    </symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8z"/>
+    </symbol>
+    <symbol id="i-key" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M12.65 10A6 6 0 0 0 1 12a6 6 0 0 0 11.65 2H17v4h4v-4h2v-4zM7 14a2 2 0 1 1 0-4 2 2 0 0 1 0 4z"/>
+    </symbol>
+    <symbol id="i-cookies" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M21.95 10.99c-.01 0-.01 0 0 0a3.49 3.49 0 0 1-3.45-3.94c.08-.55-.42-1-.96-.86a1.95 1.95 0 0 1-2.45-2.45 1 1 0 0 0-.85-1.27 1 1 0 0 0-.32 0c-5.66-.43-10.42 4.34-9.92 10.04A10 10 0 0 0 12.99 22a10 10 0 0 0 9.83-10.74 1 1 0 0 0-.87-.27zM10 13a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm7 5a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm2-7a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm-7-3a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm-3 5a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm6 0a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
+    </symbol>
+  </defs>
+</svg>
+</head>
+<body>
+<div class="container">
+
+<div id="file-protocol-warning" style="display:none; background:var(--red); color:#fff; padding:20px; border-radius:14px; margin-bottom:20px; font-weight:600; text-align:center; box-shadow:0 8px 24px rgba(255,69,58,.35);">
+  ⚠️ Внимание: Вы открыли HTML-файл напрямую через браузер. Так работать не будет!<br>
+  <span style="font-weight:400; font-size:14.5px; margin-top:8px; display:inline-block;">
+    Пожалуйста, запустите файл <strong>webui.bat</strong> (или <strong>webui.sh</strong> на macOS/Linux) в папке проекта, а затем откройте в браузере адрес <a href="http://localhost:8000" style="color:#fff; text-decoration:underline; font-weight:600;">http://localhost:8000</a>.
+  </span>
+</div>
+
+<header>
+  <div class="brand">
+    <div class="brand-logo"><svg class="ico" style="color:#fff"><use href="#i-cloud"/></svg></div>
+    <div>
+      <div class="brand-name">Yandex.Disk Backup</div>
+      <div class="brand-sub">Локальный бэкап · <span class="author">by Davron</span></div>
+    </div>
+  </div>
+  <div class="pills">
+    <span class="active-tasks" id="active-tasks">
+      <div class="spinner spinner-sm"></div>
+      <span id="active-tasks-text">—</span>
+    </span>
+    <span class="pill" id="pill-token"><span class="dot"></span><span id="pill-token-text">токен</span></span>
+    <span class="pill" id="pill-cookies"><span class="dot"></span><span id="pill-cookies-text">cookies</span></span>
+  </div>
+</header>
+
+<div class="tabs" id="tabs">
+  <div class="tab active" data-tab="home">Главная</div>
+  <div class="tab" data-tab="setup">Настройка</div>
+  <div class="tab" data-tab="disk">Диск</div>
+  <div class="tab" data-tab="photos">Безлимит</div>
+  <div class="tab" data-tab="organize">Сортировка</div>
+</div>
+
+<!-- ============= ГЛАВНАЯ ============= -->
+<div class="panel active" data-panel="home">
+
+  <div class="hero">
+    <div class="hero-title">Скачать всё</div>
+    <div class="hero-sub">Автоматически: сканирование, выбор файлов, скачивание</div>
+    <button id="big-start" class="big-btn" onclick="bigStart()">
+      <svg class="ico"><use href="#i-play"/></svg>Запустить
+    </button>
+    <button id="big-stop" class="big-btn danger" style="display:none" onclick="bigStop()">
+      <svg class="ico"><use href="#i-stop"/></svg>Остановить
+    </button>
+    <div class="opts">
+      <label class="opt-pill"><input type="checkbox" id="opt-disk" checked> Обычный диск</label>
+      <label class="opt-pill"><input type="checkbox" id="opt-unlim" checked> Безлимит</label>
+      <label class="opt-pill">Потоков: <input type="number" id="opt-workers" value="4" min="1" max="6" style="width:44px;background:transparent;border:none;color:var(--text);padding:0;text-align:center"></label>
+    </div>
+  </div>
+
+  <div class="card" id="pipeline-card" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div class="card-title" style="margin-bottom:0">Выполнение</div>
+      <span class="badge" id="pipeline-state">—</span>
+    </div>
+    <div class="muted" id="pipeline-step" style="margin-bottom:6px">—</div>
+    <div class="muted" style="font-size:12px;color:var(--text-tertiary)">Время: <span id="pipeline-time">—</span></div>
+    <hr>
+    <div class="console" id="pipeline-console"><div class="console-empty">жду запуска…</div></div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Обычный диск</div>
+      <div class="stat-value num" id="home-disk-done">—</div>
+      <div class="stat-sub" id="home-disk-info">—</div>
+      <div class="progress">
+        <div class="progress-track"><div class="progress-fill" id="home-disk-bar" style="width:0%"></div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Безлимит (photoslice)</div>
+      <div class="stat-value num" id="home-unlim-done">—</div>
+      <div class="stat-sub" id="home-unlim-info">—</div>
+      <div class="progress">
+        <div class="progress-track"><div class="progress-fill purple" id="home-unlim-bar" style="width:0%"></div></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ============= НАСТРОЙКА ============= -->
+<div class="panel" data-panel="setup">
+
+  <div class="card">
+    <div class="card-title">OAuth-токен</div>
+    <div class="card-sub">Нужен для скачивания обычного диска через официальный API.</div>
+
+    <div class="info">
+      <strong>Где взять (1 минута):</strong>
+      <ol>
+        <li>Открой <a href="https://yandex.ru/dev/disk/poligon/" target="_blank">yandex.ru/dev/disk/poligon</a></li>
+        <li>Залогинься своим аккаунтом Яндекса</li>
+        <li>Справа вверху: <strong>«Получить OAuth-токен»</strong></li>
+        <li>Скопируй строку <code>y0_xxxx…</code>, вставь ниже</li>
+        <li>Сначала <strong>«Проверить»</strong>, потом <strong>«Сохранить»</strong> когда статус зелёный</li>
+      </ol>
+    </div>
+
+    <!-- Текущий сохранённый -->
+    <div id="saved-token-card" style="display:none;margin-bottom:14px;padding:12px 14px;background:rgba(48,209,88,.08);border:0.5px solid rgba(48,209,88,.3);border-radius:10px">
+      <div style="font-size:12px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Сейчас сохранён</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:15px;font-weight:600" id="saved-token-login">—</div>
+          <div style="font-size:12px;color:var(--text-secondary);font-family:'SF Mono',monospace;margin-top:2px" id="saved-token-masked">—</div>
+        </div>
+        <button class="danger" onclick="clearToken()" style="padding:6px 12px;font-size:12px">Удалить</button>
+      </div>
+    </div>
+
+    <label class="field-label">Новый токен</label>
+    <input type="password" id="token-input" placeholder="y0_AgAAA…">
+    <div class="actions">
+      <button onclick="testToken()">
+        <svg class="ico-sm"><use href="#i-check"/></svg>Проверить
+      </button>
+      <button class="primary" id="btn-save-token" onclick="saveToken()" disabled>
+        <svg class="ico-sm"><use href="#i-save"/></svg>Сохранить
+      </button>
+      <button class="ghost" onclick="toggleTokenView()">Показать</button>
+    </div>
+    <hr>
+    <div style="display:flex;justify-content:space-between;align-items:center;font-size:13.5px">
+      <span class="muted">Статус сохранённого</span>
+      <span class="badge" id="check-token">проверяю…</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Папка для скачивания</div>
+    <div class="card-sub">Куда складывать файлы. Папка создастся автоматически.</div>
+    <label class="field-label">Путь</label>
+    <input type="text" id="dir-input" placeholder="например: D:/YandexBackup">
+    <div class="actions">
+      <button class="primary" onclick="saveDir()">
+        <svg class="ico-sm"><use href="#i-save"/></svg>Сохранить
+      </button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Cookies браузера</div>
+    <div class="card-sub">Опционально — для скачивания безлимитного фото-хранилища.</div>
+
+    <div class="info">
+      <strong>Что это:</strong> Яндекс прячет фото с телефона в скрытом хранилище. Через REST API оно не отдаётся — нужны куки браузера.
+      <br><br>
+      <strong>Как получить:</strong>
+      <ol>
+        <li>Установи <a href="https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm" target="_blank">расширение Cookie-Editor</a></li>
+        <li>Открой <a href="https://disk.yandex.ru/client/disk" target="_blank">disk.yandex.ru</a> и залогинься</li>
+        <li>Кликни на иконку Cookie-Editor → <strong>Export → Export as JSON</strong></li>
+        <li>Вставь JSON ниже → <strong>«Проверить»</strong> → потом <strong>«Сохранить»</strong></li>
+      </ol>
+      <span class="muted" style="font-size:12.5px">Куки сохраняются только локально, в git не попадают.</span>
+    </div>
+
+    <!-- Текущие сохранённые -->
+    <div id="saved-cookies-card" style="display:none;margin-bottom:14px;padding:12px 14px;background:rgba(48,209,88,.08);border:0.5px solid rgba(48,209,88,.3);border-radius:10px">
+      <div style="font-size:12px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Сейчас сохранено</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="font-size:14px" id="saved-cookies-count">—</div>
+        <button class="danger" onclick="clearCookies()" style="padding:6px 12px;font-size:12px">Удалить</button>
+      </div>
+    </div>
+
+    <label class="field-label">JSON массив кук</label>
+    <textarea id="cookies-input" placeholder='[{"name":"Session_id","value":"…","domain":".yandex.ru", …}, …]'></textarea>
+    <div class="actions">
+      <button onclick="testCookies()">
+        <svg class="ico-sm"><use href="#i-check"/></svg>Проверить
+      </button>
+      <button class="primary" id="btn-save-cookies" onclick="saveCookies()" disabled>
+        <svg class="ico-sm"><use href="#i-save"/></svg>Сохранить
+      </button>
+    </div>
+    <hr>
+    <div style="display:flex;justify-content:space-between;align-items:center;font-size:13.5px">
+      <span class="muted">Статус сохранённых</span>
+      <span class="badge" id="check-cookies">проверяю…</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- ============= ДИСК ============= -->
+<div class="panel" data-panel="disk">
+
+  <div class="card">
+    <div class="card-title">Сканирование</div>
+    <div class="card-sub">Сначала просканируй диск — увидишь сколько каких файлов есть.</div>
+    <div class="actions">
+      <button class="primary" onclick="action('disk_scan', this)">
+        <svg class="ico-sm"><use href="#i-search"/></svg>Проверить диск
+      </button>
+      <button onclick="refreshPreview('disk')">
+        <svg class="ico-sm"><use href="#i-refresh"/></svg>Обновить превью
+      </button>
+      <button class="danger" onclick="action('disk_stop', this)">
+        <svg class="ico-sm"><use href="#i-stop"/></svg>Стоп
+      </button>
+    </div>
+    <!-- Live статус сканирования -->
+    <div id="disk-scan-status" style="display:none;margin-top:14px;padding:12px 14px;background:var(--surface2);border-radius:10px;border:0.5px solid var(--hairline-strong)">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div class="spinner"></div>
+        <div style="flex:1">
+          <div style="font-weight:500" id="disk-scan-status-title">Сканирую диск…</div>
+          <div style="font-size:12.5px;color:var(--text-secondary);margin-top:2px" id="disk-scan-status-sub">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="disk-preview-card" style="display:none">
+    <div class="card-title">Что нашлось — выбери что скачать</div>
+    <div class="card-sub">Включи нужные категории, остальные пропустим.</div>
+    <div class="list" id="disk-preview-list"></div>
+    <div class="total-row">
+      <span>Выбрано к скачиванию</span>
+      <span class="num" id="disk-preview-selected">—</span>
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="downloadSelected('disk', this)">
+        <svg class="ico-sm"><use href="#i-arrow-down"/></svg>Скачать выбранное
+      </button>
+      <button class="danger" onclick="clearDb('disk')" style="margin-left:auto">
+        <svg class="ico-sm"><use href="#i-stop"/></svg>Очистить и заново
+      </button>
+    </div>
+    <!-- Live status of disk download -->
+    <div id="disk-download-banner" class="task-banner" style="display:none">
+      <div class="spinner"></div>
+      <div class="task-banner-body">
+        <div class="task-banner-title" id="disk-download-title">Скачиваю файлы…</div>
+        <div class="task-banner-sub" id="disk-download-sub">—</div>
+      </div>
+      <div class="task-banner-time" id="disk-download-time">—</div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="stat">
+      <div class="stat-label">Скачано</div>
+      <div class="stat-value num" id="s-downloaded" style="color:var(--green)">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Пропущено</div>
+      <div class="stat-value num" id="s-skipped">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">В очереди</div>
+      <div class="stat-value num" id="s-pending" style="color:var(--yellow)">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Ошибок</div>
+      <div class="stat-value num" id="s-failed" style="color:var(--red)">0</div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="section-label" style="margin:0">Консоль</div>
+        <button onclick="clearLog('disk')" style="padding:4px 10px;font-size:11px;background:transparent;border:0.5px solid var(--hairline-strong);color:var(--text-secondary)">Очистить лог</button>
+      </div>
+      <div class="console" id="disk-console"><div class="console-empty">жду запуска…</div></div>
+    </div>
+    <div class="card">
+      <div class="section-label">Последние скачанные</div>
+      <div id="disk-recent"><div class="muted">пока пусто</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============= БЕЗЛИМИТ ============= -->
+<div class="panel" data-panel="photos">
+
+  <div class="card">
+    <div class="card-title">Безлимит (photoslice)</div>
+    <div class="card-sub">Скрытое фото-хранилище Яндекса. Требует cookies (см. Настройка).</div>
+    <div class="actions">
+      <button class="primary" onclick="action('unlim_collect', this)">
+        <svg class="ico-sm"><use href="#i-search"/></svg>Собрать список
+      </button>
+      <button onclick="refreshPreview('unlim')">
+        <svg class="ico-sm"><use href="#i-refresh"/></svg>Обновить превью
+      </button>
+      <button class="danger" onclick="action('unlim_stop', this)">
+        <svg class="ico-sm"><use href="#i-stop"/></svg>Стоп
+      </button>
+    </div>
+    <div id="unlim-scan-status" style="display:none;margin-top:14px;padding:12px 14px;background:var(--surface2);border-radius:10px;border:0.5px solid var(--hairline-strong)">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div class="spinner"></div>
+        <div style="flex:1">
+          <div style="font-weight:500" id="unlim-scan-status-title">Собираю список…</div>
+          <div style="font-size:12.5px;color:var(--text-secondary);margin-top:2px" id="unlim-scan-status-sub">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="unlim-preview-card" style="display:none">
+    <div class="card-title">Что нашлось в безлимите</div>
+    <div class="card-sub">Выбери категории к скачиванию.</div>
+    <div class="list" id="unlim-preview-list"></div>
+    <div class="total-row">
+      <span>Выбрано</span>
+      <span class="num" id="unlim-preview-selected">—</span>
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="downloadSelected('unlim', this)">
+        <svg class="ico-sm"><use href="#i-arrow-down"/></svg>Скачать выбранное
+      </button>
+      <span class="muted" style="font-size:13px">Воркеров: <input type="number" id="unlim-workers" value="4" min="1" max="6" style="width:50px;text-align:center;padding:4px;background:var(--surface2);color:var(--text);border:0.5px solid var(--hairline-strong);border-radius:6px"></span>
+      <button class="danger" onclick="clearDb('unlim')" style="margin-left:auto">
+        <svg class="ico-sm"><use href="#i-stop"/></svg>Очистить и заново
+      </button>
+    </div>
+    <div id="unlim-download-banner" class="task-banner" style="display:none">
+      <div class="spinner"></div>
+      <div class="task-banner-body">
+        <div class="task-banner-title" id="unlim-download-title">Скачиваю безлимит…</div>
+        <div class="task-banner-sub" id="unlim-download-sub">—</div>
+      </div>
+      <div class="task-banner-time" id="unlim-download-time">—</div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="stat">
+      <div class="stat-label">Скачано</div>
+      <div class="stat-value num" id="u-downloaded" style="color:var(--green)">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">В очереди</div>
+      <div class="stat-value num" id="u-pending" style="color:var(--yellow)">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">В работе</div>
+      <div class="stat-value num" id="u-in-progress" style="color:var(--purple)">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Ошибок</div>
+      <div class="stat-value num" id="u-failed" style="color:var(--red)">0</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div class="section-label" style="margin:0">Консоль</div>
+      <button onclick="clearLog('unlim')" style="padding:4px 10px;font-size:11px;background:transparent;border:0.5px solid var(--hairline-strong);color:var(--text-secondary)">Очистить лог</button>
+    </div>
+    <div class="console" id="unlim-console"><div class="console-empty">жду запуска…</div></div>
+  </div>
+</div>
+
+<!-- ============= СОРТИРОВКА ============= -->
+<div class="panel" data-panel="organize">
+
+  <div class="card">
+    <div class="card-title">Финальная сортировка</div>
+    <div class="card-sub">
+      Разложит файлы по полочкам: Фото / Видео / Документы / Архивы / Программы / Аудио / Прочее.
+      Внутри Фото и Видео — подпапки по годам и месяцам. Дубликаты переместит в <code>_duplicates/</code>.
+    </div>
+
+    <label class="field-label">Папка</label>
+    <input type="text" id="organize-input" placeholder="Путь к папке с файлами, например: D:/Backup">
+
+    <div class="actions">
+      <button onclick="organize('report-only', this)">
+        <svg class="ico-sm"><use href="#i-search"/></svg>Только отчёт
+      </button>
+      <button class="success" onclick="organize('move', this)">
+        <svg class="ico-sm"><use href="#i-check"/></svg>Применить
+      </button>
+      <button class="danger" onclick="action('organize_stop', this)">
+        <svg class="ico-sm"><use href="#i-stop"/></svg>Стоп
+      </button>
+    </div>
+    <!-- Live status: organize -->
+    <div id="organize-banner" class="task-banner" style="display:none">
+      <div class="spinner"></div>
+      <div class="task-banner-body">
+        <div class="task-banner-title" id="organize-title">Готовится отчёт…</div>
+        <div class="task-banner-sub" id="organize-sub">—</div>
+      </div>
+      <div class="task-banner-time" id="organize-time">—</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div class="section-label" style="margin:0">Консоль</div>
+      <button onclick="clearLog('organize')" style="padding:4px 10px;font-size:11px;background:transparent;border:0.5px solid var(--hairline-strong);color:var(--text-secondary)">Очистить лог</button>
+    </div>
+    <div class="console" id="organize-console"><div class="console-empty">жду запуска…</div></div>
+  </div>
+</div>
+
+<footer>
+  <span class="author" style="font-size:14px">by Davron</span> · обновляется каждые 1.5 сек
+</footer>
+
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ────── helpers ──────
+function human(b){
+  if(!b) return '0 B';
+  const u=['B','KB','MB','GB','TB']; let i=0,n=b;
+  while(n>=1024&&i<u.length-1){n/=1024;i++}
+  return n.toFixed(n>=10||i===0?1:2)+' '+u[i];
+}
+function dur(s){
+  if(s==null||s!==s) return '—';
+  s=Math.floor(s);
+  const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), ss=s%60;
+  if(h>0) return `${h}ч ${String(m).padStart(2,'0')}м`;
+  if(m>0) return `${m}м ${String(ss).padStart(2,'0')}с`;
+  return `${ss}с`;
+}
+function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function toast(msg, type='ok'){
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.className=type;
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'), 3000);
+}
+
+// ────── tabs ──────
+document.querySelectorAll('.tab').forEach(t=>{
+  t.onclick=()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    document.querySelector(`.panel[data-panel="${t.dataset.tab}"]`).classList.add('active');
+    // При переходе на диск/безлимит — подтянем превью
+    if(t.dataset.tab === 'disk') refreshPreview('disk');
+    if(t.dataset.tab === 'photos') refreshPreview('unlim');
+  };
+});
+
+// ────── Setup actions ──────
+function toggleTokenView(){
+  const i=document.getElementById('token-input');
+  i.type = i.type==='password'?'text':'password';
+}
+
+let _verifiedToken = null;     // если совпадает с input → можно сохранять
+let _verifiedCookies = null;   // массив проверенных
+
+document.addEventListener('DOMContentLoaded', ()=>{
+  // Сбрасываем верификацию при изменении input
+  const tokIn = document.getElementById('token-input');
+  if(tokIn){
+    tokIn.addEventListener('input', ()=>{
+      if(tokIn.value.trim() !== _verifiedToken){
+        document.getElementById('btn-save-token').disabled = true;
+      } else {
+        document.getElementById('btn-save-token').disabled = false;
+      }
+    });
+  }
+  const ckIn = document.getElementById('cookies-input');
+  if(ckIn){
+    ckIn.addEventListener('input', ()=>{
+      _verifiedCookies = null;
+      document.getElementById('btn-save-cookies').disabled = true;
+    });
+  }
+});
+
+async function testToken(){
+  const tok=document.getElementById('token-input').value.trim();
+  if(!tok){toast('Введи токен','err');return}
+  const r=await fetch('/api/config/token/check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok})});
+  const d=await r.json();
+  if(d.ok){
+    _verifiedToken = tok;
+    document.getElementById('btn-save-token').disabled = false;
+    toast(`Токен валиден: ${d.login} · ${human(d.used)} занято`, 'ok');
+  } else {
+    _verifiedToken = null;
+    document.getElementById('btn-save-token').disabled = true;
+    toast('Токен невалиден: '+d.msg, 'err');
+  }
+}
+
+async function saveToken(){
+  const tok=document.getElementById('token-input').value.trim();
+  if(!tok){toast('Пусто','err');return}
+  if(_verifiedToken !== tok){
+    toast('Сначала «Проверить»','err'); return;
+  }
+  const r=await fetch('/api/config/token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok})});
+  const d=await r.json();
+  if(d.check?.ok){
+    toast('Сохранено: '+d.check.login,'ok');
+    document.getElementById('token-input').value='';
+    _verifiedToken = null;
+    document.getElementById('btn-save-token').disabled = true;
+  } else {
+    toast(d.check?.msg||'Ошибка','err');
+  }
+  refresh();
+}
+
+async function clearToken(){
+  if(!confirm('Удалить сохранённый токен?')) return;
+  try {
+    const r = await fetch('/api/config/token/clear',{method:'POST'});
+    const d = await r.json();
+    toast(d.ok===false ? 'Ошибка удаления' : 'Удалено', d.ok===false?'err':'ok');
+  } catch(e){ toast('Сеть: '+e.message,'err') }
+  refresh();
+}
+
+async function saveDir(){
+  const dir=document.getElementById('dir-input').value.trim();
+  if(!dir){toast('Пусто','err');return}
+  const r=await fetch('/api/config/download_dir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({download_dir:dir})});
+  const d=await r.json();
+  if(d.ok){toast('Сохранено','ok')} else {toast('Ошибка','err')}
+  refresh();
+}
+
+function _parseCookies(){
+  const txt=document.getElementById('cookies-input').value.trim();
+  if(!txt){toast('Пусто','err'); return null}
+  let parsed;
+  try { parsed = JSON.parse(txt) }
+  catch(e){ toast('Невалидный JSON: '+e.message,'err'); return null }
+  if(!Array.isArray(parsed)){
+    toast('Должен быть массив куки от Cookie-Editor','err');
+    return null;
+  }
+  return parsed;
+}
+
+async function testCookies(){
+  const arr = _parseCookies();
+  if(!arr) return;
+  try {
+    const r=await fetch('/api/cookies/check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cookies:arr})});
+    const d=await r.json();
+    if(d.ok){
+      _verifiedCookies = arr;
+      document.getElementById('btn-save-cookies').disabled = false;
+      toast('Куки валидны: '+d.msg,'ok');
+    } else {
+      _verifiedCookies = null;
+      document.getElementById('btn-save-cookies').disabled = true;
+      toast(d.msg||'Невалидны','err');
+    }
+  } catch(e){ toast('Сеть: '+e.message,'err') }
+}
+
+async function saveCookies(){
+  const arr = _parseCookies();
+  if(!arr) return;
+  if(!_verifiedCookies){
+    toast('Сначала «Проверить»','err'); return;
+  }
+  try {
+    const r=await fetch('/api/cookies',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cookies:arr})});
+    const d=await r.json();
+    if(d.ok){
+      toast(`Сохранено ${d.saved_count} куки`,'ok');
+      document.getElementById('cookies-input').value='';
+      _verifiedCookies = null;
+      document.getElementById('btn-save-cookies').disabled = true;
+    } else {
+      toast(d.check?.msg||'Ошибка','err');
+    }
+  } catch(e){toast('Сеть: '+e.message,'err')}
+  refresh();
+}
+
+async function clearCookies(){
+  if(!confirm('Удалить сохранённые куки?')) return;
+  try {
+    const r = await fetch('/api/cookies/clear',{method:'POST'});
+    const d = await r.json();
+    toast(d.ok===false ? (d.msg||'Ошибка удаления') : 'Удалено', d.ok===false?'err':'ok');
+  } catch(e){ toast('Сеть: '+e.message,'err') }
+  refresh();
+}
+
+// ────── Big start / pipeline ──────
+async function bigStart(){
+  const opts = {
+    workers: +document.getElementById('opt-workers').value || 4,
+    do_disk: document.getElementById('opt-disk').checked,
+    do_unlim: document.getElementById('opt-unlim').checked,
+  };
+  const r=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(opts)});
+  const d=await r.json();
+  if(d.ok===false){toast(d.msg,'err')} else {toast('Запущено','ok')}
+  refresh();
+}
+async function bigStop(){
+  if(!confirm('Остановить выполнение?')) return;
+  const r=await fetch('/api/start/stop',{method:'POST'});
+  const d=await r.json();
+  toast(d.msg, d.ok?'ok':'err');
+  refresh();
+}
+
+// ────── generic actions ──────
+async function action(name, btn){
+  const map={
+    disk_scan:['POST','/api/disk/scan'],
+    disk_stop:['POST','/api/disk/stop'],
+    unlim_collect:['POST','/api/unlim/collect'],
+    unlim_stop:['POST','/api/unlim/stop'],
+    organize_stop:['POST','/api/organize/stop'],
+  };
+  const [m,url] = map[name];
+
+  // Сразу показать живой отклик прежде чем ждать сервер
+  if(name === 'disk_scan' || name === 'unlim_collect'){
+    const kind = name === 'disk_scan' ? 'disk' : 'unlim';
+    const statusEl = document.getElementById(`${kind}-scan-status`);
+    const titleEl = document.getElementById(`${kind}-scan-status-title`);
+    const subEl = document.getElementById(`${kind}-scan-status-sub`);
+    statusEl.style.display = 'block';
+    titleEl.innerHTML = 'Запускаю сканирование…';
+    subEl.textContent = 'жду первый файл';
+    // Скролл к статусу для видимости
+    setTimeout(()=>statusEl.scrollIntoView({behavior:'smooth', block:'center'}), 50);
+  }
+
+  // Подсветить кнопку
+  if(btn){
+    if(!btn.dataset.origHtml) btn.dataset.origHtml = btn.innerHTML;
+    btn.classList.add('loading');
+    btn.innerHTML = '<div class="spinner spinner-sm" style="margin-right:6px"></div>Запуск…';
+    setTimeout(()=>{
+      btn.classList.remove('loading');
+      btn.innerHTML = btn.dataset.origHtml;
+    }, 1800);
+  }
+
+  try{
+    const r=await fetch(url,{method:m});
+    const d=await r.json();
+    if(d.ok===false){toast(d.msg||'Ошибка','err')} else {toast(d.msg||'Запущено','ok')}
+  } catch(e){
+    toast('Сеть: '+e.message,'err');
+  }
+  refresh();
+}
+
+async function organize(actionType, btn){
+  const inp=document.getElementById('organize-input').value.trim();
+  if(!inp){toast('Укажи папку','err');return}
+
+  // Сохраняем путь для показа в статусе
+  _organizePath = inp;
+  _organizeAction = actionType;
+
+  // Сразу показать баннер
+  const banner = document.getElementById('organize-banner');
+  banner.style.display = 'flex';
+  banner.className = 'task-banner';
+  document.getElementById('organize-title').textContent =
+    actionType === 'report-only' ? 'Готовится отчёт…' : 'Применяю сортировку…';
+  document.getElementById('organize-sub').innerHTML =
+    `Папка: <code>${esc(inp)}</code> · подсчёт MD5 может занять минуты`;
+  document.getElementById('organize-time').textContent = '0с';
+  setTimeout(()=>banner.scrollIntoView({behavior:'smooth', block:'center'}), 50);
+
+  if(btn){
+    if(!btn.dataset.origHtml) btn.dataset.origHtml = btn.innerHTML;
+    btn.classList.add('loading');
+    btn.innerHTML = '<div class="spinner spinner-sm" style="margin-right:6px"></div>Запуск…';
+    setTimeout(()=>{btn.classList.remove('loading'); btn.innerHTML = btn.dataset.origHtml}, 1800);
+  }
+
+  try {
+    const r=await fetch('/api/organize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input:inp, action:actionType})});
+    const d=await r.json();
+    toast(d.msg, d.ok===false?'err':'ok');
+  } catch(e){
+    toast('Сеть: '+e.message,'err');
+  }
+  refresh();
+}
+
+let _organizePath = '';
+let _organizeAction = 'report-only';
+let _diskDownloadPath = '';
+let _unlimDownloadPath = '';
+
+// ────── Preview / selective ──────
+const CAT_META = {
+  photos:    {label:'Фото',       icon:'i-photo',   cls:'bg-photo'},
+  videos:    {label:'Видео',      icon:'i-video',   cls:'bg-video'},
+  audio:     {label:'Аудио',      icon:'i-audio',   cls:'bg-audio'},
+  documents: {label:'Документы',  icon:'i-doc',     cls:'bg-doc'},
+  archives:  {label:'Архивы',     icon:'i-archive', cls:'bg-archive'},
+  programs:  {label:'Программы',  icon:'i-program', cls:'bg-program'},
+  other:     {label:'Прочее',     icon:'i-other',   cls:'bg-other'},
+};
+
+// По умолчанию выбраны фото и видео
+const DEFAULT_SELECTED = {photos:true, videos:true, audio:false, documents:false, archives:false, programs:false, other:false};
+let selectedCats = {disk:{...DEFAULT_SELECTED}, unlim:{...DEFAULT_SELECTED}};
+
+async function refreshPreview(kind){
+  const url = kind === 'disk' ? '/api/disk/preview' : '/api/unlim/preview';
+  const r = await fetch(url);
+  const d = await r.json();
+  const card = document.getElementById(`${kind}-preview-card`);
+  const list = document.getElementById(`${kind}-preview-list`);
+  if(d.empty){
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = 'block';
+  list.innerHTML = '';
+  const cats = d.categories || {};
+  for(const key of Object.keys(CAT_META)){
+    const info = cats[key];
+    if(!info || info.count === 0) continue;
+    const meta = CAT_META[key];
+    const isSelected = selectedCats[kind][key];
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `
+      <div class="row-icon ${meta.cls}"><svg class="icat"><use href="#${meta.icon}"/></svg></div>
+      <div class="row-body">
+        <div class="row-title">${meta.label}</div>
+        <div class="row-sub">${info.count.toLocaleString('ru')} файлов · ${human(info.bytes)}</div>
+      </div>
+      <div class="toggle ${isSelected?'on':''}" data-cat="${key}" data-kind="${kind}"></div>
+    `;
+    list.appendChild(row);
+  }
+  list.querySelectorAll('.toggle').forEach(t=>{
+    t.onclick = ()=>{
+      const cat = t.dataset.cat, k = t.dataset.kind;
+      selectedCats[k][cat] = !selectedCats[k][cat];
+      t.classList.toggle('on');
+      updateSelectedSummary(k, cats);
+    };
+  });
+  updateSelectedSummary(kind, cats);
+}
+
+function updateSelectedSummary(kind, cats){
+  let count = 0, bytes = 0;
+  for(const k of Object.keys(selectedCats[kind])){
+    if(selectedCats[kind][k] && cats[k]){
+      count += cats[k].count;
+      bytes += cats[k].bytes;
+    }
+  }
+  document.getElementById(`${kind}-preview-selected`).textContent =
+    `${count.toLocaleString('ru')} файлов · ${human(bytes)}`;
+}
+
+async function clearLog(kind){
+  // kind: 'disk' | 'unlim' | 'organize'
+  // Для unlim слоты unlim_collect + unlim_w* — используем wildcard
+  const slot = kind === 'unlim' ? 'unlim*' : kind;
+  try {
+    const r = await fetch(`/api/task/${encodeURIComponent(slot)}/clear_log`, {method:'POST'});
+    const d = await r.json();
+    // Локально сразу очистим консоль чтобы не ждать polling
+    const el = document.getElementById(`${kind}-console`);
+    if(el){
+      el.innerHTML = '<div class="console-empty">лог очищен</div>';
+      _lastConsole[`${kind}-console`] = '';
+    }
+    toast(d.cleared > 0 ? 'Лог очищен' : 'Нечего очищать', 'ok');
+  } catch(e){ toast('Сеть: '+e.message,'err') }
+}
+
+async function clearDb(kind){
+  const label = kind === 'disk' ? 'обычного диска' : 'безлимита';
+  if(!confirm(`Полностью очистить БД ${label}?\n\nЭто удалит:\n• список найденных файлов\n• статус скачивания\n• логи задач\n\nУже скачанные файлы на диске останутся.\n\nПродолжить?`)) return;
+  try {
+    const url = kind === 'disk' ? '/api/disk/clear' : '/api/unlim/clear';
+    const r = await fetch(url, {method:'POST'});
+    const d = await r.json();
+    if(d.ok){
+      toast(d.msg || 'Очищено','ok');
+      // Скрыть карточку превью
+      const card = document.getElementById(`${kind}-preview-card`);
+      if(card) card.style.display = 'none';
+      // Сбросить статус-баннеры
+      const statusEl = document.getElementById(`${kind}-scan-status`);
+      if(statusEl) statusEl.style.display = 'none';
+      const downloadBanner = document.getElementById(`${kind}-download-banner`);
+      if(downloadBanner) downloadBanner.style.display = 'none';
+    } else {
+      toast(d.msg || 'Ошибка','err');
+    }
+  } catch(e){ toast('Сеть: '+e.message,'err') }
+  refresh();
+}
+
+async function downloadSelected(kind, btn){
+  const cats = Object.keys(selectedCats[kind]).filter(k => selectedCats[kind][k]);
+  if(cats.length === 0){toast('Ничего не выбрано','err');return}
+  const workers = kind === 'unlim'
+    ? (+document.getElementById('unlim-workers').value || 4)
+    : 4;
+  const url = kind === 'disk' ? '/api/disk/download_selected' : '/api/unlim/download_selected';
+
+  // Сразу показать live-баннер
+  const banner = document.getElementById(`${kind}-download-banner`);
+  banner.style.display = 'flex';
+  banner.className = 'task-banner';
+  document.getElementById(`${kind}-download-title`).textContent =
+    kind === 'disk' ? 'Скачиваю обычный диск…' : 'Скачиваю безлимит…';
+  document.getElementById(`${kind}-download-sub`).innerHTML =
+    `Категории: ${cats.map(c => CAT_META[c]?.label || c).join(', ')} · потоков: ${workers}`;
+  document.getElementById(`${kind}-download-time`).textContent = '0с';
+  setTimeout(()=>banner.scrollIntoView({behavior:'smooth', block:'center'}), 50);
+
+  if(btn){
+    if(!btn.dataset.origHtml) btn.dataset.origHtml = btn.innerHTML;
+    btn.classList.add('loading');
+    btn.innerHTML = '<div class="spinner spinner-sm" style="margin-right:6px"></div>Запуск…';
+    setTimeout(()=>{btn.classList.remove('loading'); btn.innerHTML = btn.dataset.origHtml}, 1800);
+  }
+
+  try {
+    const r = await fetch(url, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({categories:cats, workers})});
+    const d = await r.json();
+    toast(d.ok===false ? (d.msg||'Ошибка') : 'Скачивание запущено', d.ok===false?'err':'ok');
+  } catch(e){toast('Сеть: '+e.message,'err')}
+  refresh();
+}
+
+// ────── Refresh ──────
+let _lastConsole = {};
+function setConsole(id, text){
+  const el = document.getElementById(id);
+  if(!el) return;
+  if(_lastConsole[id] === text) return;
+  _lastConsole[id] = text;
+  el.textContent = text || '';
+  if(!text) el.innerHTML = '<div class="console-empty">жду запуска…</div>';
+  el.scrollTop = el.scrollHeight;
+}
+
+// Отслеживание состояний задач — для авто-refreshPreview когда scan закончится
+let _prevTaskStates = {};
+
+function parseScanProgress(logTail){
+  // Извлекаем количество найденных файлов из tqdm-логов scan
+  if(!logTail || !logTail.length) return null;
+  const joined = logTail.join('\n');
+  // ищем "Найдено: <N>" или последнее "<N>file" в tqdm
+  let m = /Найдено\s*[:\s]\s*(\d+)/.exec(joined.split('\n').reverse().join('\n'));
+  if(m) return {count: +m[1], total: null};
+  m = /(\d+)\s*кл[аоу]?\.?\s*\/\s*(\d+)/.exec(joined);  // кластеры
+  if(m) return {count: +m[1], total: +m[2]};
+  m = /(\d+)file/.exec(joined.split('\n').reverse().join('\n'));
+  if(m) return {count: +m[1], total: null};
+  return null;
+}
+
+function parseDownloadProgress(logTail){
+  if(!logTail || !logTail.length) return null;
+  const lines = logTail.slice().reverse();
+  for(const l of lines){
+    // tqdm: "Файлы:  45%|████▌     | 1429/3157 [10:29<19:34,  1.47file/s]"
+    const m = /(\d+)\/(\d+)\s*\[/.exec(l);
+    if(m) return {done: +m[1], total: +m[2]};
+    // "[w1] batch 5: ✓ 250 files / 2.30 GB"
+    const m2 = /batch\s*(\d+).*?(\d+)\s*files\s*\/\s*([\d.]+)\s*GB/i.exec(l);
+    if(m2) return {batch: +m2[1], extra: `+${m2[2]} файлов · ${m2[3]} ГБ`};
+  }
+  return null;
+}
+
+function updateDownloadBanner(kind, task){
+  const banner = document.getElementById(`${kind}-download-banner`);
+  const title = document.getElementById(`${kind}-download-title`);
+  const sub = document.getElementById(`${kind}-download-sub`);
+  const time = document.getElementById(`${kind}-download-time`);
+  if(!banner) return;
+  if(!task){return}
+  // Не показываем download-баннер для scan — у scan свой статус
+  // Различаем по log_tail: если есть "scan" / "Обхожу" — это scan
+  const logTxt = (task.log_tail||[]).join(' ');
+  const isScan = /Обхожу|Найдено\s*\[/.test(logTxt);
+  if(isScan){
+    banner.style.display = 'none';
+    return;
+  }
+  if(task.running){
+    banner.style.display = 'flex';
+    banner.className = 'task-banner';
+    title.textContent = kind === 'disk' ? 'Скачиваю обычный диск…' : 'Скачиваю безлимит…';
+    const p = parseDownloadProgress(task.log_tail);
+    if(p && p.total){
+      sub.innerHTML = `${p.done.toLocaleString('ru')} / ${p.total.toLocaleString('ru')} файлов`;
+    } else if(p && p.extra){
+      sub.textContent = p.extra;
+    } else {
+      sub.textContent = 'качаю…';
+    }
+    time.textContent = dur(task.elapsed);
+  } else if(task.exit_code === 0){
+    banner.style.display = 'flex';
+    banner.className = 'task-banner done';
+    title.innerHTML = '<span style="color:var(--green)">Скачивание завершено</span>';
+    sub.textContent = 'все файлы на диске';
+    time.textContent = dur(task.elapsed);
+  } else if(isStopped(task.exit_code)){
+    banner.style.display = 'flex';
+    banner.className = 'task-banner stopped';
+    title.innerHTML = '<span style="color:var(--text-secondary)">Остановлено пользователем</span>';
+    sub.textContent = 'скачивание прервано';
+    time.textContent = dur(task.elapsed);
+  } else if(task.exit_code !== null){
+    banner.style.display = 'flex';
+    banner.className = 'task-banner err';
+    title.innerHTML = '<span style="color:var(--red)">Ошибка</span>';
+    sub.textContent = `код ${task.exit_code}`;
+    time.textContent = dur(task.elapsed);
+  }
+}
+
+function updateUnlimBanner(tasks){
+  // Агрегированный статус workers
+  const workers = Object.keys(tasks).filter(k=>k.startsWith('unlim_w'));
+  const banner = document.getElementById('unlim-download-banner');
+  if(!banner) return;
+  if(workers.length === 0) return;
+  const aliveWorkers = workers.filter(w=>tasks[w].running);
+  const title = document.getElementById('unlim-download-title');
+  const sub = document.getElementById('unlim-download-sub');
+  const time = document.getElementById('unlim-download-time');
+  if(aliveWorkers.length > 0){
+    banner.style.display = 'flex';
+    banner.className = 'task-banner';
+    title.textContent = `Скачиваю безлимит · ${aliveWorkers.length} воркеров`;
+    // Найдём последнюю batch-инфу
+    let last = '';
+    for(const w of workers){
+      const tail = tasks[w].log_tail || [];
+      for(const l of tail.slice().reverse()){
+        const m = /batch\s+(\d+):\s*✓\s*(\d+)\s*files\s*\/\s*([\d.]+)\s*GB/i.exec(l);
+        if(m){last = `последний batch w${w.replace('unlim_w','')}: ${m[2]} файлов, ${m[3]} ГБ`; break}
+      }
+      if(last) break;
+    }
+    sub.textContent = last || 'идёт скачивание архивов…';
+    const maxElapsed = Math.max(...aliveWorkers.map(w=>tasks[w].elapsed||0));
+    time.textContent = dur(maxElapsed);
+  } else {
+    // Все воркеры закончили
+    const allOk = workers.every(w=>tasks[w].exit_code === 0);
+    const anyStopped = workers.some(w=>isStopped(tasks[w].exit_code));
+    if(allOk){
+      banner.style.display = 'flex';
+      banner.className = 'task-banner done';
+      title.innerHTML = '<span style="color:var(--green)">Безлимит скачан</span>';
+      sub.textContent = `${workers.length} воркеров завершили работу`;
+    } else if(anyStopped){
+      banner.style.display = 'flex';
+      banner.className = 'task-banner stopped';
+      title.innerHTML = '<span style="color:var(--text-secondary)">Остановлено пользователем</span>';
+      sub.textContent = `воркеры прерваны`;
+    } else {
+      banner.style.display = 'flex';
+      banner.className = 'task-banner err';
+      title.innerHTML = '<span style="color:var(--red)">Ошибка воркеров</span>';
+      sub.textContent = `проверь консоль`;
+    }
+  }
+}
+
+function updateOrganizeBanner(task){
+  const banner = document.getElementById('organize-banner');
+  if(!banner) return;
+  if(!task){return}
+  const title = document.getElementById('organize-title');
+  const sub = document.getElementById('organize-sub');
+  const time = document.getElementById('organize-time');
+  if(task.running){
+    banner.style.display = 'flex';
+    banner.className = 'task-banner';
+    title.textContent = _organizeAction === 'report-only' ? 'Готовится отчёт…' : 'Применяю сортировку…';
+    // Парсим прогресс из stdout
+    const log = (task.log_tail||[]).slice().reverse();
+    let info = `Папка: <code>${esc(_organizePath)}</code>`;
+    for(const l of log){
+      const m1 = /progress:\s*(\d+)\/(\d+)/.exec(l);
+      if(m1){info += ` · MD5 ${m1[1]}/${m1[2]}`; break}
+      const m2 = /Найдено:\s*(\d+)/.exec(l);
+      if(m2){info += ` · найдено ${m2[1]} файлов`; break}
+      const m3 = /Перемещаю\s*(\d+)/.exec(l);
+      if(m3){info += ` · перемещаю ${m3[1]}`; break}
+    }
+    sub.innerHTML = info;
+    time.textContent = dur(task.elapsed);
+  } else if(task.exit_code === 0){
+    banner.style.display = 'flex';
+    banner.className = 'task-banner done';
+    title.innerHTML = _organizeAction === 'report-only'
+      ? '<span style="color:var(--green)">Отчёт готов</span>'
+      : '<span style="color:var(--green)">Сортировка применена</span>';
+    sub.innerHTML = `Папка: <code>${esc(_organizePath)}</code>`;
+    time.textContent = dur(task.elapsed);
+  } else if(isStopped(task.exit_code)){
+    banner.style.display = 'flex';
+    banner.className = 'task-banner stopped';
+    title.innerHTML = '<span style="color:var(--text-secondary)">Остановлено пользователем</span>';
+    sub.innerHTML = `Папка: <code>${esc(_organizePath)}</code>`;
+    time.textContent = dur(task.elapsed);
+  } else if(task.exit_code !== null){
+    banner.style.display = 'flex';
+    banner.className = 'task-banner err';
+    title.innerHTML = '<span style="color:var(--red)">Ошибка</span>';
+    sub.textContent = `код ${task.exit_code}`;
+    time.textContent = dur(task.elapsed);
+  }
+}
+
+function updateActiveTasksHeader(tasks, pipeline){
+  const el = document.getElementById('active-tasks');
+  const txt = document.getElementById('active-tasks-text');
+  const active = [];
+  for(const k of Object.keys(tasks)){
+    if(tasks[k].running) active.push(k);
+  }
+  if(pipeline.running) active.push('pipeline');
+  if(active.length > 0){
+    el.classList.add('show');
+    txt.textContent = active.length === 1
+      ? `1 задача активна`
+      : `${active.length} задач активны`;
+  } else {
+    el.classList.remove('show');
+  }
+}
+
+function isStopped(code){
+  // Коды, означающие нормальную остановку (SIGTERM/SIGINT), не ошибку
+  return code === -15 || code === -2 || code === 143 || code === 130 || code === 15 || code === 1;
+}
+
+function updateScanStatus(kind, task, lastTotal){
+  const statusEl = document.getElementById(`${kind}-scan-status`);
+  const titleEl = document.getElementById(`${kind}-scan-status-title`);
+  const subEl = document.getElementById(`${kind}-scan-status-sub`);
+  if(!statusEl) return;
+  if(task && task.running){
+    statusEl.style.display = 'block';
+    statusEl.className = 'task-banner';
+    const word = kind === 'disk' ? 'диск' : 'photoslice';
+    titleEl.textContent = `Сканирую ${word}…`;
+    const p = parseScanProgress(task.log_tail);
+    if(p && p.total){
+      subEl.textContent = `${p.count.toLocaleString('ru')} / ${p.total.toLocaleString('ru')} · ${dur(task.elapsed)}`;
+    } else if(p){
+      subEl.textContent = `найдено: ${p.count.toLocaleString('ru')} · ${dur(task.elapsed)}`;
+    } else {
+      subEl.textContent = `работает ${dur(task.elapsed)}…`;
+    }
+  } else if(task && task.exit_code === 0){
+    // Только что закончилось успешно
+    statusEl.style.display = 'block';
+    statusEl.className = 'task-banner done';
+    titleEl.innerHTML = '<span style="color:var(--green)">Готово</span>';
+    if(lastTotal) subEl.textContent = `найдено: ${lastTotal.toLocaleString('ru')} файлов`;
+    else subEl.textContent = 'сканирование завершено';
+  } else if(task && isStopped(task.exit_code)){
+    // Пользователь нажал «Стоп»
+    statusEl.style.display = 'block';
+    statusEl.className = 'task-banner stopped';
+    titleEl.innerHTML = '<span style="color:var(--text-secondary)">Остановлено пользователем</span>';
+    if(lastTotal) subEl.textContent = `было найдено: ${lastTotal.toLocaleString('ru')} файлов`;
+    else subEl.textContent = 'сканирование прервано';
+  } else if(task && task.exit_code !== null && task.exit_code !== 0){
+    statusEl.style.display = 'block';
+    statusEl.className = 'task-banner err';
+    titleEl.innerHTML = '<span style="color:var(--red)">Ошибка</span>';
+    subEl.textContent = `код ${task.exit_code}`;
+  } else {
+    statusEl.style.display = 'none';
+  }
+}
+
+async function refresh(){
+  try {
+    const r=await fetch('/api/status');
+    const s=await r.json();
+
+    // Pills
+    const pt=document.getElementById('pill-token');
+    pt.className = 'pill '+(s.token.ok?'ok':'err');
+    document.getElementById('pill-token-text').textContent = s.token.ok ? `токен · ${s.token.login}` : 'нет токена';
+
+    const pc=document.getElementById('pill-cookies');
+    pc.className = 'pill '+(s.cookies.ok?'ok':'err');
+    document.getElementById('pill-cookies-text').textContent = s.cookies.ok ? 'cookies · OK' : 'нет cookies';
+
+    // Setup checks
+    const ct=document.getElementById('check-token');
+    ct.textContent = s.token.ok?`OK — ${s.token.login}`:s.token.msg;
+    ct.className = 'badge '+(s.token.ok?'ok':'err');
+    const cc=document.getElementById('check-cookies');
+    cc.textContent = s.cookies.msg;
+    cc.className = 'badge '+(s.cookies.ok?'ok':'err');
+
+    // Сохранённый токен — карточка
+    const savedTokenCard = document.getElementById('saved-token-card');
+    if(s.config.token_masked && s.token.ok){
+      savedTokenCard.style.display = 'block';
+      document.getElementById('saved-token-login').textContent = s.token.login || '—';
+      document.getElementById('saved-token-masked').textContent = s.config.token_masked;
+    } else {
+      savedTokenCard.style.display = 'none';
+    }
+
+    // Сохранённые куки
+    const savedCkCard = document.getElementById('saved-cookies-card');
+    if(s.cookies.count > 0){
+      savedCkCard.style.display = 'block';
+      document.getElementById('saved-cookies-count').textContent =
+        s.cookies.ok
+          ? `${s.cookies.count} куки, ключевые на месте`
+          : `${s.cookies.count} куки, но: ${s.cookies.msg}`;
+    } else {
+      savedCkCard.style.display = 'none';
+    }
+
+    const dirIn=document.getElementById('dir-input');
+    if(!dirIn.value && s.config.download_dir) dirIn.placeholder=`текущее: ${s.config.download_dir}`;
+
+    // Pipeline
+    const pl = s.pipeline || {};
+    const card = document.getElementById('pipeline-card');
+    const startBtn = document.getElementById('big-start');
+    const stopBtn = document.getElementById('big-stop');
+    const ps = document.getElementById('pipeline-state');
+    if(pl.running){
+      card.style.display='block';
+      startBtn.style.display='none';
+      stopBtn.style.display='inline-flex';
+      ps.textContent = 'идёт'; ps.className = 'badge run';
+    } else {
+      startBtn.style.display='inline-flex';
+      stopBtn.style.display='none';
+      if(pl.state === 'done'){
+        card.style.display='block';
+        ps.textContent='готово'; ps.className='badge ok';
+      } else if(pl.state === 'failed'){
+        card.style.display='block';
+        ps.textContent='ошибка'; ps.className='badge err';
+      } else if(pl.state === 'stopped'){
+        card.style.display='block';
+        ps.textContent='остановлено пользователем'; ps.className='badge';
+      } else {
+        card.style.display='none';
+      }
+    }
+    document.getElementById('pipeline-step').textContent = pl.step || '—';
+    document.getElementById('pipeline-time').textContent = dur(pl.elapsed);
+    setConsole('pipeline-console', (pl.log||[]).join('\n'));
+
+    // Disk
+    const dd=s.disk.db;
+    document.getElementById('home-disk-done').textContent =
+      (dd.downloaded||0).toLocaleString('ru') + (dd.total ? ` / ${dd.total.toLocaleString('ru')}` : '');
+    document.getElementById('home-disk-info').textContent =
+      `${human(dd.bytes_done||0)} из ${human(dd.bytes_total||0)}`;
+    const hdpct = dd.total ? ((dd.downloaded+dd.skipped)/dd.total*100) : 0;
+    document.getElementById('home-disk-bar').style.width = hdpct + '%';
+
+    document.getElementById('s-downloaded').textContent=(dd.downloaded||0).toLocaleString('ru');
+    document.getElementById('s-skipped').textContent=(dd.skipped||0).toLocaleString('ru');
+    document.getElementById('s-pending').textContent=(dd.pending||0).toLocaleString('ru');
+    document.getElementById('s-failed').textContent=(dd.failed||0).toLocaleString('ru');
+
+    const dRecent=document.getElementById('disk-recent');
+    if(dd.recent&&dd.recent.length){
+      dRecent.innerHTML=dd.recent.map(r=>{
+        const name=(r.path||'').split('/').pop();
+        return `<div class="recent-item" title="${esc(r.path)}"><span class="name">${esc(name)}</span></div>`;
+      }).join('');
+    } else {
+      dRecent.innerHTML='<div class="muted">пока пусто</div>';
+    }
+
+    // Unlim
+    const ud=s.unlim.db;
+    document.getElementById('home-unlim-done').textContent =
+      (ud.downloaded||0).toLocaleString('ru') + (ud.total ? ` / ${ud.total.toLocaleString('ru')}` : '');
+    document.getElementById('home-unlim-info').textContent =
+      `${human(ud.bytes_done||0)} из ${human(ud.bytes_total||0)}`;
+    const hupct = ud.total ? (ud.downloaded/ud.total*100) : 0;
+    document.getElementById('home-unlim-bar').style.width = hupct + '%';
+
+    document.getElementById('u-downloaded').textContent=(ud.downloaded||0).toLocaleString('ru');
+    document.getElementById('u-pending').textContent=(ud.pending||0).toLocaleString('ru');
+    document.getElementById('u-in-progress').textContent=(ud.in_progress||0).toLocaleString('ru');
+    document.getElementById('u-failed').textContent=(ud.failed||0).toLocaleString('ru');
+
+    // Consoles + scan status tracking
+    const tasks = s.tasks || {};
+    const diskTask = tasks.disk;
+    const unlimTask = tasks.unlim_collect;
+
+    // Live-статус сканирования
+    updateScanStatus('disk', diskTask, dd.total);
+    updateScanStatus('unlim', unlimTask, ud.total);
+
+    // Авто-refreshPreview при завершении задач
+    function detectDone(slot, kind){
+      const prev = _prevTaskStates[slot];
+      const cur = tasks[slot];
+      if(!cur) return;
+      const wasRunning = prev && prev.running;
+      const isRunning = cur.running;
+      if(wasRunning && !isRunning && cur.exit_code === 0){
+        setTimeout(()=>refreshPreview(kind), 500);
+        toast(`Сканирование завершено — обновляю список`, 'ok');
+      }
+      _prevTaskStates[slot] = {running: cur.running, exit_code: cur.exit_code};
+    }
+    detectDone('disk', 'disk');
+    detectDone('unlim_collect', 'unlim');
+
+    // Обновление баннеров download / organize
+    updateDownloadBanner('disk', diskTask);
+    updateUnlimBanner(tasks);
+    updateOrganizeBanner(tasks.organize);
+
+    // Индикатор активных задач в шапке
+    updateActiveTasksHeader(tasks, pl);
+
+    setConsole('disk-console', (tasks.disk?.log_tail||[]).join('\n'));
+    const unlimLog = [];
+    for (const k of Object.keys(tasks)){
+      if(k.startsWith('unlim')){
+        (tasks[k].log_tail||[]).forEach(l=>unlimLog.push(`[${k}] ${l}`));
+      }
+    }
+    unlimLog.sort();
+    setConsole('unlim-console', unlimLog.slice(-100).join('\n'));
+    setConsole('organize-console', (tasks.organize?.log_tail||[]).join('\n'));
+
+  } catch(e){
+    console.error('refresh', e);
+    // Показываем что сервер недоступен (не чаще 1 раза в 10 циклов = 15 сек)
+    _refreshErrCount = (_refreshErrCount || 0) + 1;
+    if(_refreshErrCount === 1 || _refreshErrCount % 10 === 0){
+      const pt = document.getElementById('pill-token');
+      pt.className = 'pill err';
+      document.getElementById('pill-token-text').textContent = 'сервер недоступен';
+      if(_refreshErrCount === 1) toast('Сервер не отвечает — окно cmd закрыто?', 'err');
+    }
+    return;
+  }
+  _refreshErrCount = 0;
+}
+let _refreshErrCount = 0;
+
+if (window.location.protocol === 'file:') {
+  const warn = document.getElementById('file-protocol-warning');
+  if (warn) warn.style.display = 'block';
+}
+
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>
