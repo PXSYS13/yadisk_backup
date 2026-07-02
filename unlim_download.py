@@ -218,6 +218,11 @@ def fetch_cluster_resources(s, sk, uid, psid, cluster_rows: list[dict]) -> int:
                 fid = f.get("id") or f.get("resource_id")
                 if not fid:
                     continue
+                # photoslice отдаёт и удалённые фото (корзина) — их bulk-download
+                # НЕ качает (HTTP 409 BulkDownloadNoFilesToDownload), а один
+                # trash-путь роняет весь батч. Не пишем их в БД вообще.
+                if fid.startswith("/trash"):
+                    continue
                 name = f.get("name") or fid.rsplit("/", 1)[-1]
                 size = int(f.get("size", 0) or 0)
                 md5 = f.get("md5") or f.get("etag")
