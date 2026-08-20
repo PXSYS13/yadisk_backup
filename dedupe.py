@@ -134,8 +134,8 @@ def main() -> int:
                 len(r["remote_path"]),
             )
 
+        # members_sorted[0] — тот, кого оставляем; остальные помечаем дублями
         members_sorted = sorted(members, key=keep_priority)
-        keeper = members_sorted[0]
         for dup in members_sorted[1:]:
             # Помечаем дубль skipped (но только если он pending — downloaded не трогаем)
             if dup["status"] == "pending":

@@ -153,7 +153,7 @@ def scan(root: str) -> list[dict]:
 
 
 def compute_md5(files: list[dict]):
-    print(f"\n[2/4] MD5 для подозреваемых...")
+    print("\n[2/4] MD5 для подозреваемых...")
     by_size = defaultdict(list)
     for f in files:
         by_size[f["size"]].append(f)
@@ -203,7 +203,7 @@ def main():
     compute_md5(files)
     dups = find_dup_paths(files)
 
-    print(f"\n[3/4] Раскладываю...")
+    print("\n[3/4] Раскладываю...")
     plan = []
     cat_n = Counter()
     cat_b = Counter()
@@ -221,11 +221,11 @@ def main():
             cat_b[cat] += f["size"]
 
     total_b = sum(f["size"] for f in files)
-    print(f"\n[4/4] СТАТИСТИКА:")
+    print("\n[4/4] СТАТИСТИКА:")
     print(f"  Всего:           {len(files)} ({human(total_b)})")
     print(f"  Дубликатов:      {len(dups)} ({human(dup_b)})")
     print(f"  Уникальных:      {len(files) - len(dups)}")
-    print(f"\n  По полкам:")
+    print("\n  По полкам:")
     for cat in [DIR_PHOTO, DIR_VIDEO, DIR_AUDIO, DIR_DOC, DIR_ARCHIVE,
                 DIR_PROGRAM, DIR_OTHER]:
         if cat_n[cat]:
@@ -266,7 +266,7 @@ def main():
         except OSError:
             pass
 
-    print(f"\n✅ ГОТОВО:")
+    print("\n✅ ГОТОВО:")
     print(f"  Перемещено: {moved}")
     print(f"  Ошибок:     {err}")
     print(f"  Удалено пустых папок: {cleaned}")
