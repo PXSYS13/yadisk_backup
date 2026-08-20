@@ -134,14 +134,20 @@ yadisk_backup/
 ├── state.py              ← SQLite-трекер прогресса
 ├── utils.py              ← Утилиты (MD5, санитизация путей)
 ├── dedupe.py             ← Помечает дубли и не-медиа в БД
+├── watch.py / watch.bat  ← Живой прогресс в консоли
+├── stats.bat             ← Быстрая статистика по БД
 │
 ├── unlim_download.py     ← Сбор списка photoslice через куки
 ├── unlim_worker.py       ← Параллельный воркер скачивания безлимита
 ├── organize.py           ← Финальная сортировка по полочкам
 │
+├── tests/                ← pytest: санитизация путей, zip-slip, БД, ретраи
+├── .github/workflows/    ← CI: ruff + pytest на Windows и Linux
+│
 ├── .env.example          ← Шаблон конфига (создаётся при первом сохранении настроек)
 ├── .gitignore
-├── requirements.txt
+├── requirements.txt      ← Зависимости приложения
+├── requirements-dev.txt  ← Зависимости для тестов
 ├── README.md
 └── logs/                 ← логи работы
 ```
@@ -161,9 +167,11 @@ python main.py stats                    # статистика
 
 # Безлимит (нужен cookies.json)
 python unlim_download.py --collect      # собрать список
+python unlim_download.py --status       # статус очереди
 python unlim_worker.py --id 1           # запустить воркер
 python unlim_worker.py --id 2           # ещё один параллельно
 # ...
+python unlim_download.py --retry-failed # вернуть упавшие в очередь
 
 # Сортировка
 python organize.py --input "D:/Backup"                  # отчёт
@@ -242,10 +250,22 @@ yadisk>=3.4.0       # официальный SDK Яндекс.Диска
 tqdm>=4.66.0        # прогресс-бары для CLI
 python-dotenv       # .env файлы
 tenacity>=8.2.0     # retry с экспонентой
-requests            # HTTP для cookie-режима
+requests>=2.31.0    # HTTP для cookie-режима
 fastapi>=0.115.0    # web-сервер
 uvicorn>=0.32.0     # ASGI runner
 ```
+
+---
+
+## Разработка
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest -q            # тесты
+ruff check --select F,E9 .   # линтер
+```
+
+Те же две команды гоняет CI на каждый push и pull request — на Windows и Linux, Python 3.10 и 3.13.
 
 ---
 
