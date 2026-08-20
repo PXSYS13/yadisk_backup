@@ -10,8 +10,14 @@ from __future__ import annotations
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, Iterator, Optional
+
+
+def _utc_now() -> str:
+    """Текущее время UTC в том же формате, что писали раньше (utcnow() устарел)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -110,7 +116,7 @@ class State:
                        downloaded_at = ?
                  WHERE remote_path = ?
                 """,
-                (local_path, datetime.utcnow().isoformat(timespec="seconds"), remote_path),
+                (local_path, _utc_now(), remote_path),
             )
 
     def mark_skipped(self, remote_path: str, local_path: str) -> None:
@@ -124,7 +130,7 @@ class State:
                        downloaded_at = ?
                  WHERE remote_path = ?
                 """,
-                (local_path, datetime.utcnow().isoformat(timespec="seconds"), remote_path),
+                (local_path, _utc_now(), remote_path),
             )
 
     def mark_failed(self, remote_path: str, error: str) -> None:

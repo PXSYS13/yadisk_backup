@@ -918,7 +918,7 @@ function dur(s){
   if(m>0) return `${m}м ${String(ss).padStart(2,'0')}с`;
   return `${ss}с`;
 }
-function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function toast(msg, type='ok'){
   const t=document.getElementById('toast');
   t.textContent=msg; t.className=type;

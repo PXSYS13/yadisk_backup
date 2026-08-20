@@ -24,13 +24,15 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from dotenv import load_dotenv, set_key
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from utils import sqlite_ro_uri
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -142,6 +144,12 @@ class Task:
                     self.log.append(line)
         except Exception:
             pass
+        finally:
+            # Забираем код возврата, иначе на Linux/macOS остаётся зомби-процесс
+            try:
+                self.proc.wait(timeout=10)
+            except Exception:
+                pass
 
     def alive(self) -> bool:
         return self.proc.poll() is None
@@ -421,8 +429,9 @@ def db_stats(db_file: Path, table: str = "files",
         return {"total": 0, "pending": 0, "downloaded": 0, "skipped": 0,
                 "failed": 0, "in_progress": 0,
                 "bytes_total": 0, "bytes_done": 0, "recent": []}
+    c = None
     try:
-        c = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True, timeout=30)
+        c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
         c.row_factory = sqlite3.Row
         out = {"total": 0, "pending": 0, "downloaded": 0, "skipped": 0,
                "failed": 0, "in_progress": 0,
@@ -446,15 +455,19 @@ def db_stats(db_file: Path, table: str = "files",
         ))
         out["recent"] = [{"path": r["path"], "status": r["status"],
                           "size": r["size"]} for r in recent]
-        c.close()
         return out
     except sqlite3.Error as e:
         return {"error": str(e)}
+    finally:
+        if c is not None:
+            c.close()
 
 
 # Кэш для тяжёлых операций (polling /api/status каждые 1.5 сек)
 _local_size_cache: dict[str, dict] = {}
-_LOCAL_SIZE_TTL = 10  # секунд
+# 60 сек, а не 10: обход папки — это диск, а по нему в это же время идёт
+# скачивание. /api/status опрашивается каждые 1.5 сек, так что дёшево тут важно.
+_LOCAL_SIZE_TTL = 60  # секунд
 
 
 def local_size(path: str) -> dict:
@@ -475,10 +488,12 @@ def local_size(path: str) -> dict:
         return cached["data"]
 
     n = 0; b = 0
+    partial = False
     deadline = now + 2.0  # макс 2 секунды на обход
     try:
         for dp, _, fns in os.walk(path):
             if time.time() > deadline:
+                partial = True  # не досчитали — честно скажем UI
                 break
             for fn in fns:
                 try:
@@ -489,7 +504,7 @@ def local_size(path: str) -> dict:
     except OSError:
         pass
 
-    data = {"files": n, "bytes": b}
+    data = {"files": n, "bytes": b, "partial": partial}
     # Ограничиваем размер кэша — храним максимум 4 пути
     if len(_local_size_cache) >= 4 and path not in _local_size_cache:
         # удалить самый старый
@@ -699,8 +714,9 @@ def preview_db(db_file: Path, table: str, id_col: str) -> dict:
     """Группирует файлы в БД по категориям."""
     if not db_file.exists():
         return {"empty": True, "categories": {}}
+    c = None
     try:
-        c = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True, timeout=30)
+        c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
         summary: dict[str, dict] = {
             k: {"count": 0, "bytes": 0, "label": CATEGORY_LABELS[k]}
             for k in list(CATEGORY_LABELS.keys())
@@ -714,10 +730,12 @@ def preview_db(db_file: Path, table: str, id_col: str) -> dict:
             summary[cat]["count"] += 1
             summary[cat]["bytes"] += row[1]
             total += 1
-        c.close()
         return {"empty": total == 0, "total": total, "categories": summary}
     except sqlite3.Error as e:
         return {"empty": True, "error": str(e)}
+    finally:
+        if c is not None:
+            c.close()
 
 
 def filter_to_categories(db_file: Path, table: str, id_col: str,

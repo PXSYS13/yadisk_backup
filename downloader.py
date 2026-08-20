@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,7 +22,7 @@ from typing import Callable, Iterator, Optional
 import yadisk
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -41,49 +42,46 @@ log = logging.getLogger("yadisk_backup")
 # Скип-листы для путей которые НИКОГДА не качаем
 SKIP_PATH_PREFIXES = ("disk:/Корзина", "disk:/Trash", "/Корзина", "/Trash")
 
-# Какие исключения yadisk считаем "повторяемыми"
-_RETRYABLE_EXC = (
-    yadisk.exceptions.RetriableYaDiskError
-    if hasattr(yadisk.exceptions, "RetriableYaDiskError")
-    else yadisk.exceptions.YaDiskError,
-)
-
 
 # ── retry-обёртка для сетевых вызовов ───────────────────────────────────────
 
 
+# Ошибки, повторять которые бессмысленно: токен не станет валидным,
+# а удалённый файл не появится, сколько ни жди.
+NON_RETRYABLE = (
+    yadisk.exceptions.UnauthorizedError,
+    yadisk.exceptions.ForbiddenError,
+    yadisk.exceptions.PathNotFoundError,
+)
+
+# Пауза при 429 — Яндекс просит подождать, экспонента с 1 секунды тут не поможет
+RATE_LIMIT_WAIT_SEC = 60.0
+
+
 def _is_retryable(exc: BaseException) -> bool:
     """Решает, стоит ли retry-ить исключение."""
-    # Эти точно не имеет смысла повторять
-    non_retryable = (
-        yadisk.exceptions.UnauthorizedError,
-        yadisk.exceptions.ForbiddenError,
-        yadisk.exceptions.PathNotFoundError,
-    )
-    if isinstance(exc, non_retryable):
+    if isinstance(exc, NON_RETRYABLE):
         return False
-    # 429 ловим отдельно — спим минуту
-    if isinstance(exc, yadisk.exceptions.TooManyRequestsError):
-        log.warning("Поймали 429 TooManyRequests — спим 60 секунд")
-        time.sleep(60)
-        return True
     if isinstance(exc, yadisk.exceptions.YaDiskError):
         return True
-    if isinstance(exc, (OSError, ConnectionError, TimeoutError)):
-        return True
-    return False
+    return isinstance(exc, (OSError, ConnectionError, TimeoutError))
+
+
+_wait_exponential = wait_exponential(multiplier=1, min=1, max=60)
+
+
+def _wait_policy(retry_state) -> float:
+    """429 → ждём минуту, остальное → экспонента."""
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    if isinstance(exc, yadisk.exceptions.TooManyRequestsError):
+        log.warning("Поймали 429 TooManyRequests — жду %.0f сек", RATE_LIMIT_WAIT_SEC)
+        return RATE_LIMIT_WAIT_SEC
+    return _wait_exponential(retry_state)
 
 
 _retry = retry(
-    retry=retry_if_exception_type(
-        (
-            yadisk.exceptions.YaDiskError,
-            OSError,
-            ConnectionError,
-            TimeoutError,
-        )
-    ),
-    wait=wait_exponential(multiplier=1, min=1, max=60),
+    retry=retry_if_exception(_is_retryable),
+    wait=_wait_policy,
     stop=stop_after_attempt(5),
     reraise=True,
 )
@@ -315,7 +313,7 @@ def _download_one(
     try:
         _download_with_retry(client, job.remote_path, local_path)
     except yadisk.exceptions.TooManyRequestsError as e:
-        # Уже спали в _is_retryable, но если tenacity сдался — фиксируем как fail
+        # Все попытки с паузами исчерпаны — фиксируем как fail
         dur = int((time.monotonic() - start) * 1000)
         return DownloadResult(job, "failed", None, 0, f"429 TooManyRequests: {e}", dur)
     except yadisk.exceptions.PathNotFoundError as e:
@@ -339,6 +337,9 @@ def _download_one(
 
 # Каждому потоку — свой клиент. Шарить yadisk.Client между потоками небезопасно.
 _thread_local = threading.local()
+# Реестр всех созданных клиентов — чтобы закрыть сокеты после остановки пула
+_all_clients: list[yadisk.Client] = []
+_all_clients_lock = threading.Lock()
 
 
 def _get_thread_client(token: str) -> yadisk.Client:
@@ -346,17 +347,23 @@ def _get_thread_client(token: str) -> yadisk.Client:
     if cli is None:
         cli = yadisk.Client(token=token)
         _thread_local.client = cli
+        with _all_clients_lock:
+            _all_clients.append(cli)
     return cli
 
 
-def _close_thread_client() -> None:
-    cli = getattr(_thread_local, "client", None)
-    if cli is not None:
+def _close_all_clients() -> None:
+    """Закрывает клиентов всех воркеров. Вызывать ПОСЛЕ остановки пула —
+    потоки уже мертвы, их thread-local исчез вместе с ними.
+    """
+    with _all_clients_lock:
+        clients = list(_all_clients)
+        _all_clients.clear()
+    for cli in clients:
         try:
             cli.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — закрытие не должно ронять выход
             pass
-        _thread_local.client = None
 
 
 def download_all(
@@ -411,24 +418,28 @@ def download_all(
         client = _get_thread_client(token)
         return _download_one(job, client, download_dir)
 
+    # Без `with`: его выход дожидается ВСЕЙ очереди, и Ctrl+C выглядит зависанием.
+    pool = ThreadPoolExecutor(max_workers=workers)
     try:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(worker, j): j for j in jobs_list}
-            try:
-                for fut in as_completed(futures):
-                    res = fut.result()
-                    _apply_result(state, res, counters, file_bar, byte_bar)
-            except KeyboardInterrupt:
-                log.warning("Ctrl+C — отменяю оставшиеся задачи и закрываю пул...")
-                # Отменяем то что ещё не стартовало
-                for f in futures:
-                    f.cancel()
-                raise
+        futures = {pool.submit(worker, j): j for j in jobs_list}
+        try:
+            for fut in as_completed(futures):
+                res = fut.result()
+                _apply_result(state, res, counters, file_bar, byte_bar)
+        except KeyboardInterrupt:
+            file_bar.close()
+            byte_bar.close()
+            print("\nCtrl+C — отменяю очередь, дожидаюсь только текущих файлов...",
+                  file=sys.stderr)
+            log.warning("Ctrl+C — отменяю оставшиеся задачи и закрываю пул...")
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        pool.shutdown(wait=True)
+        # Закрываем сокеты только когда воркеры точно остановились
+        _close_all_clients()
     finally:
         file_bar.close()
         byte_bar.close()
-        # Каждый поток должен закрыть свой клиент. Через ThreadPoolExecutor это
-        # не сделаешь напрямую, но ThreadPoolExecutor умирает вместе с воркерами.
 
     return counters
 
