@@ -2,5 +2,6 @@ yadisk[sync_defaults]>=3.4.0
 tqdm>=4.66.0
 python-dotenv>=1.0.0
 tenacity>=8.2.0
+requests>=2.31.0
 fastapi>=0.115.0
 uvicorn>=0.32.0
