@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
-from pathlib import Path
 
-# Символы, запрещённые в именах файлов на Windows
-_WIN_FORBIDDEN = '<>:"|?*'
+# Символы, запрещённые в именах файлов на Windows.
+# Слеши тоже сюда: имя файла с '\' или '/' на Яндекс.Диске легально, а локально
+# превратилось бы в разделитель пути и увело файл мимо DOWNLOAD_DIR.
+_WIN_FORBIDDEN = '<>:"|?*\\/'
 # Зарезервированные имена Windows
 _WIN_RESERVED = {
     "CON", "PRN", "AUX", "NUL",
@@ -32,7 +33,7 @@ def sanitize_component(name: str) -> str:
         else:
             cleaned.append(ch)
     out = "".join(cleaned).rstrip(" .")  # Windows не любит хвостовые пробелы и точки
-    if not out:
+    if not out or out in (".", ".."):
         out = "_"
     # Зарезервированные имена
     stem = out.split(".", 1)[0].upper()
@@ -107,13 +108,24 @@ def avoid_case_collision(local_path: str) -> str:
 
 def _suffix_path(local_path: str, existing_lower: dict[str, str]) -> str:
     base, ext = os.path.splitext(local_path)
-    parent = os.path.dirname(local_path)
     i = 1
     while True:
         candidate = f"{base}_{i}{ext}"
         if os.path.basename(candidate).lower() not in existing_lower:
             return candidate
         i += 1
+
+
+def sqlite_ro_uri(db_path: str | os.PathLike) -> str:
+    """URI для read-only подключения к SQLite.
+
+    Экранирует спецсимволы пути: '#' в URI начинает фрагмент, и sqlite молча
+    открыл бы ПУСТУЮ базу вместо нашей (проверено на Windows-пути с решёткой).
+    """
+    from urllib.parse import quote
+
+    p = str(db_path).replace("\\", "/")
+    return "file:" + quote(p, safe="/:") + "?mode=ro"
 
 
 def compute_md5(local_path: str, chunk: int = 1024 * 1024) -> str:

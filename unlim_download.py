@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS unlim_files (
     status TEXT DEFAULT 'pending',
     local_path TEXT,
     error TEXT,
+    attempts INTEGER DEFAULT 0,
     worker_id INTEGER,
     assigned_at TIMESTAMP,
     downloaded_at TIMESTAMP
@@ -86,7 +87,12 @@ def db() -> sqlite3.Connection:
 
 
 def db_init():
-    db().executescript(SCHEMA)
+    c = db()
+    c.executescript(SCHEMA)
+    # Миграция старых БД: колонка attempts появилась позже
+    cols = {r[1] for r in c.execute("PRAGMA table_info(unlim_files)")}
+    if "attempts" not in cols:
+        c.execute("ALTER TABLE unlim_files ADD COLUMN attempts INTEGER DEFAULT 0")
 
 
 # ── HTTP ────────────────────────────────────────────────────────────────────
@@ -144,9 +150,12 @@ def api_call(s: requests.Session, sk: str, uid: str, method: str,
                        json=body, timeout=120)
             if r.status_code == 200:
                 try:
-                    return r.json()
+                    data = r.json()
                 except Exception:
-                    return None
+                    raise RuntimeError(f"{method}: ответ не JSON: {r.text[:200]}")
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"{method}: неожиданный формат ответа: {type(data).__name__}")
+                return data
             if r.status_code in (401, 403):
                 sys.exit(f"Сессия истекла (HTTP {r.status_code})")
             if r.status_code == 429:
@@ -251,7 +260,7 @@ def cmd_collect():
         print(f"  ✓ uid={uid}, sk OK")
 
         psid = init_snapshot(s, sk, uid)
-        print(f"  ✓ photoslice_id получен")
+        print("  ✓ photoslice_id получен")
 
         clusters = get_all_clusters(s, sk, uid, psid)
         print(f"  ✓ кластеров (дней с фото): {len(clusters)}")
@@ -303,17 +312,34 @@ def cmd_status():
         print(f"  {k}: {v}")
 
 
+def cmd_retry_failed():
+    """Возвращает failed-файлы в очередь (сбрасывает счётчик попыток)."""
+    if not os.path.exists(DB_FILE):
+        print("БД пуста — запусти --collect")
+        return
+    db_init()
+    n = db().execute(
+        "UPDATE unlim_files SET status='pending', attempts=0, error=NULL, "
+        "worker_id=NULL WHERE status IN ('failed', 'in_progress')"
+    ).rowcount
+    print(f"Возвращено в очередь: {n}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--collect", action="store_true",
                     help="Собрать список файлов из photoslice")
     ap.add_argument("--status", action="store_true",
                     help="Показать статус БД")
+    ap.add_argument("--retry-failed", action="store_true",
+                    help="Вернуть упавшие и зависшие файлы в очередь")
     args = ap.parse_args()
     if args.collect:
         cmd_collect()
     elif args.status:
         cmd_status()
+    elif args.retry_failed:
+        cmd_retry_failed()
     else:
         ap.print_help()
 

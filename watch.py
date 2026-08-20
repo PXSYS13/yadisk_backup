@@ -16,6 +16,9 @@ import time
 from collections import deque
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from utils import sqlite_ro_uri  # noqa: E402  (после sys.path — иначе не найдётся при запуске из другой папки)
+
 REFRESH_SEC = 2.0
 HISTORY_LEN = 30   # храним последние N измерений для скорости / ETA
 RECENT_LIMIT = 6   # сколько последних файлов показывать
@@ -61,7 +64,7 @@ def fetch_state() -> dict | None:
     if not DB_FILE.exists():
         return None
     try:
-        conn = sqlite3.connect(f"file:{DB_FILE}?mode=ro", uri=True, timeout=5)
+        conn = sqlite3.connect(sqlite_ro_uri(DB_FILE), uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
         # Статистика
         stats = {
@@ -117,8 +120,6 @@ def main() -> int:
 
     history: deque[tuple[float, int, int]] = deque(maxlen=HISTORY_LEN)
     started_at = time.time()
-    last_done_files = 0
-    last_done_bytes = 0
 
     print("Жду появления state.db...")
     while not DB_FILE.exists():
