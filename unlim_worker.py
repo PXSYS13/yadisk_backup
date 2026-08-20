@@ -50,28 +50,48 @@ logging.basicConfig(filename=LOG_FILE, level=logging.INFO, encoding="utf-8",
                     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s")
 
 
-def take_batch(worker_id: int, size: int) -> list[str]:
-    """Атомарно забирает пачку pending под себя (status='in_progress')."""
+MAX_ATTEMPTS = 3  # после стольких неудач файл уходит в 'failed', чтобы не крутиться вечно
+
+
+def ensure_attempts_column() -> None:
+    """Миграция для старых БД: колонка attempts могла отсутствовать."""
+    c = sqlite3.connect(DB_FILE, timeout=60)
+    try:
+        cols = {r[1] for r in c.execute("PRAGMA table_info(unlim_files)")}
+        if "attempts" not in cols:
+            c.execute("ALTER TABLE unlim_files ADD COLUMN attempts INTEGER DEFAULT 0")
+            c.commit()
+    finally:
+        c.close()
+
+
+def take_batch(worker_id: int, size: int) -> list[dict]:
+    """Атомарно забирает пачку pending под себя (status='in_progress').
+
+    Возвращает список словарей {file_id, name, size} — имя и размер нужны,
+    чтобы после распаковки понять, какие именно файлы реально приехали.
+    """
     c = sqlite3.connect(DB_FILE, timeout=60)
     c.execute("PRAGMA journal_mode=WAL")
     c.row_factory = sqlite3.Row
     try:
         c.execute("BEGIN IMMEDIATE")
         rows = list(c.execute(
-            "SELECT file_id FROM unlim_files WHERE status='pending' LIMIT ?",
+            "SELECT file_id, name, size FROM unlim_files WHERE status='pending' LIMIT ?",
             (size,),
         ))
         if not rows:
             c.execute("COMMIT")
             return []
-        ids = [r["file_id"] for r in rows]
+        items = [{"file_id": r["file_id"], "name": r["name"],
+                  "size": int(r["size"] or 0)} for r in rows]
         c.executemany(
             "UPDATE unlim_files SET status='in_progress', worker_id=?, "
             "assigned_at=CURRENT_TIMESTAMP WHERE file_id=?",
-            [(worker_id, i) for i in ids],
+            [(worker_id, it["file_id"]) for it in items],
         )
         c.execute("COMMIT")
-        return ids
+        return items
     except Exception:
         try: c.execute("ROLLBACK")
         except sqlite3.Error: pass
@@ -96,13 +116,22 @@ def mark_done(file_ids: list[str]):
 
 
 def mark_pending(file_ids: list[str], error: str):
+    """Возвращает файлы в очередь. После MAX_ATTEMPTS попыток — в 'failed',
+    иначе воркер будет вечно крутить одну и ту же битую пачку.
+    """
+    if not file_ids:
+        return
     c = sqlite3.connect(DB_FILE, timeout=60)
     c.execute("PRAGMA journal_mode=WAL")
     try:
         c.execute("BEGIN IMMEDIATE")
         c.executemany(
-            "UPDATE unlim_files SET status='pending', worker_id=NULL, error=? WHERE file_id=?",
-            [(error[:500], i) for i in file_ids],
+            "UPDATE unlim_files SET "
+            "  attempts = COALESCE(attempts, 0) + 1, "
+            "  status = CASE WHEN COALESCE(attempts, 0) + 1 >= ? THEN 'failed' ELSE 'pending' END, "
+            "  worker_id = NULL, error = ? "
+            "WHERE file_id = ?",
+            [(MAX_ATTEMPTS, error[:500], i) for i in file_ids],
         )
         c.execute("COMMIT")
     finally:
@@ -150,8 +179,12 @@ def get_sk_uid(s):
     r = s.get(f"{BASE}/client/disk", timeout=30)
     if "passport.yandex" in r.url or r.status_code != 200:
         sys.exit("Куки невалидны — обнови cookies.json")
-    return (re.search(r'"sk"\s*:\s*"([^"]+)"', r.text).group(1),
-            re.search(r'"uid"\s*:\s*"?(\d+)"?', r.text).group(1))
+    sk = re.search(r'"sk"\s*:\s*"([^"]+)"', r.text)
+    uid = re.search(r'"uid"\s*:\s*"?(\d+)"?', r.text)
+    if not sk or not uid:
+        sys.exit("Не нашёл sk/uid в HTML — Яндекс изменил формат "
+                 "или сессия протухла. Обнови cookies.json.")
+    return sk.group(1), uid.group(1)
 
 
 def prepare_zip(s, sk, uid, paths: list[str]) -> str | None:
@@ -176,7 +209,39 @@ def prepare_zip(s, sk, uid, paths: list[str]) -> str | None:
         return None
 
 
-def download_and_extract(s, url: str, worker_id: int, batch_idx: int) -> tuple[int, int]:
+def safe_extract_dst(base_dir: str, member_name: str) -> str | None:
+    """Куда безопасно распаковать запись архива.
+
+    Отбрасывает всё, что уводит за пределы base_dir: '..', ведущие слэши,
+    букву диска ('C:/evil.txt' — os.path.join такой путь просто заменил бы базу).
+    Возвращает None, если запись выглядит враждебно или пустой.
+    """
+    raw = member_name.replace("\\", "/")
+    parts = []
+    for part in raw.split("/"):
+        part = part.strip()
+        if not part or part in (".", ".."):
+            continue
+        if ":" in part:  # 'C:', 'C:evil.txt' — не даём подменить диск
+            continue
+        parts.append(part)
+    if not parts:
+        return None
+    dst = os.path.join(base_dir, *parts)
+    # Финальная проверка: результат обязан лежать внутри base_dir
+    base_real = os.path.realpath(base_dir)
+    dst_real = os.path.realpath(dst)
+    if os.path.commonpath([base_real, dst_real]) != base_real:
+        return None
+    return dst
+
+
+def download_and_extract(s, url: str, worker_id: int, batch_idx: int) -> tuple[list[tuple[str, int]], int]:
+    """Качает ZIP пачки и распаковывает.
+
+    Возвращает (список успешно распакованных (имя_файла, размер), суммарные байты).
+    Имена нужны наверху, чтобы пометить downloaded ТОЛЬКО реально приехавшие файлы.
+    """
     os.makedirs(ZIP_TMP_DIR, exist_ok=True)
     os.makedirs(EXTRACT_DIR, exist_ok=True)
     zip_path = os.path.join(ZIP_TMP_DIR, f"w{worker_id}_b{batch_idx}.zip")
@@ -195,24 +260,24 @@ def download_and_extract(s, url: str, worker_id: int, batch_idx: int) -> tuple[i
                 logging.error(f"w{worker_id} b{batch_idx} write: {e}")
                 try: os.remove(tmp)
                 except OSError: pass
-                return 0, 0
+                return [], 0
     except Exception as e:
         logging.error(f"w{worker_id} b{batch_idx} download: {e}")
-        return 0, 0
+        return [], 0
 
-    extracted = 0
+    extracted: list[tuple[str, int]] = []
     total_bytes = 0
     try:
         with zipfile.ZipFile(zip_path) as zf:
             for m in zf.infolist():
                 if m.is_dir():
                     continue
-                safe = m.filename.replace("\\", "/").lstrip("/")
-                if ".." in safe.split("/"):
+                dst = safe_extract_dst(EXTRACT_DIR, m.filename)
+                if dst is None:
+                    logging.warning(f"w{worker_id} пропускаю опасное имя в архиве: {m.filename!r}")
                     continue
-                dst = os.path.join(EXTRACT_DIR, safe)
                 if os.path.exists(dst) and os.path.getsize(dst) == m.file_size:
-                    extracted += 1
+                    extracted.append((os.path.basename(dst), m.file_size))
                     total_bytes += m.file_size
                     continue
                 os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
@@ -223,13 +288,13 @@ def download_and_extract(s, url: str, worker_id: int, batch_idx: int) -> tuple[i
                             if not chunk:
                                 break
                             f.write(chunk)
-                    extracted += 1
+                    extracted.append((os.path.basename(dst), m.file_size))
                     total_bytes += m.file_size
                 except Exception as e:
-                    logging.warning(f"w{worker_id} extract {safe}: {e}")
+                    logging.warning(f"w{worker_id} extract {m.filename}: {e}")
     except zipfile.BadZipFile as e:
         logging.error(f"w{worker_id} b{batch_idx} bad zip: {e}")
-        return 0, 0
+        return [], 0
     finally:
         try:
             os.remove(zip_path)
@@ -237,6 +302,51 @@ def download_and_extract(s, url: str, worker_id: int, batch_idx: int) -> tuple[i
             pass
 
     return extracted, total_bytes
+
+
+def split_by_extracted(
+    batch: list[dict],
+    extracted: list[tuple[str, int]],
+) -> tuple[list[str], list[str]]:
+    """Делит пачку на реально приехавшие и не приехавшие файлы.
+
+    Сопоставляем по (имя файла, размер) — то, что есть и в БД, и в архиве.
+    Каждая запись архива «закрывает» ровно один файл пачки, поэтому считаем
+    кратности: две одинаковые записи в БД требуют двух записей в архиве.
+    """
+    pool: dict[tuple[str, int], int] = {}
+    for name, size in extracted:
+        key = (os.path.basename(name).lower(), int(size or 0))
+        pool[key] = pool.get(key, 0) + 1
+
+    done: list[str] = []
+    unmatched: list[dict] = []
+    for item in batch:
+        key = (os.path.basename(item.get("name") or "").lower(),
+               int(item.get("size") or 0))
+        if pool.get(key, 0) > 0:
+            pool[key] -= 1
+            done.append(item["file_id"])
+        else:
+            unmatched.append(item)
+
+    # Второй проход — по одному размеру. Яндекс иногда переименовывает файлы
+    # в архиве (коллизии имён внутри дня), и строгое сравнение зря отправило бы
+    # их на перекачку. Остаток архива — это почти наверняка файлы этой же пачки.
+    leftovers: dict[int, int] = {}
+    for key, count in pool.items():
+        if count > 0:
+            leftovers[key[1]] = leftovers.get(key[1], 0) + count
+
+    missing: list[str] = []
+    for item in unmatched:
+        size = int(item.get("size") or 0)
+        if leftovers.get(size, 0) > 0:
+            leftovers[size] -= 1
+            done.append(item["file_id"])
+        else:
+            missing.append(item["file_id"])
+    return done, missing
 
 
 def main():
@@ -251,6 +361,7 @@ def main():
     if not os.path.exists(DB_FILE):
         sys.exit("Нет unlim_state.db — сначала запусти unlim_download.py --collect")
 
+    ensure_attempts_column()
     recover_stuck()
 
     s = make_session()
@@ -263,8 +374,8 @@ def main():
     empty_streak = 0
 
     while True:
-        paths = take_batch(worker_id, args.batch)
-        if not paths:
+        batch = take_batch(worker_id, args.batch)
+        if not batch:
             empty_streak += 1
             if empty_streak >= 3:
                 print(f"[w{worker_id}] нет работы, выход")
@@ -273,11 +384,12 @@ def main():
             continue
         empty_streak = 0
         batch_idx += 1
+        batch_ids = [it["file_id"] for it in batch]
 
-        url = prepare_zip(s, sk, uid, paths)
+        url = prepare_zip(s, sk, uid, batch_ids)
         if not url:
             print(f"[w{worker_id}] batch {batch_idx}: prepare FAIL → pending")
-            mark_pending(paths, "prepare failed")
+            mark_pending(batch_ids, "prepare failed")
             time.sleep(10)
             continue
 
@@ -285,16 +397,24 @@ def main():
         extracted, bytes_ = download_and_extract(s, url, worker_id, batch_idx)
         dur = time.monotonic() - start
 
-        if extracted > 0:
-            mark_done(paths)
-            total_files += extracted
+        # Помечаем downloaded ТОЛЬКО те файлы, которые реально нашлись в архиве.
+        # Остальные возвращаем в очередь — иначе бэкап «зелёный», а файлов нет.
+        done_ids, missing_ids = split_by_extracted(batch, extracted)
+        if done_ids:
+            mark_done(done_ids)
+            total_files += len(done_ids)
             total_bytes += bytes_
+        if missing_ids:
+            mark_pending(missing_ids, "не найден в распакованном архиве")
+
+        if done_ids:
             mbps = (bytes_ / 1e6) / max(0.1, dur)
-            print(f"[w{worker_id}] batch {batch_idx}: ✓ {extracted} files / "
-                  f"{bytes_/1e9:.2f} GB ({mbps:.1f} MB/s, {int(dur)}s)")
+            tail = f", не приехало {len(missing_ids)}" if missing_ids else ""
+            print(f"[w{worker_id}] batch {batch_idx}: ✓ {len(done_ids)}/{len(batch)} files / "
+                  f"{bytes_/1e9:.2f} GB ({mbps:.1f} MB/s, {int(dur)}s{tail})")
         else:
-            print(f"[w{worker_id}] batch {batch_idx}: ✗ FAIL → pending")
-            mark_pending(paths, "download/extract failed")
+            print(f"[w{worker_id}] batch {batch_idx}: ✗ FAIL ({len(batch)} файлов → pending)")
+            time.sleep(5)
 
     # Закрываем HTTP-сессию (освобождаем sockets)
     try:
