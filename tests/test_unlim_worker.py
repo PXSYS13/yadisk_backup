@@ -8,7 +8,6 @@ import pytest
 
 import unlim_worker as uw
 
-
 # ── защита от zip-slip ──────────────────────────────────────────────────────
 
 
@@ -247,3 +246,56 @@ def test_split_fallback_respects_counts():
     done, missing = uw.split_by_extracted(batch, [("renamed.jpg", 100)])
     assert done == ["1"]
     assert missing == ["2"]
+
+
+def test_take_batch_respects_max_bytes(tmp_path, monkeypatch):
+    db_file = tmp_path / "unlim.db"
+    monkeypatch.setattr(uw, "DB_FILE", str(db_file))
+    con = sqlite3.connect(db_file)
+    con.executescript(
+        """
+        CREATE TABLE unlim_files (
+            file_id TEXT PRIMARY KEY, name TEXT, size INTEGER,
+            status TEXT DEFAULT 'pending', worker_id INTEGER, assigned_at TIMESTAMP
+        );
+        INSERT INTO unlim_files (file_id, name, size) VALUES
+            ('1', 'small1.jpg', 100),
+            ('2', 'small2.jpg', 100),
+            ('3', 'big.mp4', 500000000);
+        """
+    )
+    con.close()
+
+    batch = uw.take_batch(1, size=10, max_bytes=150)
+    assert len(batch) == 1
+    assert batch[0]["file_id"] == "1"
+
+
+def test_take_batch_isolates_attempted_file(tmp_path, monkeypatch):
+    """Файлы с attempts > 0 изолируются в соло-пачку по 1 файлу."""
+    db_file = tmp_path / "unlim_att.db"
+    monkeypatch.setattr(uw, "DB_FILE", str(db_file))
+    con = sqlite3.connect(db_file)
+    con.executescript(
+        """
+        CREATE TABLE unlim_files (
+            file_id TEXT PRIMARY KEY, name TEXT, size INTEGER, attempts INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'pending', worker_id INTEGER, assigned_at TIMESTAMP
+        );
+        INSERT INTO unlim_files (file_id, name, size, attempts) VALUES
+            ('1', 'clean1.jpg', 100, 0),
+            ('2', 'failing.jpg', 100, 1),
+            ('3', 'clean2.jpg', 100, 0);
+        """
+    )
+    con.close()
+
+    # Сначала забираются чистые файлы (attempts = 0)
+    batch1 = uw.take_batch(1, size=10)
+    assert [b["file_id"] for b in batch1] == ["1", "3"]
+
+    # Затем проблемный файл забирается ровно в одиночку (соло-пачка)
+    batch2 = uw.take_batch(1, size=10)
+    assert len(batch2) == 1
+    assert batch2[0]["file_id"] == "2"
+

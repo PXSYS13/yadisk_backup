@@ -420,6 +420,345 @@
     align-items:center;gap:7px;
   }
   .active-tasks.show{display:inline-flex}
+
+  /* ── Donate styles ── */
+  .pill.pill-donate{
+    text-decoration:none;cursor:pointer;
+    border-color:rgba(255,55,95,.35);
+    background:rgba(255,55,95,.08);
+    color:var(--pink);
+    transition:all .2s ease;
+  }
+  .pill.pill-donate:hover{
+    background:rgba(255,55,95,.18);
+    border-color:rgba(255,55,95,.6);
+    transform:translateY(-1px);
+    box-shadow:0 4px 12px rgba(255,55,95,.2);
+  }
+  .donate-hero{
+    background: radial-gradient(circle at 50% 0%, rgba(255,55,95,.15), transparent 70%),
+                linear-gradient(135deg, rgba(255,55,95,.1), rgba(191,90,242,.06));
+    border: 0.5px solid rgba(255,55,95,.35);
+    border-radius: 20px;
+    padding: 38px 24px;
+    text-align: center;
+    margin-bottom: 24px;
+    position: relative;
+    overflow: hidden;
+  }
+  .donate-badge{
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255,55,95,.15);
+    border: 0.5px solid rgba(255,55,95,.4);
+    color: var(--pink);
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 5px 14px;
+    border-radius: 99px;
+    margin-bottom: 14px;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+  }
+  .donate-hero-title{
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -.03em;
+    margin-bottom: 10px;
+    color: #fff;
+  }
+  .donate-hero-sub{
+    max-width: 620px;
+    margin: 0 auto 24px;
+    color: var(--text-secondary);
+    font-size: 15px;
+    line-height: 1.55;
+  }
+  .donate-cta-btn{
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: linear-gradient(135deg, #ff375f 0%, #ff7a00 100%);
+    color: #fff;
+    padding: 15px 36px;
+    border-radius: 99px;
+    font-size: 16px;
+    font-weight: 600;
+    text-decoration: none;
+    box-shadow: 0 10px 28px rgba(255,55,95,.4);
+    transition: all .2s ease;
+    border: none;
+    cursor: pointer;
+  }
+  .donate-cta-btn:hover{
+    transform: translateY(-2px);
+    box-shadow: 0 14px 36px rgba(255,55,95,.55);
+    color: #fff;
+  }
+  .donate-cta-btn:active{
+    transform: translateY(0);
+  }
+  .methods-grid{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .method-card{
+    background: var(--surface);
+    border: 0.5px solid var(--hairline-strong);
+    border-radius: 14px;
+    padding: 16px 18px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    transition: all .15s ease;
+  }
+  .method-card:hover{
+    border-color: rgba(255,55,95,.4);
+    background: var(--surface2);
+  }
+  .method-icon{
+    font-size: 26px;
+    flex-shrink: 0;
+  }
+  .method-title{
+    font-size: 13.5px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 2px;
+  }
+  .method-desc{
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.35;
+  }
+  .donate-link-box{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--surface2);
+    border: 0.5px solid var(--hairline-strong);
+    border-radius: 12px;
+    padding: 12px 16px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+  }
+  .donate-link-text{
+    font-family: 'SF Mono','Menlo',Consolas,monospace;
+    font-size: 13.5px;
+    color: var(--text);
+    flex: 1;
+    min-width: 200px;
+    word-break: break-all;
+  }
+  .why-support-grid{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 14px;
+    margin-top: 14px;
+  }
+  .why-item{
+    background: var(--surface2);
+    border: 0.5px solid var(--hairline);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .why-item-title{
+    font-size: 14px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .why-item-desc{
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    line-height: 1.45;
+  }
+
+  /* ── Celebration Modal & Backdrop ── */
+  .modal-backdrop{
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,.76);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    padding: 20px;
+    opacity: 0;
+    transition: opacity .25s ease;
+  }
+  .modal-backdrop.show{
+    display: flex;
+    opacity: 1;
+  }
+  .celebration-canvas{
+    position: absolute;
+    top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .celebration-modal{
+    position: relative;
+    max-width: 520px;
+    width: 100%;
+    background: #1c1c1e;
+    border: 0.5px solid rgba(255,255,255,.14);
+    border-radius: 22px;
+    padding: 30px 24px;
+    box-shadow: 0 32px 80px rgba(0,0,0,.85), 0 0 0 1px rgba(255,255,255,.05);
+    transform: scale(.92) translateY(12px);
+    transition: transform .28s cubic-bezier(.16, 1, .3, 1);
+    text-align: center;
+    z-index: 2;
+    overflow: hidden;
+  }
+  .modal-backdrop.show .celebration-modal{
+    transform: scale(1) translateY(0);
+  }
+  .modal-close-btn{
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: var(--surface2);
+    border: 0.5px solid var(--hairline-strong);
+    color: var(--text-tertiary);
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all .15s;
+    padding: 0;
+    line-height: 1;
+  }
+  .modal-close-btn:hover{
+    background: var(--surface3);
+    color: var(--text);
+  }
+  .celebration-badge-glow{
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 14px;
+    border-radius: 18px;
+    background: linear-gradient(135deg, rgba(48,209,88,.2), rgba(10,132,255,.25));
+    border: 1px solid rgba(48,209,88,.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 8px 26px rgba(48,209,88,.25);
+  }
+  .celebration-icon{
+    font-size: 32px;
+    animation: bouncePop .75s cubic-bezier(.175, .885, .32, 1.275);
+  }
+  @keyframes bouncePop{
+    0%{transform:scale(0) rotate(-20deg)}
+    60%{transform:scale(1.2) rotate(10deg)}
+    100%{transform:scale(1) rotate(0)}
+  }
+  .celebration-title{
+    font-size: 21px;
+    font-weight: 700;
+    letter-spacing: -.02em;
+    color: #fff;
+    margin-bottom: 5px;
+  }
+  .celebration-sub{
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.45;
+    margin-bottom: 18px;
+  }
+  .celebration-stats-grid{
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin-bottom: 18px;
+  }
+  @media (max-width: 520px){
+    .celebration-stats-grid{
+      grid-template-columns: repeat(2, 1fr);
+    }
+  }
+  .celebration-stat{
+    background: var(--surface2);
+    border: 0.5px solid var(--hairline-strong);
+    border-radius: 12px;
+    padding: 10px 6px;
+    text-align: center;
+  }
+  .celebration-stat .stat-label{
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    margin-bottom: 4px;
+  }
+  .celebration-stat-value{
+    font-size: 14.5px;
+    font-weight: 700;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .celebration-donate-card{
+    background: linear-gradient(180deg, rgba(255,55,95,.09) 0%, rgba(28,28,30,.75) 100%);
+    border: 1px solid rgba(255,55,95,.3);
+    border-radius: 16px;
+    padding: 18px;
+    text-align: left;
+  }
+  .celebration-donate-header{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .celebration-heart{
+    font-size: 17px;
+  }
+  .celebration-donate-title{
+    font-size: 14.5px;
+    font-weight: 600;
+    color: #fff;
+  }
+  .celebration-donate-desc{
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    line-height: 1.45;
+    margin-bottom: 14px;
+  }
+  .celebration-actions{
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .celebration-sub-actions{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding-top: 10px;
+    border-top: 0.5px solid var(--hairline);
+  }
+  .pulse-glow{
+    animation: gentlePulse 2.4s infinite;
+  }
+  @keyframes gentlePulse{
+    0%,100%{box-shadow: 0 6px 20px rgba(255,55,95,.35);}
+    50%{box-shadow: 0 10px 32px rgba(255,55,95,.65);}
+  }
 </style>
 
 <!-- SVG sprite -->
@@ -482,6 +821,18 @@
     <symbol id="i-cookies" viewBox="0 0 24 24">
       <path fill="currentColor" d="M21.95 10.99c-.01 0-.01 0 0 0a3.49 3.49 0 0 1-3.45-3.94c.08-.55-.42-1-.96-.86a1.95 1.95 0 0 1-2.45-2.45 1 1 0 0 0-.85-1.27 1 1 0 0 0-.32 0c-5.66-.43-10.42 4.34-9.92 10.04A10 10 0 0 0 12.99 22a10 10 0 0 0 9.83-10.74 1 1 0 0 0-.87-.27zM10 13a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm7 5a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm2-7a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm-7-3a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm-3 5a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm6 0a1 1 0 1 1 0-2 1 1 0 0 1 0 2z"/>
     </symbol>
+    <symbol id="i-heart" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+    </symbol>
+    <symbol id="i-external" viewBox="0 0 24 24">
+      <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6m4-3h6v6m-11 5L21 3"/>
+    </symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24">
+      <path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M8 4v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7.242a2 2 0 0 0-.602-1.43L16.083 2.57A2 2 0 0 0 14.685 2H10a2 2 0 0 0-2 2zM16 18v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h2"/>
+    </symbol>
+    <symbol id="i-gift" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M20 6h-2.18c.11-.31.18-.65.18-1 0-1.66-1.34-3-3-3-1.05 0-1.96.54-2.5 1.35l-.5.65-.5-.65C10.96 2.54 10.05 2 9 2 7.34 2 6 3.34 6 5c0 .35.07.69.18 1H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-5-2c.55 0 1 .45 1 1s-.45 1-1 1h-2v-1c0-.55.45-1 1-1zM9 4c.55 0 1 .45 1 1v1H8c-.55 0-1-.45-1-1s.45-1 1-1zm11 15H4v-2h16v2zm0-5H4V8h5.08L7 10.83 8.62 12 11 8.76V14h2V8.76L15.38 12 17 10.83 14.92 8H20v6z"/>
+    </symbol>
   </defs>
 </svg>
 </head>
@@ -504,6 +855,10 @@
     </div>
   </div>
   <div class="pills">
+    <a href="#donate" onclick="switchTab('donate');return false;" class="pill pill-donate" title="Поддержать развитие проекта">
+      <svg class="ico" style="width:14px;height:14px;color:var(--pink)"><use href="#i-heart"/></svg>
+      <span>Поддержать</span>
+    </a>
     <span class="active-tasks" id="active-tasks">
       <div class="spinner spinner-sm"></div>
       <span id="active-tasks-text">—</span>
@@ -519,6 +874,7 @@
   <div class="tab" data-tab="disk">Диск</div>
   <div class="tab" data-tab="photos">Безлимит</div>
   <div class="tab" data-tab="organize">Сортировка</div>
+  <div class="tab" data-tab="donate">❤️ Поддержать</div>
 </div>
 
 <!-- ============= ГЛАВНАЯ ============= -->
@@ -841,12 +1197,18 @@
     </div>
   </div>
 
-  <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <div class="section-label" style="margin:0">Консоль</div>
-      <button onclick="clearLog('unlim')" style="padding:4px 10px;font-size:11px;background:transparent;border:0.5px solid var(--hairline-strong);color:var(--text-secondary)">Очистить лог</button>
+  <div class="grid-2">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="section-label" style="margin:0">Консоль</div>
+        <button onclick="clearLog('unlim')" style="padding:4px 10px;font-size:11px;background:transparent;border:0.5px solid var(--hairline-strong);color:var(--text-secondary)">Очистить лог</button>
+      </div>
+      <div class="console" id="unlim-console"><div class="console-empty">жду запуска…</div></div>
     </div>
-    <div class="console" id="unlim-console"><div class="console-empty">жду запуска…</div></div>
+    <div class="card">
+      <div class="section-label">Последние скачанные</div>
+      <div id="unlim-recent"><div class="muted">пока пусто</div></div>
+    </div>
   </div>
 </div>
 
@@ -894,13 +1256,201 @@
   </div>
 </div>
 
+<!-- ============= ПОДДЕРЖАТЬ ПРОЕКТ ============= -->
+<div class="panel" data-panel="donate">
+
+  <div class="donate-hero">
+    <div class="donate-badge">
+      <svg class="ico" style="width:13px;height:13px;color:var(--pink)"><use href="#i-heart"/></svg>
+      Поддержка разработки
+    </div>
+    <div class="donate-hero-title">Поддержите Yandex.Disk Backup</div>
+    <div class="donate-hero-sub">
+      Проект полностью бесплатный, без платных тарифов, рекламы и скрытых ограничений. 
+      Вы можете поддержать автора любой комфортной суммой (от 10 ₽) через DonationAlerts. Сервис принимает карты (МИР, Visa, Mastercard), СБП и электронные кошельки.
+    </div>
+    <a href="https://www.donationalerts.com/r/davronsvv" target="_blank" rel="noopener" class="donate-cta-btn">
+      <svg class="ico" style="width:20px;height:20px;color:#fff"><use href="#i-heart"/></svg>
+      <span>Поддержать проект на DonationAlerts</span>
+      <svg class="ico" style="width:16px;height:16px;color:rgba(255,255,255,.8)"><use href="#i-external"/></svg>
+    </a>
+  </div>
+
+  <div class="section-label" style="margin-bottom:12px">Способы поддержки и условия</div>
+  <div class="methods-grid">
+    <div class="method-card">
+      <div class="method-icon">⚡</div>
+      <div>
+        <div class="method-title">СБП (без комиссии)</div>
+        <div class="method-desc">Моментальный перевод через СБП с любого банковского приложения в 1 клик.</div>
+      </div>
+    </div>
+    <div class="method-card">
+      <div class="method-icon">💳</div>
+      <div>
+        <div class="method-title">Банковские карты</div>
+        <div class="method-desc">Поддержка МИР, Visa, Mastercard любых российских и зарубежных банков.</div>
+      </div>
+    </div>
+    <div class="method-card">
+      <div class="method-icon">👛</div>
+      <div>
+        <div class="method-title">Кошельки и баланс</div>
+        <div class="method-desc">ЮMoney, баланс мобильного телефона и другие популярные сервисы.</div>
+      </div>
+    </div>
+    <div class="method-card">
+      <div class="method-icon">🪙</div>
+      <div>
+        <div class="method-title">Любая сумма от 10 ₽</div>
+        <div class="method-desc">Вы сами указываете комфортную для вас сумму в форме DonationAlerts.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Прямая ссылка для доната</div>
+    <div class="card-sub">Сервис DonationAlerts поддерживает карты (МИР, Visa, Mastercard), СБП, кошельки и другие методы.</div>
+    
+    <div class="donate-link-box">
+      <svg class="ico" style="width:20px;height:20px;color:var(--text-tertiary);flex-shrink:0"><use href="#i-gift"/></svg>
+      <div class="donate-link-text" id="donate-url-text">https://www.donationalerts.com/r/davronsvv</div>
+      <button onclick="copyDonateLink()" class="btn" style="padding:8px 14px;font-size:13px">
+        <svg class="ico" style="width:14px;height:14px"><use href="#i-copy"/></svg>
+        <span>Копировать ссылку</span>
+      </button>
+      <a href="https://www.donationalerts.com/r/davronsvv" target="_blank" rel="noopener" class="btn primary" style="padding:8px 14px;font-size:13px;text-decoration:none">
+        <svg class="ico" style="width:14px;height:14px"><use href="#i-external"/></svg>
+        <span>Открыть DonationAlerts</span>
+      </a>
+    </div>
+    <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <button onclick="testCelebrationModal()" class="btn" style="font-size:12.5px;padding:7px 14px;color:var(--text-secondary)">
+        <span>🎉 Проверить уведомление и окно завершения</span>
+      </button>
+      <span class="muted" style="font-size:12px">Проиграет звук завершения, вызовет desktop-уведомление и покажет поздравление с донатом.</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">На что идут средства?</div>
+    <div class="card-sub">Проект развивается на чистом энтузиазме. Донаты помогают поддерживать проект живым:</div>
+    <div class="why-support-grid">
+      <div class="why-item">
+        <div class="why-item-title">
+          <span>🔄</span> Адаптация под API Яндекса
+        </div>
+        <div class="why-item-desc">
+          Яндекс регулярно меняет форматы сессий, токены и endpoints photoslice. Мы следим за изменениями и оперативно обновляем код.
+        </div>
+      </div>
+      <div class="why-item">
+        <div class="why-item-title">
+          <span>⚡</span> Новые возможности
+        </div>
+        <div class="why-item-desc">
+          Разработка авто-бэкапов по расписанию, улучшенной дедупликации, чтения EXIF и сохранения дат съёмки.
+        </div>
+      </div>
+      <div class="why-item">
+        <div class="why-item-title">
+          <span>💻</span> Кроссплатформенность
+        </div>
+        <div class="why-item-desc">
+          Тестирование и сопровождение на Windows, Linux и macOS, сохранение поддержки запуска в один клик.
+        </div>
+      </div>
+      <div class="why-item">
+        <div class="why-item-title">
+          <span>❤️</span> Полная открытость
+        </div>
+        <div class="why-item-desc">
+          Код открыт по лицензии MIT. Никакой телеметрии, слива данных, подписок или закрытых функций.
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
 <footer>
-  <span class="author" style="font-size:14px">by Davron</span> · обновляется каждые 1.5 сек
+  <span class="author" style="font-size:14px">by Davron</span> · 
+  <a href="https://www.donationalerts.com/r/davronsvv" target="_blank" rel="noopener" style="color:var(--pink);text-decoration:none">Поддержать проект ❤️</a> · 
+  обновляется каждые 1.5 сек
 </footer>
 
 </div>
 
 <div id="toast"></div>
+
+<!-- ============= CELEBRATION & DONATION MODAL ============= -->
+<div id="celebration-backdrop" class="modal-backdrop" onclick="handleBackdropClick(event)">
+  <canvas id="celebration-canvas" class="celebration-canvas"></canvas>
+  <div class="celebration-modal" id="celebration-modal" onclick="event.stopPropagation()">
+    <button class="modal-close-btn" onclick="closeCelebrationModal()" title="Закрыть">✕</button>
+    
+    <div class="celebration-badge-glow">
+      <div class="celebration-icon">🎉</div>
+    </div>
+    
+    <h2 class="celebration-title" id="celebration-title">Все файлы успешно скачаны!</h2>
+    <p class="celebration-sub" id="celebration-sub">
+      Резервная копия ваших файлов с Яндекс.Диска сохранена на локальном накопителе.
+    </p>
+
+    <!-- Сводка загрузки -->
+    <div class="celebration-stats-grid">
+      <div class="celebration-stat">
+        <div class="stat-label">Скачано</div>
+        <div class="celebration-stat-value" id="celebration-stat-files">0</div>
+      </div>
+      <div class="celebration-stat">
+        <div class="stat-label">Объём</div>
+        <div class="celebration-stat-value" id="celebration-stat-size">0 B</div>
+      </div>
+      <div class="celebration-stat">
+        <div class="stat-label">Время</div>
+        <div class="celebration-stat-value" id="celebration-stat-time">—</div>
+      </div>
+      <div class="celebration-stat">
+        <div class="stat-label">Ошибок</div>
+        <div class="celebration-stat-value" id="celebration-stat-errors" style="color:var(--green)">0</div>
+      </div>
+    </div>
+
+    <!-- Карточка доната -->
+    <div class="celebration-donate-card">
+      <div class="celebration-donate-header">
+        <span class="celebration-heart">❤️</span>
+        <div class="celebration-donate-title">Поддержать автора проекта</div>
+      </div>
+      <p class="celebration-donate-desc">
+        <strong>Yandex.Disk Backup</strong> полностью бесплатный и без ограничений. Если программа сберегла ваши гигабайты и время — поддержите автора чашкой кофе на <strong>DonationAlerts</strong> (от 10 ₽, СБП / Карты). Каждый донат помогает развивать софт дальше!
+      </p>
+
+      <div class="celebration-actions">
+        <a href="https://www.donationalerts.com/r/davronsvv" target="_blank" rel="noopener" class="donate-cta-btn pulse-glow" style="width:100%;justify-content:center;text-decoration:none">
+          <svg class="ico" style="width:18px;height:18px;color:#fff"><use href="#i-heart"/></svg>
+          <span>Сказать спасибо на DonationAlerts</span>
+          <svg class="ico" style="width:14px;height:14px;color:rgba(255,255,255,.8)"><use href="#i-external"/></svg>
+        </a>
+      </div>
+
+      <div class="celebration-sub-actions">
+        <button onclick="copyDonateLink(); toast('Ссылка на донат скопирована! ❤️');" class="btn" style="font-size:12px;padding:6px 12px">
+          <svg class="ico" style="width:13px;height:13px"><use href="#i-copy"/></svg>
+          <span>Скопировать ссылку</span>
+        </button>
+        <button onclick="switchTab('donate'); closeCelebrationModal();" class="btn ghost" style="font-size:12px;color:var(--text-secondary)">
+          Подробнее о проекте →
+        </button>
+        <button onclick="closeCelebrationModal()" class="btn ghost" style="font-size:12px;color:var(--text-tertiary);margin-left:auto">
+          Закрыть
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
 // ────── helpers ──────
@@ -927,17 +1477,232 @@ function toast(msg, type='ok'){
 }
 
 // ────── tabs ──────
+function switchTab(name){
+  if(!name) return;
+  const tabEl = document.querySelector(`.tab[data-tab="${name}"]`);
+  const panelEl = document.querySelector(`.panel[data-panel="${name}"]`);
+  if(!tabEl || !panelEl) return;
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+  tabEl.classList.add('active');
+  panelEl.classList.add('active');
+  // При переходе на диск/безлимит — подтянем превью
+  if(name === 'disk') refreshPreview('disk');
+  if(name === 'photos') refreshPreview('unlim');
+  try {
+    const url = new URL(window.location);
+    url.searchParams.set('tab', name);
+    window.history.replaceState({}, '', url);
+  } catch(e) {}
+}
+
 document.querySelectorAll('.tab').forEach(t=>{
-  t.onclick=()=>{
-    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
-    t.classList.add('active');
-    document.querySelector(`.panel[data-panel="${t.dataset.tab}"]`).classList.add('active');
-    // При переходе на диск/безлимит — подтянем превью
-    if(t.dataset.tab === 'disk') refreshPreview('disk');
-    if(t.dataset.tab === 'photos') refreshPreview('unlim');
-  };
+  t.onclick=()=>switchTab(t.dataset.tab);
 });
+
+function copyDonateLink(){
+  const url = 'https://www.donationalerts.com/r/davronsvv';
+  const done = () => toast('Ссылка скопирована в буфер обмена! ❤️');
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(url).then(done).catch(()=>fallbackCopy(url));
+  } else {
+    fallbackCopy(url);
+  }
+}
+
+function fallbackCopy(text){
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand('copy');
+  } catch(e){}
+  document.body.removeChild(ta);
+}
+
+// ────── Celebration & Donation Modal ──────
+let _activeSessions = {
+  disk: false,
+  diskStart: 0,
+  unlim: false,
+  unlimStart: 0,
+  pipeline: false,
+};
+let _celebratedKeys = new Set();
+let _confettiAnimId = null;
+
+function playCelebrationSound(){
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if(!AudioCtx) return;
+    const ctx = new AudioCtx();
+    if(ctx.state === 'suspended') ctx.resume();
+    // Мажорный праздничный перезвон C5 -> E5 -> G5 -> C6
+    const notes = [
+      { f: 523.25, t: 0.00, d: 0.16 },
+      { f: 659.25, t: 0.12, d: 0.18 },
+      { f: 783.99, t: 0.24, d: 0.22 },
+      { f: 1046.50, t: 0.40, d: 0.55 },
+    ];
+    notes.forEach(n => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(n.f, ctx.currentTime + n.t);
+      gain.gain.setValueAtTime(0, ctx.currentTime + n.t);
+      gain.gain.linearRampToValueAtTime(0.2, ctx.currentTime + n.t + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + n.t + n.d);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + n.t);
+      osc.stop(ctx.currentTime + n.t + n.d);
+    });
+  } catch(e) {
+    console.warn('Audio error:', e);
+  }
+}
+
+function requestNotificationPermission(){
+  try {
+    if('Notification' in window && Notification.permission === 'default'){
+      Notification.requestPermission().catch(()=>{});
+    }
+  } catch(e){}
+}
+
+function sendDesktopNotification(title, body){
+  try {
+    if('Notification' in window && Notification.permission === 'granted'){
+      new Notification(title, {
+        body: body,
+        icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="%230a84ff" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>'
+      });
+    }
+  } catch(e){}
+}
+
+function triggerConfetti(){
+  const canvas = document.getElementById('celebration-canvas');
+  if(!canvas) return;
+  const ctx = canvas.getContext('2d');
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  
+  const colors = ['#30d158', '#0a84ff', '#ff375f', '#bf5af2', '#ffd60a', '#ff9f0a'];
+  const pieces = [];
+  const count = 70;
+  for(let i = 0; i < count; i++){
+    pieces.push({
+      x: canvas.width / 2 + (Math.random() - 0.5) * 140,
+      y: canvas.height / 2 - 80,
+      vx: (Math.random() - 0.5) * 14,
+      vy: (Math.random() * -12) - 4,
+      size: Math.random() * 8 + 6,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      rot: Math.random() * 360,
+      vrot: (Math.random() - 0.5) * 12,
+      opacity: 1,
+    });
+  }
+  
+  if(_confettiAnimId) cancelAnimationFrame(_confettiAnimId);
+  let start = performance.now();
+  
+  function frame(now){
+    const elapsed = (now - start) / 1000;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    let alive = false;
+    for(const p of pieces){
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.38;
+      p.vx *= 0.985;
+      p.rot += p.vrot;
+      if(elapsed > 2.0){
+        p.opacity = Math.max(0, 1 - (elapsed - 2.0) / 1.5);
+      }
+      if(p.opacity > 0 && p.y < canvas.height + 50){
+        alive = true;
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate((p.rot * Math.PI) / 180);
+        ctx.globalAlpha = p.opacity;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.6);
+        ctx.restore();
+      }
+    }
+    if(alive && elapsed < 4.0){
+      _confettiAnimId = requestAnimationFrame(frame);
+    } else {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      _confettiAnimId = null;
+    }
+  }
+  _confettiAnimId = requestAnimationFrame(frame);
+}
+
+function showCelebrationModal(info){
+  info = info || {};
+  document.getElementById('celebration-title').textContent = info.title || 'Все файлы успешно скачаны!';
+  document.getElementById('celebration-sub').textContent = info.subtitle || 'Резервная копия ваших файлов с Яндекс.Диска сохранена на локальном накопителе.';
+  document.getElementById('celebration-stat-files').textContent = (info.files || 0).toLocaleString('ru');
+  document.getElementById('celebration-stat-size').textContent = human(info.size || 0);
+  document.getElementById('celebration-stat-time').textContent = info.time || '—';
+  
+  const errEl = document.getElementById('celebration-stat-errors');
+  const errs = info.errors || 0;
+  errEl.textContent = errs.toLocaleString('ru');
+  errEl.style.color = errs === 0 ? 'var(--green)' : 'var(--red)';
+
+  const backdrop = document.getElementById('celebration-backdrop');
+  backdrop.classList.add('show');
+  
+  playCelebrationSound();
+  sendDesktopNotification(
+    `🎉 ${info.title || 'Загрузка завершена!'}`,
+    `Успешно сохранено ${((info.files||0)).toLocaleString('ru')} файлов (${human(info.size||0)}). Откройте приложение для деталей.`
+  );
+  triggerConfetti();
+}
+
+function closeCelebrationModal(){
+  const backdrop = document.getElementById('celebration-backdrop');
+  if(backdrop) backdrop.classList.remove('show');
+  if(_confettiAnimId){
+    cancelAnimationFrame(_confettiAnimId);
+    _confettiAnimId = null;
+  }
+}
+
+function handleBackdropClick(e){
+  if(e.target.id === 'celebration-backdrop'){
+    closeCelebrationModal();
+  }
+}
+
+document.addEventListener('keydown', (e)=>{
+  if(e.key === 'Escape'){
+    closeCelebrationModal();
+  }
+});
+
+function testCelebrationModal(){
+  requestNotificationPermission();
+  showCelebrationModal({
+    title: 'Все файлы успешно сохранены!',
+    subtitle: 'Тестовое уведомление: ваши файлы с Яндекс.Диска надёжно сохранены.',
+    files: 18403,
+    size: 348.9 * 1024 * 1024 * 1024,
+    time: '43м 21с',
+    errors: 0,
+    kind: 'test'
+  });
+}
+
 
 // ────── Setup actions ──────
 function toggleTokenView(){
@@ -1087,6 +1852,7 @@ async function clearCookies(){
 
 // ────── Big start / pipeline ──────
 async function bigStart(){
+  requestNotificationPermission();
   const opts = {
     workers: +document.getElementById('opt-workers').value || 4,
     do_disk: document.getElementById('opt-disk').checked,
@@ -1301,6 +2067,7 @@ async function clearDb(kind){
 }
 
 async function downloadSelected(kind, btn){
+  requestNotificationPermission();
   const cats = Object.keys(selectedCats[kind]).filter(k => selectedCats[kind][k]);
   if(cats.length === 0){toast('Ничего не выбрано','err');return}
   const workers = kind === 'unlim'
@@ -1704,6 +2471,18 @@ async function refresh(){
     document.getElementById('u-in-progress').textContent=(ud.in_progress||0).toLocaleString('ru');
     document.getElementById('u-failed').textContent=(ud.failed||0).toLocaleString('ru');
 
+    const uRecent=document.getElementById('unlim-recent');
+    if(uRecent){
+      if(ud.recent&&ud.recent.length){
+        uRecent.innerHTML=ud.recent.map(r=>{
+          const name=(r.path||'').split('/').pop();
+          return `<div class="recent-item" title="${esc(r.path)}"><span class="name">${esc(name)}</span></div>`;
+        }).join('');
+      } else {
+        uRecent.innerHTML='<div class="muted">пока пусто</div>';
+      }
+    }
+
     // Consoles + scan status tracking
     const tasks = s.tasks || {};
     const diskTask = tasks.disk;
@@ -1737,6 +2516,90 @@ async function refresh(){
     // Индикатор активных задач в шапке
     updateActiveTasksHeader(tasks, pl);
 
+    // ── Авто-уведомление и окно завершения с напоминанием о донате ──
+    // 1. Pipeline
+    if(pl.running){
+      _activeSessions.pipeline = true;
+    } else if(_activeSessions.pipeline){
+      _activeSessions.pipeline = false;
+      if(pl.state === 'done'){
+        const totalFiles = (dd.downloaded || 0) + (ud.downloaded || 0);
+        const totalBytes = (dd.bytes_done || 0) + (ud.bytes_done || 0);
+        const totalFailed = (dd.failed || 0) + (ud.failed || 0);
+        const key = `pl_${totalFiles}_${totalBytes}`;
+        if(!_celebratedKeys.has(key)){
+          _celebratedKeys.add(key);
+          showCelebrationModal({
+            title: 'Полный бэкап успешно завершён!',
+            subtitle: 'Все выбранные файлы с диска и безлимита сохранены на ваш компьютер.',
+            files: totalFiles,
+            size: totalBytes,
+            time: dur(pl.elapsed),
+            errors: totalFailed,
+            kind: 'pipeline'
+          });
+        }
+      }
+    }
+
+    // 2. Обычный диск
+    const diskIsDownload = diskTask && diskTask.running && !/Обхожу|Найдено\s*\[/.test((diskTask.log_tail||[]).join(' '));
+    if(diskIsDownload){
+      _activeSessions.disk = true;
+      if(!_activeSessions.diskStart) _activeSessions.diskStart = Date.now();
+    } else if(_activeSessions.disk){
+      if(!diskTask || !diskTask.running){
+        _activeSessions.disk = false;
+        const isSuccess = diskTask && (diskTask.exit_code === 0 || diskTask.exit_code === null) && !isStopped(diskTask.exit_code);
+        if(isSuccess && dd.pending === 0 && (dd.downloaded > 0 || dd.downloaded + dd.skipped > 0)){
+          const key = `disk_${dd.downloaded}_${dd.bytes_done}`;
+          if(!_celebratedKeys.has(key)){
+            _celebratedKeys.add(key);
+            showCelebrationModal({
+              title: 'Обычный диск успешно скачан!',
+              subtitle: 'Все выбранные файлы с диска загружены на ваш компьютер.',
+              files: dd.downloaded || 0,
+              size: dd.bytes_done || 0,
+              time: dur(diskTask?.elapsed || (Date.now() - (_activeSessions.diskStart||Date.now()))/1000),
+              errors: dd.failed || 0,
+              kind: 'disk'
+            });
+          }
+        }
+      }
+    }
+
+    // 3. Безлимит
+    const unlimWorkers = Object.keys(tasks).filter(k=>k.startsWith('unlim_w'));
+    const unlimIsActive = unlimWorkers.some(w=>tasks[w].running);
+    if(unlimIsActive){
+      _activeSessions.unlim = true;
+      if(!_activeSessions.unlimStart) _activeSessions.unlimStart = Date.now();
+    } else if(_activeSessions.unlim){
+      const anyStillRunning = unlimWorkers.some(w=>tasks[w].running);
+      if(!anyStillRunning){
+        _activeSessions.unlim = false;
+        const anyStopped = unlimWorkers.some(w=>isStopped(tasks[w].exit_code));
+        const anyErr = unlimWorkers.some(w=>tasks[w].exit_code !== 0 && tasks[w].exit_code !== null && !isStopped(tasks[w].exit_code));
+        if(!anyStopped && !anyErr && ud.pending === 0 && ud.downloaded > 0){
+          const key = `unlim_${ud.downloaded}_${ud.bytes_done}`;
+          if(!_celebratedKeys.has(key)){
+            _celebratedKeys.add(key);
+            const maxElapsed = Math.max(...unlimWorkers.map(w=>tasks[w].elapsed||0), 0);
+            showCelebrationModal({
+              title: 'Безлимит фото и видео успешно скачан!',
+              subtitle: 'Все медиафайлы из скрытого хранилища сохранены на ваш компьютер.',
+              files: ud.downloaded || 0,
+              size: ud.bytes_done || 0,
+              time: dur(maxElapsed || (Date.now() - (_activeSessions.unlimStart||Date.now()))/1000),
+              errors: ud.failed || 0,
+              kind: 'unlim'
+            });
+          }
+        }
+      }
+    }
+
     setConsole('disk-console', (tasks.disk?.log_tail||[]).join('\n'));
     const unlimLog = [];
     for (const k of Object.keys(tasks)){
@@ -1768,6 +2631,15 @@ if (window.location.protocol === 'file:') {
   const warn = document.getElementById('file-protocol-warning');
   if (warn) warn.style.display = 'block';
 }
+
+// Открытие нужной вкладки из URL (?tab=donate или #donate)
+try {
+  const sp = new URLSearchParams(window.location.search);
+  const qTab = sp.get('tab') || (window.location.hash ? window.location.hash.replace(/^#/, '') : null);
+  if(qTab){
+    switchTab(qTab);
+  }
+} catch(e) {}
 
 refresh();
 setInterval(refresh, 1500);

@@ -75,3 +75,26 @@ def test_existing_remote_paths(st):
     st.mark_pending("disk:/a.jpg", 1, None)
     st.mark_pending("disk:/b.jpg", 1, None)
     assert st.get_existing_remote_paths() == {"disk:/a.jpg", "disk:/b.jpg"}
+
+
+def test_context_manager(tmp_path):
+    db_path = str(tmp_path / "cm_test.db")
+    with State(db_path) as s:
+        s.mark_pending("disk:/test.jpg", 123, "md5")
+        assert s.get_stats()["pending"] == 1
+    # After exit, connections should be closed
+    assert len(s._all_conns) == 0
+
+
+def test_mark_pending_batch(st):
+    items = [
+        ("disk:/1.jpg", 100, "md1"),
+        ("disk:/2.jpg", 200, "md2"),
+        ("disk:/3.jpg", 300, None),
+    ]
+    st.mark_pending_batch(items)
+    stats = st.get_stats()
+    assert stats["pending"] == 3
+    assert stats["bytes_total"] == 600
+
+

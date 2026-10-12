@@ -7,6 +7,7 @@ import pytest
 from utils import (
     human_bytes,
     human_duration,
+    human_duration_ru,
     sanitize_component,
     sanitize_remote_path,
     sqlite_ro_uri,
@@ -106,3 +107,53 @@ def test_human_bytes():
 def test_human_duration():
     assert human_duration(0) == "00:00:00"
     assert human_duration(3661) == "01:01:01"
+    assert human_duration(None) == "00:00:00"
+
+
+def test_human_duration_ru():
+    assert human_duration_ru(0) == "0с"
+    assert human_duration_ru(45) == "45с"
+    assert human_duration_ru(125) == "2м 05с"
+    assert human_duration_ru(3665) == "1ч 01м 05с"
+    assert human_duration_ru(None) == "—"
+
+
+def test_categories_and_media():
+    from utils import categorize, classify_dir, is_media
+
+    assert is_media("photo.jpg") is True
+    assert is_media("video.mp4") is True
+    assert is_media("document.pdf") is False
+
+    assert categorize("pic.PNG") == "photos"
+    assert categorize("movie.mkv") == "videos"
+    assert categorize("song.mp3") == "audio"
+    assert categorize("report.docx") == "documents"
+    assert categorize("archive.zip") == "archives"
+    assert categorize("setup.exe") == "programs"
+    assert categorize("unknown.xyz") == "other"
+
+    assert classify_dir("pic.jpg") == "Фото"
+    assert classify_dir("movie.avi") == "Видео"
+    assert classify_dir("report.pdf") == "Документы"
+    assert classify_dir("unknown.xyz") == "Прочее"
+
+
+def test_avoid_case_collision(tmp_path):
+    from utils import IS_WINDOWS, avoid_case_collision
+
+    if not IS_WINDOWS:
+        return
+
+    f_upper = tmp_path / "IMAGE.PNG"
+    f_upper.write_text("dummy")
+
+    # Файл с тем же именем, но строчными буквами должен получить суффикс
+    f_lower = str(tmp_path / "image.png")
+    suffixed = avoid_case_collision(f_lower)
+    assert suffixed.endswith("image_1.png")
+
+    # Файл с точно таким же регистром не должен переименовываться (resume)
+    same_case = avoid_case_collision(str(f_upper))
+    assert same_case == str(f_upper)
+

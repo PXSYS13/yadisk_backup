@@ -6,7 +6,6 @@ import pytest
 
 import webui
 
-
 # ── классификация ───────────────────────────────────────────────────────────
 
 
@@ -169,3 +168,23 @@ def test_local_size_marks_partial_scan(tmp_path):
     out = webui.local_size(str(tmp_path))
     assert out["bytes"] == 5
     assert out["partial"] is False
+
+
+def test_sql_ident_whitelist_rejects_injection(disk_db):
+    with pytest.raises(ValueError, match="Недопустимый table"):
+        webui.db_stats(disk_db, "files; DROP TABLE files; --", "remote_path")
+
+    with pytest.raises(ValueError, match="Недопустимый column"):
+        webui.preview_db(disk_db, "files", "1=1; --")
+
+
+def test_donate_redirect():
+    resp = webui.donate()
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "/?tab=donate"
+
+
+def test_donation_url_constant():
+    assert webui.DONATION_URL == "https://www.donationalerts.com/r/davronsvv"
+
+
