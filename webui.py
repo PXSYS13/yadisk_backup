@@ -24,17 +24,14 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Optional
 
 from dotenv import load_dotenv, set_key
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from utils import sqlite_ro_uri
-
-sys.stdout.reconfigure(encoding="utf-8")
+from utils import CATEGORY_LABELS, categorize, sqlite_ro_uri
 
 PROJECT = Path(__file__).resolve().parent
 ENV_FILE = PROJECT / ".env"
@@ -84,44 +81,6 @@ async def csrf_guard(request, call_next):
         if origin and not any(origin.startswith(a) for a in _ALLOWED_ORIGINS):
             return JSONResponse({"detail": "Forbidden origin"}, status_code=403)
     return await call_next(request)
-
-
-# ── Категории файлов ────────────────────────────────────────────────────────
-
-CATEGORIES = {
-    "photos": {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif",
-               ".bmp", ".tiff", ".tif", ".raw", ".arw", ".cr2", ".nef",
-               ".dng", ".orf"},
-    "videos": {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm", ".3gp", ".3g2",
-               ".mpg", ".mpeg", ".wmv", ".flv", ".vob", ".mts", ".m2ts"},
-    "audio": {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".oga", ".aac", ".wma",
-              ".opus", ".aiff", ".alac"},
-    "documents": {".doc", ".docx", ".pdf", ".txt", ".rtf", ".odt",
-                  ".xls", ".xlsx", ".ods", ".csv",
-                  ".ppt", ".pptx", ".odp"},
-    "archives": {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".iso",
-                 ".cab", ".tgz", ".tbz"},
-    "programs": {".exe", ".dll", ".msi", ".bat", ".cmd", ".sys", ".com",
-                 ".scr", ".vbs", ".ps1", ".sh", ".jar"},
-}
-
-CATEGORY_LABELS = {
-    "photos": "Фото",
-    "videos": "Видео",
-    "audio": "Аудио",
-    "documents": "Документы",
-    "archives": "Архивы",
-    "programs": "Программы",
-    "other": "Прочее",
-}
-
-
-def categorize(path: str) -> str:
-    ext = os.path.splitext(path)[1].lower()
-    for cat, exts in CATEGORIES.items():
-        if ext in exts:
-            return cat
-    return "other"
 
 
 # ── Менеджер фоновых процессов ──────────────────────────────────────────────
@@ -245,15 +204,15 @@ class Pipeline:
     """
 
     def __init__(self):
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._stop = False
         self._owned_slots: set[str] = set()  # слоты которые pipeline сам запустил
         self.state: str = "idle"  # idle | running | done | failed
         self.step: str = "—"
         self.log: deque[str] = deque(maxlen=120)
-        self.started_at: Optional[float] = None
-        self.finished_at: Optional[float] = None
+        self.started_at: float | None = None
+        self.finished_at: float | None = None
         self.skip_disk: bool = False
         self.skip_unlim: bool = False
         self.workers: int = 4
@@ -306,7 +265,8 @@ class Pipeline:
             with tm._lock:
                 t = tm._tasks.get(slot)
             if not t:
-                time.sleep(0.5); continue
+                time.sleep(0.5)
+                continue
             if not t.alive():
                 code = t.proc.poll()
                 self._log(f"{on_finish_msg} (exit={code})")
@@ -324,30 +284,43 @@ class Pipeline:
             tok = check_token(cfg["token"])
             if not tok.get("ok"):
                 self._log(f"❌ Токен невалиден: {tok.get('msg')}")
-                self.state = "failed"; return
+                self.state = "failed"
+                return
             self._log(f"✓ Токен OK: {tok.get('login')}, {tok.get('used',0)/1e9:.1f} ГБ занято")
 
             # === ДИСК ===
             if not self.skip_disk:
                 # scan
-                if self._stop: self._abort(); return
+                if self._stop:
+                    self._abort()
+                    return
                 self.step = "сканирую диск"
                 self._log("🔍 Запускаю scan...")
                 ok, msg = self._own_start("disk", "main.py", ["scan"])
                 if not ok:
-                    self._log(f"❌ scan: {msg}"); self.state = "failed"; return
+                    self._log(f"❌ scan: {msg}")
+                    self.state = "failed"
+                    return
                 self._wait_task("disk", "✓ scan завершён")
-                if self._stop: self._abort(); return
+                if self._stop:
+                    self._abort()
+                    return
 
                 # download
                 self.step = "качаю диск"
                 self._log(f"⬇️ Запускаю download (workers={self.workers})...")
-                ok, msg = self._own_start("disk", "main.py",
-                                          ["download", "--workers", str(self.workers), "--no-scan"])
+                ok, msg = self._own_start(
+                    "disk", "main.py",
+                    ["download", "--workers", str(self.workers), "--no-scan"],
+                )
                 if not ok:
-                    self._log(f"❌ download: {msg}"); self.state = "failed"; return
+                    self._log(f"❌ download: {msg}")
+                    self.state = "failed"
+                    return
                 self._wait_task("disk", "✓ download диска завершён")
-                if self._stop: self._abort(); return
+                if self._stop:
+                    self._abort()
+                    return
             else:
                 self._log("⏭ Шаг 'диск' пропущен")
 
@@ -358,14 +331,20 @@ class Pipeline:
                     self._log(f"⚠️ Cookies не загружены, пропускаю безлимит: {cookies.get('msg')}")
                 else:
                     # collect
-                    if self._stop: self._abort(); return
+                    if self._stop:
+                        self._abort()
+                        return
                     self.step = "собираю список безлимита"
                     self._log("🗂 Запускаю unlim collect...")
                     ok, msg = self._own_start("unlim_collect", "unlim_download.py", ["--collect"])
                     if not ok:
-                        self._log(f"❌ unlim collect: {msg}"); self.state = "failed"; return
+                        self._log(f"❌ unlim collect: {msg}")
+                        self.state = "failed"
+                        return
                     self._wait_task("unlim_collect", "✓ список безлимита собран")
-                    if self._stop: self._abort(); return
+                    if self._stop:
+                        self._abort()
+                        return
 
                     # workers
                     self.step = f"скачиваю безлимит ({self.workers} воркеров)"
@@ -387,10 +366,16 @@ class Pipeline:
                                     break
                         if not any_alive:
                             break
-                        time.sleep(2)
+                    if self._stop:
+                        self._abort()
+                        return
                     self._log("✓ все воркеры безлимита завершили работу")
             else:
                 self._log("⏭ Шаг 'безлимит' пропущен")
+
+            if self._stop:
+                self._abort()
+                return
 
             self.state = "done"
             self.step = "финиш"
@@ -422,9 +407,22 @@ pipeline = Pipeline()
 
 # ── Чтение состояния ────────────────────────────────────────────────────────
 
+# Белый список для SQL-идентификаторов — защита от инъекций через f-string
+_ALLOWED_TABLES = {"files", "unlim_files"}
+_ALLOWED_COLUMNS = {"remote_path", "file_id"}
+
+
+def _validate_sql_ident(value: str, allowed: set[str], label: str) -> str:
+    """Проверяет что SQL-идентификатор из белого списка."""
+    if value not in allowed:
+        raise ValueError(f"Недопустимый {label}: {value!r}")
+    return value
+
 
 def db_stats(db_file: Path, table: str = "files",
              id_col: str = "remote_path") -> dict:
+    table = _validate_sql_ident(table, _ALLOWED_TABLES, "table")
+    id_col = _validate_sql_ident(id_col, _ALLOWED_COLUMNS, "column")
     if not db_file.exists():
         return {"total": 0, "pending": 0, "downloaded": 0, "skipped": 0,
                 "failed": 0, "in_progress": 0,
@@ -487,7 +485,8 @@ def local_size(path: str) -> dict:
     if cached and (now - cached["at"] < _LOCAL_SIZE_TTL):
         return cached["data"]
 
-    n = 0; b = 0
+    n = 0
+    b = 0
     partial = False
     deadline = now + 2.0  # макс 2 секунды на обход
     try:
@@ -572,6 +571,8 @@ def check_cookies() -> dict:
 
 # ── Endpoints ───────────────────────────────────────────────────────────────
 
+DONATION_URL = "https://www.donationalerts.com/r/davronsvv"
+
 
 @app.get("/", response_class=HTMLResponse)
 def index():
@@ -581,10 +582,17 @@ def index():
     return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
+@app.get("/donate")
+def donate():
+    """Перенаправляет на страницу пожертвования / вкладку доната."""
+    return RedirectResponse(url="/?tab=donate", status_code=307)
+
+
 @app.get("/api/status")
 def api_status():
     cfg = get_config()
     return {
+        "donation_url": DONATION_URL,
         "config": {**cfg, "token_masked": mask_token(cfg["token"])},
         "token": check_token(cfg["token"]),
         "cookies": check_cookies(),
@@ -712,6 +720,8 @@ def api_clear_token():
 
 def preview_db(db_file: Path, table: str, id_col: str) -> dict:
     """Группирует файлы в БД по категориям."""
+    table = _validate_sql_ident(table, _ALLOWED_TABLES, "table")
+    id_col = _validate_sql_ident(id_col, _ALLOWED_COLUMNS, "column")
     if not db_file.exists():
         return {"empty": True, "categories": {}}
     c = None
@@ -744,6 +754,8 @@ def filter_to_categories(db_file: Path, table: str, id_col: str,
     Уже скачанные/skipped/in_progress не трогаем.
     Возвращает (skipped_count, kept_pending).
     """
+    table = _validate_sql_ident(table, _ALLOWED_TABLES, "table")
+    id_col = _validate_sql_ident(id_col, _ALLOWED_COLUMNS, "column")
     if not db_file.exists():
         return (0, 0)
     sel = set(selected)
@@ -770,8 +782,10 @@ def filter_to_categories(db_file: Path, table: str, id_col: str,
                 )
                 c.execute("COMMIT")
             except Exception:
-                try: c.execute("ROLLBACK")
-                except sqlite3.Error: pass
+                try:
+                    c.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
                 raise
         return (len(to_skip), kept)
     finally:
@@ -780,6 +794,7 @@ def filter_to_categories(db_file: Path, table: str, id_col: str,
 
 def unskip_category_marker(db_file: Path, table: str) -> int:
     """Сбрасывает skipped-with-marker обратно в pending — на случай повторного выбора."""
+    table = _validate_sql_ident(table, _ALLOWED_TABLES, "table")
     if not db_file.exists():
         return 0
     c = sqlite3.connect(db_file, timeout=30)
@@ -794,8 +809,10 @@ def unskip_category_marker(db_file: Path, table: str) -> int:
             c.execute("COMMIT")
             return n
         except Exception:
-            try: c.execute("ROLLBACK")
-            except sqlite3.Error: pass
+            try:
+                c.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
             raise
     finally:
         c.close()
@@ -1048,6 +1065,12 @@ def _open_browser_when_ready(host: str, port: int):
 
 
 def main():
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
     import uvicorn
     host = "127.0.0.1"
     port = 8000

@@ -16,37 +16,14 @@ import time
 from collections import deque
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from utils import sqlite_ro_uri  # noqa: E402  (после sys.path — иначе не найдётся при запуске из другой папки)
+from utils import human_bytes, sqlite_ro_uri
+from utils import human_duration_ru as human_duration
 
 REFRESH_SEC = 2.0
 HISTORY_LEN = 30   # храним последние N измерений для скорости / ETA
 RECENT_LIMIT = 6   # сколько последних файлов показывать
 
 DB_FILE = Path(__file__).resolve().parent / "state.db"
-
-
-def human_bytes(n: float) -> str:
-    n = float(n)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024:
-            return f"{n:.2f} {unit}"
-        n /= 1024
-    return f"{n:.2f} PB"
-
-
-def human_duration(seconds: float) -> str:
-    if seconds is None or seconds < 0 or seconds != seconds:  # NaN check
-        return "—"
-    seconds = int(seconds)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    if h > 0:
-        return f"{h}ч {m:02d}м {s:02d}с"
-    if m > 0:
-        return f"{m}м {s:02d}с"
-    return f"{s}с"
 
 
 def clear_screen() -> None:

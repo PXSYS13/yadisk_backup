@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Iterable, Iterator, Optional
+from datetime import UTC, datetime
 
 
 def _utc_now() -> str:
     """Текущее время UTC в том же формате, что писали раньше (utcnow() устарел)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 SCHEMA = """
@@ -88,12 +88,22 @@ class State:
     def mark_pending(
         self,
         remote_path: str,
-        size: Optional[int],
-        md5: Optional[str],
+        size: int | None,
+        md5: str | None,
     ) -> None:
         """Регистрирует файл как ожидающий скачивания. Не перетирает уже завершённые."""
+        self.mark_pending_batch([(remote_path, size, md5)])
+
+    def mark_pending_batch(
+        self,
+        items: Iterable[tuple[str, int | None, str | None]],
+    ) -> None:
+        """Пакетная регистрация файлов — значительно ускоряет scan_tree и scan_media."""
+        items_list = list(items)
+        if not items_list:
+            return
         with self._tx() as conn:
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO files (remote_path, size, md5, status)
                 VALUES (?, ?, ?, 'pending')
@@ -102,7 +112,7 @@ class State:
                     md5 = COALESCE(excluded.md5, files.md5)
                 WHERE files.status NOT IN ('downloaded', 'skipped')
                 """,
-                (remote_path, size, md5),
+                items_list,
             )
 
     def mark_downloaded(self, remote_path: str, local_path: str) -> None:
@@ -196,6 +206,12 @@ class State:
             row["remote_path"]
             for row in self._conn().execute("SELECT remote_path FROM files")
         }
+
+    def __enter__(self) -> State:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
     def close(self) -> None:
         """Закрывает все соединения, открытые в любых потоках."""

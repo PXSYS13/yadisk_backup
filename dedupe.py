@@ -10,21 +10,11 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 
-sys.stdout.reconfigure(encoding="utf-8")
+from utils import is_media
 
 DB = os.path.join(os.path.dirname(__file__), "state.db")
-
-# Расширения которые считаем «медиа» — то что хочет пользователь
-MEDIA_EXTS = {
-    # фото
-    ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif",
-    ".bmp", ".tiff", ".tif", ".raw", ".arw", ".cr2", ".nef", ".dng", ".orf",
-    # видео
-    ".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm", ".3gp", ".3g2",
-    ".mpg", ".mpeg", ".wmv", ".flv", ".vob", ".mts", ".m2ts",
-}
 
 # Приоритет папок — какой путь оставлять при дубликате
 # (раньше в списке = выше приоритет = его оставляем, остальные → skipped)
@@ -45,12 +35,13 @@ def folder_priority(path: str) -> int:
     return 1000
 
 
-def is_media(path: str) -> bool:
-    ext = os.path.splitext(path)[1].lower()
-    return ext in MEDIA_EXTS
-
-
 def main() -> int:
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
     conn = sqlite3.connect(DB, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -83,8 +74,6 @@ def main() -> int:
     print(f"  из них НЕ медиа: {len(non_media)} файлов "
           f"({sum(r['size'] or 0 for r in non_media)/1e9:.2f} ГБ)")
     if non_media:
-        # Покажем примеры
-        from collections import Counter
         ext_counter = Counter()
         for r in non_media:
             ext_counter[os.path.splitext(r["remote_path"])[1].lower() or "<нет>"] += 1

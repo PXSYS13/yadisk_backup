@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import sys
 
@@ -20,6 +21,96 @@ _WIN_RESERVED = {
 IS_WINDOWS = sys.platform.startswith("win")
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
+
+# ── Расширения файлов по категориям ─────────────────────────────────────────
+
+PHOTO_EXTS = {
+    ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".gif",
+    ".bmp", ".tiff", ".tif", ".raw", ".arw", ".cr2", ".nef", ".dng", ".orf",
+}
+VIDEO_EXTS = {
+    ".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm", ".3gp", ".3g2",
+    ".mpg", ".mpeg", ".wmv", ".flv", ".vob", ".mts", ".m2ts",
+}
+AUDIO_EXTS = {
+    ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".oga", ".aac", ".wma",
+    ".opus", ".aiff", ".alac",
+}
+DOC_EXTS = {
+    ".doc", ".docx", ".pdf", ".txt", ".rtf", ".odt",
+    ".xls", ".xlsx", ".ods", ".csv",
+    ".ppt", ".pptx", ".odp",
+}
+ARCHIVE_EXTS = {
+    ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".iso",
+    ".cab", ".tgz", ".tbz", ".lz", ".lzma",
+}
+PROGRAM_EXTS = {
+    ".exe", ".dll", ".msi", ".bat", ".cmd", ".sys", ".com",
+    ".scr", ".vbs", ".ps1", ".sh", ".jar",
+}
+MEDIA_EXTS = PHOTO_EXTS | VIDEO_EXTS
+
+CATEGORIES = {
+    "photos": PHOTO_EXTS,
+    "videos": VIDEO_EXTS,
+    "audio": AUDIO_EXTS,
+    "documents": DOC_EXTS,
+    "archives": ARCHIVE_EXTS,
+    "programs": PROGRAM_EXTS,
+}
+
+CATEGORY_LABELS = {
+    "photos": "Фото",
+    "videos": "Видео",
+    "audio": "Аудио",
+    "documents": "Документы",
+    "archives": "Архивы",
+    "programs": "Программы",
+    "other": "Прочее",
+}
+
+# Директории-назначения для organize.py
+DIR_PHOTO = "Фото"
+DIR_VIDEO = "Видео"
+DIR_DOC = "Документы"
+DIR_ARCHIVE = "Архивы"
+DIR_PROGRAM = "Программы"
+DIR_AUDIO = "Аудио"
+DIR_OTHER = "Прочее"
+DIR_DUP = "_duplicates"
+
+
+def categorize(path: str) -> str:
+    """Определяет категорию файла по расширению."""
+    ext = os.path.splitext(path)[1].lower()
+    for cat, exts in CATEGORIES.items():
+        if ext in exts:
+            return cat
+    return "other"
+
+
+def is_media(path: str) -> bool:
+    """Проверяет, является ли файл медиа (фото или видео) по расширению."""
+    ext = os.path.splitext(path)[1].lower()
+    return ext in MEDIA_EXTS
+
+
+# Маппинг категория → имя DIR_*
+_CATEGORY_TO_DIR = {
+    "photos": DIR_PHOTO,
+    "videos": DIR_VIDEO,
+    "audio": DIR_AUDIO,
+    "documents": DIR_DOC,
+    "archives": DIR_ARCHIVE,
+    "programs": DIR_PROGRAM,
+    "other": DIR_OTHER,
+}
+
+
+def classify_dir(path: str) -> str:
+    """Определяет целевую директорию (Фото, Видео, ...) для файла по расширению."""
+    return _CATEGORY_TO_DIR.get(categorize(path), DIR_OTHER)
 
 
 def sanitize_component(name: str) -> str:
@@ -46,8 +137,7 @@ def sanitize_remote_path(remote_path: str) -> str:
     """Превращает /disk/foo:bar/file?.jpg → foo_bar/file_.jpg (относительный путь)."""
     # Убираем префикс disk: если есть
     p = remote_path
-    if p.startswith("disk:"):
-        p = p[5:]
+    p = p.removeprefix("disk:")
     p = p.lstrip("/")
     parts = [sanitize_component(part) for part in p.split("/") if part]
     return "/".join(parts)
@@ -89,20 +179,19 @@ def avoid_case_collision(local_path: str) -> str:
     """
     if not IS_WINDOWS:
         return local_path
-    if not os.path.exists(local_path):
-        # Проверим, не лежит ли в этой папке файл с тем же именем в другом регистре
-        parent = os.path.dirname(local_path)
-        name = os.path.basename(local_path)
-        if not parent or not os.path.isdir(parent):
-            return local_path
-        try:
-            existing = os.listdir(parent)
-        except OSError:
-            return local_path
-        existing_lower = {e.lower(): e for e in existing}
-        if name.lower() in existing_lower and existing_lower[name.lower()] != name:
-            return _suffix_path(local_path, existing_lower)
+    parent = os.path.dirname(local_path)
+    name = os.path.basename(local_path)
+    if not parent or not os.path.isdir(parent):
         return local_path
+    try:
+        existing = os.listdir(parent)
+    except OSError:
+        return local_path
+    if name in existing:
+        return local_path
+    existing_lower = {e.lower(): e for e in existing}
+    if name.lower() in existing_lower:
+        return _suffix_path(local_path, existing_lower)
     return local_path
 
 
@@ -146,7 +235,7 @@ def file_size_safe(local_path: str) -> int | None:
         return None
 
 
-def human_bytes(n: int | float) -> str:
+def human_bytes(n: float) -> str:
     n = float(n)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024:
@@ -155,9 +244,28 @@ def human_bytes(n: int | float) -> str:
     return f"{n:.2f} PB"
 
 
-def human_duration(seconds: float) -> str:
+def human_duration(seconds: float | None) -> str:
+    """Форматирует длительность в формат HH:MM:SS."""
+    if seconds is None or seconds < 0 or math.isnan(seconds):
+        return "00:00:00"
     seconds = int(seconds)
     h = seconds // 3600
     m = (seconds % 3600) // 60
     s = seconds % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def human_duration_ru(seconds: float | None) -> str:
+    """Форматирует длительность в читаемый русский вид (1ч 02м 03с)."""
+    if seconds is None or seconds < 0 or math.isnan(seconds):
+        return "—"
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h}ч {m:02d}м {s:02d}с"
+    if m > 0:
+        return f"{m}м {s:02d}с"
+    return f"{s}с"
+

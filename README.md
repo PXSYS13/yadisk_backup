@@ -2,7 +2,7 @@
 
 > **Готовый инструмент для миграции с Яндекс.Диска.** Скачивает обычные файлы через официальный REST API и скрытый безлимит (Photoslice — фото с телефонов) через куки браузера. Дедупликация по MD5, сортировка по полочкам, веб-интерфейс. Запуск одним кликом — зависимости ставятся сами.
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+![Python](https://img.shields.io/badge/Python-3.10+-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey) [![DonationAlerts](https://img.shields.io/badge/DonationAlerts-Поддержать-ff375f?logo=heart&logoColor=white)](https://www.donationalerts.com/r/davronsvv)
 
 **Ключевые сценарии:**
 скачать всё с Яндекс.Диска · скачать безлимит Яндекс.Фото · бэкап перед отменой подписки · миграция с Yandex Disk на Google Drive / OneDrive / локальный NAS · экспорт фото с телефона из Яндекс.Диска · download Yandex.Disk Photoslice · Yandex Disk full backup tool
@@ -272,6 +272,18 @@ ruff check --select F,E9 .   # линтер
 ## Лицензия
 
 [MIT](LICENSE) — делай что хочешь, ответственности не несу.
+
+## Поддержать проект ❤️
+
+Проект развивается и поддерживается на чистом энтузиазме. Если инструмент помог спасти ваши фотографии, сэкономил гигабайты трафика или освободил время — вы можете поддержать автора любой комфортной суммой:
+
+[![DonationAlerts](https://img.shields.io/badge/DonationAlerts-Поддержать%20разработку-ff375f?style=for-the-badge&logo=heart&logoColor=white)](https://www.donationalerts.com/r/davronsvv)
+
+👉 **Прямая ссылка:** [donationalerts.com/r/davronsvv](https://www.donationalerts.com/r/davronsvv)  
+Поддерживаются банковские карты (МИР, Visa, Mastercard), СБП и электронные кошельки.  
+В веб-интерфейсе также доступна интерактивная вкладка **«❤️ Поддержать»** (или по адресу `http://localhost:8000/donate`).
+
+---
 
 ## Автор
 

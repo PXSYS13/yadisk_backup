@@ -12,32 +12,27 @@ CLI:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
-import random
-import re
 import sqlite3
 import sys
 import threading
 import time
 
-import requests
-from dotenv import load_dotenv
 from tqdm import tqdm
 
-sys.stdout.reconfigure(encoding="utf-8")
+from unlim_common import (
+    UNLIM_DB_FILE as DB_FILE,
+    UNLIM_SCHEMA as SCHEMA,
+    api_call,
+    ensure_attempts_column,
+    get_sk_uid,
+    load_cookies,
+    make_session,
+)
 
 PROJECT = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(PROJECT, ".env"))
-
-COOKIES_FILE = os.path.join(PROJECT, "cookies.json")
-DB_FILE = os.path.join(PROJECT, "unlim_state.db")
 LOG_FILE = os.path.join(PROJECT, "logs", "unlim.log")
-
-BASE = "https://disk.yandex.ru"
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, encoding="utf-8",
@@ -46,30 +41,6 @@ log = logging.getLogger("unlim")
 
 
 # ── DB ──────────────────────────────────────────────────────────────────────
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS unlim_files (
-    file_id TEXT PRIMARY KEY,
-    cluster_id TEXT,
-    name TEXT,
-    size INTEGER,
-    md5 TEXT,
-    mime TEXT,
-    status TEXT DEFAULT 'pending',
-    local_path TEXT,
-    error TEXT,
-    attempts INTEGER DEFAULT 0,
-    worker_id INTEGER,
-    assigned_at TIMESTAMP,
-    downloaded_at TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_unlim_status ON unlim_files(status);
-CREATE TABLE IF NOT EXISTS unlim_clusters (
-    cluster_id TEXT PRIMARY KEY,
-    size INTEGER,
-    fetched INTEGER DEFAULT 0
-);
-"""
 
 _tls = threading.local()
 
@@ -89,85 +60,7 @@ def db() -> sqlite3.Connection:
 def db_init():
     c = db()
     c.executescript(SCHEMA)
-    # Миграция старых БД: колонка attempts появилась позже
-    cols = {r[1] for r in c.execute("PRAGMA table_info(unlim_files)")}
-    if "attempts" not in cols:
-        c.execute("ALTER TABLE unlim_files ADD COLUMN attempts INTEGER DEFAULT 0")
-
-
-# ── HTTP ────────────────────────────────────────────────────────────────────
-
-
-def load_cookies() -> dict[str, str]:
-    if not os.path.exists(COOKIES_FILE):
-        sys.exit("Нет cookies.json — сначала экспортируй куки из браузера. "
-                 "См. README раздел про куки.")
-    raw = json.loads(open(COOKIES_FILE, encoding="utf-8").read())
-    if not isinstance(raw, list):
-        sys.exit("cookies.json должен быть массивом (формат Cookie-Editor)")
-    return {c["name"]: c["value"] for c in raw
-            if c.get("name") and c.get("value") is not None}
-
-
-def make_session(cookies: dict[str, str]) -> requests.Session:
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": UA, "Accept": "*/*",
-        "Accept-Language": "ru,en;q=0.9",
-        "Origin": BASE, "Referer": f"{BASE}/client/photo",
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/json",
-    })
-    for k, v in cookies.items():
-        s.cookies.set(k, v, domain=".yandex.ru")
-    return s
-
-
-def get_sk_uid(s: requests.Session) -> tuple[str, str]:
-    r = s.get(f"{BASE}/client/disk", timeout=30)
-    if "passport.yandex" in r.url or r.status_code != 200:
-        sys.exit("Куки невалидны — нужно обновить cookies.json")
-    sk = re.search(r'"sk"\s*:\s*"([^"]+)"', r.text)
-    uid = re.search(r'"uid"\s*:\s*"?(\d+)"?', r.text)
-    if not sk or not uid:
-        sys.exit("Не нашёл sk/uid в HTML — Яндекс изменил формат")
-    return sk.group(1), uid.group(1)
-
-
-def make_cid(uid: str) -> str:
-    return f"{uid}{int(time.time() * 1000)}{random.randint(100, 999)}"
-
-
-def api_call(s: requests.Session, sk: str, uid: str, method: str,
-             params=None, retries: int = 3):
-    last_err = None
-    for att in range(retries):
-        try:
-            body = {"sk": sk, "connection_id": make_cid(uid), "apiMethod": method}
-            if params is not None:
-                body["requestParams"] = params
-            r = s.post(f"{BASE}/models-v2", params={"m": method},
-                       json=body, timeout=120)
-            if r.status_code == 200:
-                try:
-                    data = r.json()
-                except Exception:
-                    raise RuntimeError(f"{method}: ответ не JSON: {r.text[:200]}")
-                if not isinstance(data, dict):
-                    raise RuntimeError(f"{method}: неожиданный формат ответа: {type(data).__name__}")
-                return data
-            if r.status_code in (401, 403):
-                sys.exit(f"Сессия истекла (HTTP {r.status_code})")
-            if r.status_code == 429:
-                wait = 30 + att * 30
-                log.warning(f"{method} HTTP 429 → sleep {wait}")
-                time.sleep(wait)
-                continue
-            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
-        except Exception as e:
-            last_err = str(e)
-            time.sleep(2 ** att)
-    raise RuntimeError(f"{method}: {last_err}")
+    ensure_attempts_column(DB_FILE)
 
 
 # ── Логика сбора photoslice ─────────────────────────────────────────────────
@@ -200,8 +93,10 @@ def save_clusters(items: list[dict]):
             )
         c.execute("COMMIT")
     except Exception:
-        try: c.execute("ROLLBACK")
-        except sqlite3.Error: pass
+        try:
+            c.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
         raise
 
 
@@ -243,8 +138,10 @@ def fetch_cluster_resources(s, sk, uid, psid, cluster_rows: list[dict]) -> int:
                       (cid,))
         c.execute("COMMIT")
     except Exception:
-        try: c.execute("ROLLBACK")
-        except sqlite3.Error: pass
+        try:
+            c.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
         raise
     return added
 
@@ -294,8 +191,10 @@ def cmd_collect():
         for k, v in stats.items():
             print(f"     {k}: {v}")
     finally:
-        try: s.close()
-        except Exception: pass
+        try:
+            s.close()
+        except Exception:
+            pass
 
 
 def cmd_status():
@@ -326,6 +225,12 @@ def cmd_retry_failed():
 
 
 def main():
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--collect", action="store_true",
                     help="Собрать список файлов из photoslice")

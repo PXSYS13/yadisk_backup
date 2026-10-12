@@ -15,9 +15,9 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable, Iterator, Optional
 
 import yadisk
 from tenacity import (
@@ -56,6 +56,8 @@ NON_RETRYABLE = (
 
 # Пауза при 429 — Яндекс просит подождать, экспонента с 1 секунды тут не поможет
 RATE_LIMIT_WAIT_SEC = 60.0
+SERVER_ERROR_WAIT_SEC = 5.0
+DEFAULT_TIMEOUT = (30.0, 300.0)  # (connect 30s, read 300s — защита от Read timed out на медленной сети и больших файлах)
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -71,18 +73,24 @@ _wait_exponential = wait_exponential(multiplier=1, min=1, max=60)
 
 
 def _wait_policy(retry_state) -> float:
-    """429 → ждём минуту, остальное → экспонента."""
+    """429 → ждём минуту, 50x ошибки хранилища Яндекса → 5 сек, остальное → экспонента."""
     exc = retry_state.outcome.exception() if retry_state.outcome else None
     if isinstance(exc, yadisk.exceptions.TooManyRequestsError):
         log.warning("Поймали 429 TooManyRequests — жду %.0f сек", RATE_LIMIT_WAIT_SEC)
         return RATE_LIMIT_WAIT_SEC
+    if isinstance(exc, (yadisk.exceptions.InternalServerError,
+                        yadisk.exceptions.BadGatewayError,
+                        yadisk.exceptions.GatewayTimeoutError,
+                        yadisk.exceptions.UnavailableError)):
+        log.warning("Временная ошибка узла Яндекса (%s) — пауза %.0f сек...", type(exc).__name__, SERVER_ERROR_WAIT_SEC)
+        return SERVER_ERROR_WAIT_SEC
     return _wait_exponential(retry_state)
 
 
 _retry = retry(
     retry=retry_if_exception(_is_retryable),
     wait=_wait_policy,
-    stop=stop_after_attempt(5),
+    stop=stop_after_attempt(7),
     reraise=True,
 )
 
@@ -107,8 +115,8 @@ def scan_tree(
     client: yadisk.Client,
     state: State,
     root: str = "/",
-    on_file: Optional[Callable[[str, int], None]] = None,
-    on_dir: Optional[Callable[[str], None]] = None,
+    on_file: Callable[[str, int], None] | None = None,
+    on_dir: Callable[[str], None] | None = None,
 ) -> tuple[int, int]:
     """Обходит дерево начиная с root. Регистрирует файлы как pending.
     Возвращает (количество файлов, суммарный размер).
@@ -136,6 +144,7 @@ def scan_tree(
             log.error("Не смог прочитать %s: %s", cur, e)
             continue
 
+        dir_files = []
         for entry in entries:
             entry_path = entry.path  # вид 'disk:/foo/bar'
             if _is_skipped(entry_path):
@@ -146,16 +155,17 @@ def scan_tree(
                     on_dir(entry_path)
                 queue.append(entry_path)
             elif entry.type == "file":
-                state.mark_pending(
-                    remote_path=entry_path,
-                    size=int(entry.size) if entry.size is not None else None,
-                    md5=getattr(entry, "md5", None),
-                )
+                size = int(entry.size) if entry.size is not None else None
+                md5 = getattr(entry, "md5", None)
+                dir_files.append((entry_path, size, md5))
                 files_count += 1
                 if entry.size:
                     bytes_total += int(entry.size)
                 if on_file:
                     on_file(entry_path, int(entry.size or 0))
+
+        if dir_files:
+            state.mark_pending_batch(dir_files)
 
     return files_count, bytes_total
 
@@ -174,7 +184,7 @@ def scan_media(
     client: yadisk.Client,
     state: State,
     media_types: tuple[str, ...] = ("image", "video"),
-    on_file: Optional[Callable[[str, int], None]] = None,
+    on_file: Callable[[str, int], None] | None = None,
 ) -> tuple[int, int]:
     """Альтернатива scan_tree: использует client.get_files() с фильтром по типу.
     Возвращает все фото и видео со всего диска плоским списком.
@@ -188,6 +198,7 @@ def scan_media(
 
     for media_type in media_types:
         log.info("Запрашиваю media_type=%s...", media_type)
+        page_batch = []
         for entry in _iter_files(client, media_type=media_type):
             entry_path = entry.path
             if _is_skipped(entry_path):
@@ -195,16 +206,22 @@ def scan_media(
             if entry.type != "file":
                 continue
 
-            state.mark_pending(
-                remote_path=entry_path,
-                size=int(entry.size) if entry.size is not None else None,
-                md5=getattr(entry, "md5", None),
-            )
+            size = int(entry.size) if entry.size is not None else None
+            md5 = getattr(entry, "md5", None)
+            page_batch.append((entry_path, size, md5))
             files_count += 1
             if entry.size:
                 bytes_total += int(entry.size)
             if on_file:
                 on_file(entry_path, int(entry.size or 0))
+
+            if len(page_batch) >= 100:
+                state.mark_pending_batch(page_batch)
+                page_batch.clear()
+
+        if page_batch:
+            state.mark_pending_batch(page_batch)
+            page_batch.clear()
 
     return files_count, bytes_total
 
@@ -250,17 +267,17 @@ def _iter_files(client: yadisk.Client, media_type: str, page_size: int = 200):
 @dataclass
 class DownloadJob:
     remote_path: str
-    size: Optional[int]
-    md5: Optional[str]
+    size: int | None
+    md5: str | None
 
 
 @dataclass
 class DownloadResult:
     job: DownloadJob
     status: str  # downloaded | skipped | failed
-    local_path: Optional[str]
+    local_path: str | None
     bytes_written: int
-    error: Optional[str]
+    error: str | None
     duration_ms: int
 
 
@@ -272,7 +289,7 @@ def _ensure_local_dirs(local_path: str) -> None:
 
 @_retry
 def _download_with_retry(client: yadisk.Client, remote: str, local: str) -> None:
-    """Низкоуровневый вызов download с retry."""
+    """Низкоуровневый вызов download с retry (таймаут берётся из default_args клиента)."""
     client.download(remote, to_long_path(local))
 
 
@@ -345,7 +362,7 @@ _all_clients_lock = threading.Lock()
 def _get_thread_client(token: str) -> yadisk.Client:
     cli = getattr(_thread_local, "client", None)
     if cli is None:
-        cli = yadisk.Client(token=token)
+        cli = yadisk.Client(token=token, default_args={"timeout": DEFAULT_TIMEOUT})
         _thread_local.client = cli
         with _all_clients_lock:
             _all_clients.append(cli)
@@ -371,13 +388,12 @@ def download_all(
     state: State,
     download_dir: str,
     workers: int = 4,
-    jobs: Optional[Iterator[DownloadJob]] = None,
+    jobs: Iterator[DownloadJob] | None = None,
 ) -> dict[str, int]:
     """Скачивает все pending файлы из state в пул потоков.
     Возвращает счётчики: {downloaded, skipped, failed, bytes}.
     """
-    if workers < 1:
-        workers = 1
+    workers = max(workers, 1)
     if workers > 5:
         log.warning("workers=%d > 5 — Яндекс будет резать по rate limit. Снижаю до 5.", workers)
         workers = 5
@@ -497,7 +513,7 @@ def check_token(token: str) -> tuple[bool, str]:
             "как YA_DISK_TOKEN=..."
         )
     try:
-        cli = yadisk.Client(token=token)
+        cli = yadisk.Client(token=token, default_args={"timeout": DEFAULT_TIMEOUT})
         if not cli.check_token():
             return False, (
                 "Токен невалиден (Яндекс ответил, что он не работает). "

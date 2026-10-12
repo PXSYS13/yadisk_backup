@@ -2,7 +2,7 @@
 
 import yadisk
 
-from downloader import _is_retryable, _wait_policy, _download_one, DownloadJob
+from downloader import DownloadJob, _download_one, _is_retryable, _wait_policy
 
 
 class _Outcome:
