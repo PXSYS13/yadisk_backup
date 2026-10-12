@@ -981,12 +981,20 @@ def _is_safe_organize_path(path: str) -> tuple[bool, str]:
     except Exception:
         return False, "Невалидный путь"
     norm = abs_path.lower().replace("/", "\\")
+    raw_norm = path.lower().replace("/", "\\")
     # Корень диска (типа C:\ или D:\) — слишком опасно
-    if len(abs_path) <= 3 and abs_path.endswith(":\\"):
+    if (len(abs_path) <= 3 and abs_path.endswith(":\\")) or (
+        len(raw_norm) <= 3 and raw_norm.endswith(":\\")
+    ):
         return False, "Нельзя сортировать корень диска целиком"
     for bad in _FORBIDDEN_ORGANIZE_PREFIXES:
         bad_norm = bad.replace("/", "\\")
-        if norm == bad_norm or norm.startswith(bad_norm + "\\"):
+        if (
+            norm == bad_norm
+            or norm.startswith(bad_norm + "\\")
+            or raw_norm == bad_norm
+            or raw_norm.startswith(bad_norm + "\\")
+        ):
             return False, f"Системная папка запрещена: {bad}"
     if not os.path.isdir(abs_path):
         return False, "Папка не существует"

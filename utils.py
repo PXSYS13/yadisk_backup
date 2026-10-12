@@ -211,10 +211,9 @@ def sqlite_ro_uri(db_path: str | os.PathLike) -> str:
     Экранирует спецсимволы пути: '#' в URI начинает фрагмент, и sqlite молча
     открыл бы ПУСТУЮ базу вместо нашей (проверено на Windows-пути с решёткой).
     """
-    from urllib.parse import quote
+    from pathlib import Path
 
-    p = str(db_path).replace("\\", "/")
-    return "file:" + quote(p, safe="/:") + "?mode=ro"
+    return Path(db_path).resolve().as_uri() + "?mode=ro"
 
 
 def compute_md5(local_path: str, chunk: int = 1024 * 1024) -> str:
