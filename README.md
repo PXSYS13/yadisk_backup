@@ -2,7 +2,7 @@
 
 > **Готовый инструмент для миграции с Яндекс.Диска.** Скачивает обычные файлы через официальный REST API и скрытый безлимит (Photoslice — фото с телефонов) через куки браузера. Дедупликация по MD5, сортировка по полочкам, веб-интерфейс. Запуск одним кликом — зависимости ставятся сами.
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey) [![DonationAlerts](https://img.shields.io/badge/DonationAlerts-Поддержать-ff375f?logo=heart&logoColor=white)](https://www.donationalerts.com/r/davronsvv)
+![Python](https://img.shields.io/badge/Python-3.10+-blue) ![uv](https://img.shields.io/badge/managed%20by-uv-DE5FE9?logo=uv&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey) [![DonationAlerts](https://img.shields.io/badge/DonationAlerts-Поддержать-ff375f?logo=heart&logoColor=white)](https://www.donationalerts.com/r/davronsvv)
 
 **Ключевые сценарии:**
 скачать всё с Яндекс.Диска · скачать безлимит Яндекс.Фото · бэкап перед отменой подписки · миграция с Yandex Disk на Google Drive / OneDrive / локальный NAS · экспорт фото с телефона из Яндекс.Диска · download Yandex.Disk Photoslice · Yandex Disk full backup tool
@@ -25,41 +25,36 @@
 
 ---
 
-## Установка (1 минута)
+## Установка и запуск
 
-### Шаг 1 — Установи Python (один раз, если ещё не стоит)
+### Вариант 1 — Через uv (рекомендуется)
+Если у вас установлен [uv](https://docs.astral.sh/uv/):
+```bash
+git clone https://github.com/PXSYS13/yadisk_backup.git
+cd yadisk_backup
+uv run webui.py
+```
+*Все зависимости установятся автоматически за доли секунды.*
 
+---
+
+### Вариант 2 — Классический (без uv)
+
+#### Шаг 1 — Установи Python (если ещё не стоит)
 Скачай Python 3.10+ с [python.org/downloads](https://www.python.org/downloads/).
 **При установке отметь галочку «Add Python to PATH»** — это важно!
 
-### Шаг 2 — Скачай проект
-
+#### Шаг 2 — Скачай проект
 ```bash
 git clone https://github.com/PXSYS13/yadisk_backup.git
 ```
-
 Или просто скачай ZIP с GitHub (зелёная кнопка `Code → Download ZIP`) и распакуй.
 
-### Шаг 3 — Запусти
+#### Шаг 3 — Запусти
+**Windows:** двойной клик по **`webui.bat`**  
+**Linux / macOS:** `bash webui.sh`
 
-**Windows:** двойной клик по **`webui.bat`**
-
-**Linux / macOS:**
-```bash
-bash webui.sh
-```
-
-**Всё. Больше ничего делать не надо.**
-
-При первом запуске скрипт:
-1. Проверит установлен ли Python
-2. Проверит версию (нужна 3.10+)
-3. Проверит `pip` — если нет, доставит
-4. Установит все библиотеки из `requirements.txt` (~1 минута)
-5. Запустит сервер
-6. Откроет браузер автоматически на `http://localhost:8000`
-
-При следующих запусках всё это пропускается — сразу запуск сервера.
+При первом запуске скрипт сам проверит Python, доставит зависимости и откроет браузер на `http://localhost:8000`.
 
 ---
 

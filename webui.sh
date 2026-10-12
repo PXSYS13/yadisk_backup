@@ -12,6 +12,12 @@ echo "  Yandex.Disk Backup"
 echo "============================================================"
 echo
 
+# 0) If uv is installed, run directly
+if command -v uv >/dev/null 2>&1; then
+    echo "[*] Starting via uv..."
+    exec uv run webui.py
+fi
+
 # 1) Find Python 3.10+
 PY=""
 for cand in python3.13 python3.12 python3.11 python3.10 python3 python; do

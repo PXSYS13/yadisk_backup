@@ -10,10 +10,18 @@ echo   Yandex.Disk Backup
 echo ============================================================
 echo.
 
+REM ==== 0) If uv is installed, use it directly (super fast) ====
+where uv >nul 2>&1
+if not errorlevel 1 (
+    echo [*] Starting via uv...
+    uv run webui.py
+    goto :done
+)
+
 REM ==== 1) Check Python ====
 where python >nul 2>&1
 if errorlevel 1 (
-    echo [!] Python is not installed.
+    echo [!] Python or uv is not installed.
     echo.
     echo Opening Python download page...
     echo During install, CHECK the "Add Python to PATH" box!
@@ -69,6 +77,7 @@ if errorlevel 1 (
 REM ==== 5) Start the server ====
 python webui.py
 
+:done
 echo.
 echo ============================================================
 echo   Server stopped.
