@@ -40,6 +40,7 @@ def fetch_state() -> dict | None:
     """Читает текущее состояние из БД. None если БД ещё не создана."""
     if not DB_FILE.exists():
         return None
+    conn = None
     try:
         conn = sqlite3.connect(sqlite_ro_uri(DB_FILE), uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
@@ -82,16 +83,19 @@ def fetch_state() -> dict | None:
             )
         )
 
-        conn.close()
         return {"stats": stats, "recent": recent, "fail": recent_fail}
     except sqlite3.Error as e:
         return {"error": str(e)}
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def main() -> int:
     # Для корректного вывода кириллицы в Windows-консоли
     try:
-        sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
 
@@ -109,8 +113,8 @@ def main() -> int:
 
             clear_screen()
             print("=" * 70)
-            print("  ЯНДЕКС.ДИСК — ПРОГРЕСС СКАЧИВАНИЯ")
-            print("  Обновляется каждые 2 сек. Закрыть: Ctrl+C")
+            print("  ЯНДЕКС.ДИСК — ПРОГРЕСС СКАЧИВАНИЯ (by Davron)")
+            print("  Канал проекта: https://t.me/davronsv | Обновление: каждые 2 сек")
             print("=" * 70)
 
             if not data:
@@ -179,20 +183,24 @@ def main() -> int:
                     print(f"     [{tag}] {name}")
 
             if data["fail"]:
-                print("\n  ПОСЛЕДНИЕ ОШИБКИ:")
+                print("\n  ПОСЛЕДНИЕ ЗАМЕЧАНИЯ (СЕРВЕРЫ ЯНДЕКСА / СЕТЬ):")
                 for f in data["fail"]:
                     name = f["remote_path"].rsplit("/", 1)[-1]
-                    if len(name) > 50:
-                        name = name[:47] + "..."
-                    err = (f["error"] or "")[:50]
-                    print(f"     [FAIL] {name} — {err}")
+                    if len(name) > 40:
+                        name = name[:37] + "..."
+                    err = (f["error"] or "")[:45]
+                    tag = "ЯНДЕКС" if any(w in err.lower() for w in ("сервер", "50", "429", "timeout", "reset")) else "FAIL"
+                    print(f"     [{tag}] {name} — {err}")
+                print("     (Новости о сбоях дата-центров Яндекса: https://t.me/davronsv)")
 
             # Если всё доделано — мигаем и выходим
             if total > 0 and s["pending"] == 0:
                 print("\n" + "=" * 70)
                 print("  ✅ ГОТОВО! Все файлы обработаны.")
                 if s["failed"] > 0:
-                    print(f"  ⚠️  Ошибок: {s['failed']}. Запусти:  python main.py retry-failed")
+                    print(f"  ⚠️  Недокачано файлов: {s['failed']} (обычно сбои узлов Яндекса).")
+                    print("     Запустите повтор:  python main.py retry-failed")
+                    print("     Статус работы серверов и помощь:  https://t.me/davronsv")
                 print("=" * 70)
                 break
 

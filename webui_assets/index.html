@@ -429,6 +429,20 @@
     color:var(--pink);
     transition:all .2s ease;
   }
+  .pill.pill-telegram{
+    text-decoration:none;cursor:pointer;
+    border-color:rgba(41,182,246,.35);
+    background:rgba(41,182,246,.08);
+    color:#29b6f6;
+    transition:all .2s ease;
+  }
+  .pill.pill-telegram:hover{
+    border-color:rgba(41,182,246,.6);
+    background:rgba(41,182,246,.16);
+    color:#fff;
+    box-shadow:0 0 12px rgba(41,182,246,.25);
+  }
+  }
   .pill.pill-donate:hover{
     background:rgba(255,55,95,.18);
     border-color:rgba(255,55,95,.6);
@@ -833,6 +847,9 @@
     <symbol id="i-gift" viewBox="0 0 24 24">
       <path fill="currentColor" d="M20 6h-2.18c.11-.31.18-.65.18-1 0-1.66-1.34-3-3-3-1.05 0-1.96.54-2.5 1.35l-.5.65-.5-.65C10.96 2.54 10.05 2 9 2 7.34 2 6 3.34 6 5c0 .35.07.69.18 1H4c-1.11 0-1.99.89-1.99 2L2 19c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-5-2c.55 0 1 .45 1 1s-.45 1-1 1h-2v-1c0-.55.45-1 1-1zM9 4c.55 0 1 .45 1 1v1H8c-.55 0-1-.45-1-1s.45-1 1-1zm11 15H4v-2h16v2zm0-5H4V8h5.08L7 10.83 8.62 12 11 8.76V14h2V8.76L15.38 12 17 10.83 14.92 8H20v6z"/>
     </symbol>
+    <symbol id="i-telegram" viewBox="0 0 24 24">
+      <path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 0 0-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.74-.55 2.92-1.27 4.86-2.11 5.83-2.51 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .38z"/>
+    </symbol>
   </defs>
 </svg>
 </head>
@@ -859,6 +876,10 @@
       <svg class="ico" style="width:14px;height:14px;color:var(--pink)"><use href="#i-heart"/></svg>
       <span>Поддержать</span>
     </a>
+    <a href="https://t.me/davronsv" target="_blank" rel="noopener" class="pill pill-telegram" title="Telegram-канал: новости проекта, статус серверов и помощь">
+      <svg class="ico" style="width:14px;height:14px;color:#29b6f6"><use href="#i-telegram"/></svg>
+      <span>Канал @davronsv</span>
+    </a>
     <span class="active-tasks" id="active-tasks">
       <div class="spinner spinner-sm"></div>
       <span id="active-tasks-text">—</span>
@@ -879,6 +900,20 @@
 
 <!-- ============= ГЛАВНАЯ ============= -->
 <div class="panel active" data-panel="home">
+
+  <!-- Advisory card: Yandex server status -->
+  <div class="card" style="background:linear-gradient(135deg, rgba(10,132,255,.07), rgba(41,182,246,.03));border:0.5px solid rgba(41,182,246,.25);padding:14px 18px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:12px">
+      <div style="font-size:22px">🛡️</div>
+      <div style="font-size:13px;color:var(--text);line-height:1.4">
+        <strong>Если Яндекс отдаёт ошибки (50x / 429 / сброс):</strong> Это временная перегрузка серверов Яндекса. Скрипт не сломан — он автоматически делает паузу и всё докачает.
+      </div>
+    </div>
+    <a href="https://t.me/davronsv" target="_blank" rel="noopener" class="btn" style="padding:6px 14px;font-size:12.5px;color:#29b6f6;border-color:rgba(41,182,246,.4);text-decoration:none;display:inline-flex;align-items:center;gap:6px;white-space:nowrap">
+      <svg class="ico" style="width:13px;height:13px;color:#29b6f6"><use href="#i-telegram"/></svg>
+      Новости в Telegram @davronsv
+    </a>
+  </div>
 
   <div class="hero">
     <div class="hero-title">Скачать всё</div>
@@ -903,8 +938,14 @@
     </div>
     <div class="muted" id="pipeline-step" style="margin-bottom:6px">—</div>
     <div class="muted" style="font-size:12px;color:var(--text-tertiary)">Время: <span id="pipeline-time">—</span></div>
-    <hr>
     <div class="console" id="pipeline-console"><div class="console-empty">жду запуска…</div></div>
+    <div style="margin-top:8px;font-size:12px;color:var(--text-tertiary);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <span>При ошибках 500/502/504 или 429 скрипт повторяет запросы сам — это нагрузка серверов Яндекса.</span>
+      <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;display:inline-flex;align-items:center;gap:4px">
+        <svg class="ico" style="width:13px;height:13px"><use href="#i-telegram"/></svg>
+        <span>Канал @davronsv</span>
+      </a>
+    </div>
   </div>
 
   <div class="grid-2">
@@ -930,6 +971,26 @@
 
 <!-- ============= НАСТРОЙКА ============= -->
 <div class="panel" data-panel="setup">
+
+  <div class="card" style="background:linear-gradient(135deg,rgba(10,132,255,.08),rgba(41,182,246,.04));border-color:rgba(10,132,255,.2);margin-bottom:14px;padding:14px 18px">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-size:22px">📹</span>
+        <div>
+          <div style="font-size:14px;font-weight:600">Видеоинструкция по настройке и скачиванию</div>
+          <div style="font-size:12px;color:var(--text-secondary)">Пошаговый разбор получения токена и экспорта кук безлимита на YouTube</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a href="https://www.youtube.com/watch?v=XAiJxqHkEUA" target="_blank" rel="noopener" class="btn" style="font-size:12px;padding:6px 12px;text-decoration:none;color:#ff3b30">
+          Смотреть видео ▶
+        </a>
+        <a href="https://t.me/davronsv" target="_blank" rel="noopener" class="btn" style="font-size:12px;padding:6px 12px;text-decoration:none;color:#29b6f6">
+          <svg class="ico" style="width:13px;height:13px"><use href="#i-telegram"/></svg> Telegram @davronsv
+        </a>
+      </div>
+    </div>
+  </div>
 
   <div class="card">
     <div class="card-title">OAuth-токен</div>
@@ -1115,6 +1176,10 @@
         <button onclick="clearLog('disk')" style="padding:4px 10px;font-size:11px;background:transparent;border:0.5px solid var(--hairline-strong);color:var(--text-secondary)">Очистить лог</button>
       </div>
       <div class="console" id="disk-console"><div class="console-empty">жду запуска…</div></div>
+      <div style="margin-top:6px;font-size:11px;color:var(--text-tertiary);display:flex;justify-content:space-between;align-items:center">
+        <span>Статус серверов Яндекса:</span>
+        <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">t.me/davronsv</a>
+      </div>
     </div>
     <div class="card">
       <div class="section-label">Последние скачанные</div>
@@ -1204,6 +1269,10 @@
         <button onclick="clearLog('unlim')" style="padding:4px 10px;font-size:11px;background:transparent;border:0.5px solid var(--hairline-strong);color:var(--text-secondary)">Очистить лог</button>
       </div>
       <div class="console" id="unlim-console"><div class="console-empty">жду запуска…</div></div>
+      <div style="margin-top:6px;font-size:11px;color:var(--text-tertiary);display:flex;justify-content:space-between;align-items:center">
+        <span>Перегрузка архивации — на стороне серверов Яндекса. Инфо:</span>
+        <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">t.me/davronsv</a>
+      </div>
     </div>
     <div class="card">
       <div class="section-label">Последние скачанные</div>
@@ -1375,6 +1444,7 @@
 
 <footer>
   <span class="author" style="font-size:14px">by Davron</span> · 
+  <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:#29b6f6;text-decoration:none;font-weight:500">Telegram @davronsv ✈️</a> · 
   <a href="https://www.donationalerts.com/r/davronsvv" target="_blank" rel="noopener" style="color:var(--pink);text-decoration:none">Поддержать проект ❤️</a> · 
   обновляется каждые 1.5 сек
 </footer>
@@ -1447,6 +1517,14 @@
         <button onclick="closeCelebrationModal()" class="btn ghost" style="font-size:12px;color:var(--text-tertiary);margin-left:auto">
           Закрыть
         </button>
+      </div>
+
+      <div style="margin-top:12px;padding-top:10px;border-top:0.5px solid var(--hairline);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <span style="font-size:12px;color:var(--text-secondary)">Новости обновлений и новые полезные утилиты:</span>
+        <a href="https://t.me/davronsv" target="_blank" rel="noopener" class="btn" style="font-size:12px;padding:6px 12px;text-decoration:none;color:#29b6f6">
+          <svg class="ico" style="width:13px;height:13px"><use href="#i-telegram"/></svg>
+          <span>Канал @davronsv</span>
+        </a>
       </div>
     </div>
   </div>
@@ -2435,12 +2513,18 @@ async function refresh(){
 
     // Disk
     const dd=s.disk.db;
+    const catSkip = dd.category_skipped || 0;
+    const catSkipBytes = dd.category_skipped_bytes || 0;
+    const effTotal = Math.max(0, (dd.total || 0) - catSkip);
+    const effBytesTotal = Math.max(0, (dd.bytes_total || 0) - catSkipBytes);
+    const effSkipped = Math.max(0, (dd.skipped || 0) - catSkip);
+
     document.getElementById('home-disk-done').textContent =
-      (dd.downloaded||0).toLocaleString('ru') + (dd.total ? ` / ${dd.total.toLocaleString('ru')}` : '');
+      (dd.downloaded||0).toLocaleString('ru') + (effTotal ? ` / ${effTotal.toLocaleString('ru')}` : (dd.total ? ` / ${dd.total.toLocaleString('ru')}` : ''));
     document.getElementById('home-disk-info').textContent =
-      `${human(dd.bytes_done||0)} из ${human(dd.bytes_total||0)}`;
-    const hdpct = dd.total ? ((dd.downloaded+dd.skipped)/dd.total*100) : 0;
-    document.getElementById('home-disk-bar').style.width = hdpct + '%';
+      `${human(dd.bytes_done||0)} из ${human(effBytesTotal || dd.bytes_total || 0)}`;
+    const hdpct = effTotal ? ((dd.downloaded + effSkipped) / effTotal * 100) : 0;
+    document.getElementById('home-disk-bar').style.width = Math.min(100, hdpct) + '%';
 
     document.getElementById('s-downloaded').textContent=(dd.downloaded||0).toLocaleString('ru');
     document.getElementById('s-skipped').textContent=(dd.skipped||0).toLocaleString('ru');

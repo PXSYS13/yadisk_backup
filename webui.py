@@ -31,7 +31,15 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from utils import CATEGORY_LABELS, categorize, sqlite_ro_uri
+from utils import (
+    CATEGORY_LABELS,
+    TELEGRAM_CHANNEL,
+    TELEGRAM_HANDLE,
+    YOUTUBE_VIDEO_URL,
+    categorize,
+    classify_yandex_error,
+    sqlite_ro_uri,
+)
 
 PROJECT = Path(__file__).resolve().parent
 ENV_FILE = PROJECT / ".env"
@@ -67,19 +75,26 @@ app = FastAPI(title="Yandex.Disk Backup UI")
 
 # ── CSRF защита: блокируем POST с чужих сайтов ─────────────────────────────
 
-_ALLOWED_ORIGINS = ("http://localhost:8000", "http://127.0.0.1:8000")
+_ALLOWED_ORIGINS = {"http://localhost:8000", "http://127.0.0.1:8000"}
+_ALLOWED_HOSTS = {"localhost:8000", "127.0.0.1:8000", "localhost", "127.0.0.1"}
 
 
 @app.middleware("http")
 async def csrf_guard(request, call_next):
-    """Блокирует state-changing запросы с явно чужих сайтов (CSRF).
+    """Блокирует state-changing запросы с явно чужих сайтов (CSRF) и DNS-rebinding.
     GET-запросы пропускаем всегда — они не меняют состояние.
     """
     if request.method in ("POST", "PUT", "DELETE", "PATCH"):
         origin = request.headers.get("origin") or ""
-        # Блокируем только если Origin явно с чужого сайта
-        if origin and not any(origin.startswith(a) for a in _ALLOWED_ORIGINS):
-            return JSONResponse({"detail": "Forbidden origin"}, status_code=403)
+        # Блокируем, если Origin передан и не входит в список разрешённых
+        if origin:
+            if origin not in _ALLOWED_ORIGINS:
+                return JSONResponse({"detail": "Forbidden origin"}, status_code=403)
+        else:
+            # При отсутствии Origin проверяем Host
+            host = (request.headers.get("host") or "").lower()
+            if host and host not in _ALLOWED_HOSTS:
+                return JSONResponse({"detail": "Forbidden host"}, status_code=403)
     return await call_next(request)
 
 
@@ -366,6 +381,7 @@ class Pipeline:
                                     break
                         if not any_alive:
                             break
+                        time.sleep(1.0)
                     if self._stop:
                         self._abort()
                         return
@@ -381,7 +397,13 @@ class Pipeline:
             self.step = "финиш"
             self._log("🏆 ВСЁ ГОТОВО!")
         except Exception as e:
-            self._log(f"❌ Ошибка pipeline: {e}")
+            diag = classify_yandex_error(e)
+            if diag["is_yandex_server"]:
+                self._log(f"⚠️ Сбой серверов Яндекса: {diag['title']}")
+                self._log(f"   {diag['message']}")
+                self._log(f"   Новости дата-центров Яндекса: {TELEGRAM_CHANNEL}")
+            else:
+                self._log(f"❌ Ошибка pipeline: {e}")
             self.state = "failed"
         finally:
             self.finished_at = time.time()
@@ -391,13 +413,19 @@ class Pipeline:
         self.step = "остановлено"
 
     def status(self) -> dict:
+        if not self.started_at:
+            elapsed = None
+        elif self.finished_at:
+            elapsed = self.finished_at - self.started_at
+        else:
+            elapsed = time.time() - self.started_at
+
         return {
             "state": self.state,
             "running": self.is_running(),
             "step": self.step,
             "started_at": self.started_at,
-            "elapsed": (time.time() - self.started_at) if self.started_at and not self.finished_at else
-                       ((self.finished_at - self.started_at) if self.started_at else None),
+            "elapsed": elapsed,
             "log": list(self.log),
         }
 
@@ -426,6 +454,7 @@ def db_stats(db_file: Path, table: str = "files",
     if not db_file.exists():
         return {"total": 0, "pending": 0, "downloaded": 0, "skipped": 0,
                 "failed": 0, "in_progress": 0,
+                "category_skipped": 0, "category_skipped_bytes": 0,
                 "bytes_total": 0, "bytes_done": 0, "recent": []}
     c = None
     try:
@@ -433,18 +462,23 @@ def db_stats(db_file: Path, table: str = "files",
         c.row_factory = sqlite3.Row
         out = {"total": 0, "pending": 0, "downloaded": 0, "skipped": 0,
                "failed": 0, "in_progress": 0,
+               "category_skipped": 0, "category_skipped_bytes": 0,
                "bytes_total": 0, "bytes_done": 0}
         for r in c.execute(
-            f"SELECT status, COUNT(*) AS n, COALESCE(SUM(size),0) AS b "
-            f"FROM {table} GROUP BY status"
+            f"SELECT status, error, COUNT(*) AS n, COALESCE(SUM(size),0) AS b "
+            f"FROM {table} GROUP BY status, (COALESCE(error,'') = 'not in selected categories')"
         ):
             st = r["status"]
+            err = r["error"] or ""
             if st not in out:
                 out[st] = 0
-            out[st] = r["n"]
+            out[st] += r["n"]
             out["total"] += r["n"]
             out["bytes_total"] += r["b"]
-            if st in ("downloaded", "skipped"):
+            if st == "skipped" and err == "not in selected categories":
+                out["category_skipped"] += r["n"]
+                out["category_skipped_bytes"] += r["b"]
+            elif st in ("downloaded", "skipped"):
                 out["bytes_done"] += r["b"]
         recent = list(c.execute(
             f"SELECT {id_col} AS path, status, size FROM {table} "
@@ -591,9 +625,17 @@ def donate():
 @app.get("/api/status")
 def api_status():
     cfg = get_config()
+    safe_config = {
+        "download_dir": cfg.get("download_dir", ""),
+        "max_workers": cfg.get("max_workers", 4),
+        "token_masked": mask_token(cfg.get("token", "")),
+    }
     return {
         "donation_url": DONATION_URL,
-        "config": {**cfg, "token_masked": mask_token(cfg["token"])},
+        "telegram_url": TELEGRAM_CHANNEL,
+        "telegram_handle": TELEGRAM_HANDLE,
+        "youtube_url": YOUTUBE_VIDEO_URL,
+        "config": safe_config,
         "token": check_token(cfg["token"]),
         "cookies": check_cookies(),
         "disk": {
@@ -897,10 +939,12 @@ def disk_stop():
 @app.post("/api/disk/clear")
 def disk_clear():
     """Полная очистка БД сканирования диска + остановка задач."""
+    if pipeline.is_running():
+        pipeline.stop()
     tm.stop("disk")
     try:
         for suffix in ("", "-wal", "-shm"):
-            f = DB_FILE.with_suffix(DB_FILE.suffix + suffix) if suffix else DB_FILE
+            f = Path(str(DB_FILE) + suffix) if suffix else DB_FILE
             if f.exists():
                 f.unlink()
         return {"ok": True, "msg": "БД диска очищена"}
@@ -911,13 +955,15 @@ def disk_clear():
 @app.post("/api/unlim/clear")
 def unlim_clear():
     """Полная очистка БД безлимита + остановка воркеров."""
+    if pipeline.is_running():
+        pipeline.stop()
     with tm._lock:
         for slot, t in list(tm._tasks.items()):
             if slot.startswith("unlim") and t.alive():
                 t.stop()
     try:
         for suffix in ("", "-wal", "-shm"):
-            f = UNLIM_DB_FILE.with_suffix(UNLIM_DB_FILE.suffix + suffix) if suffix else UNLIM_DB_FILE
+            f = Path(str(UNLIM_DB_FILE) + suffix) if suffix else UNLIM_DB_FILE
             if f.exists():
                 f.unlink()
         return {"ok": True, "msg": "БД безлимита очищена"}
@@ -975,18 +1021,46 @@ _FORBIDDEN_ORGANIZE_PREFIXES = [
 
 
 def _is_safe_organize_path(path: str) -> tuple[bool, str]:
-    """Запрещаем сортировку системных папок и корней дисков."""
+    """Запрещаем сортировку системных папок, корней дисков и домашней папки целиком."""
+    import re
     try:
         abs_path = os.path.abspath(path)
     except Exception:
         return False, "Невалидный путь"
     norm = abs_path.lower().replace("/", "\\")
     raw_norm = path.lower().replace("/", "\\")
-    # Корень диска (типа C:\ или D:\) — слишком опасно
+    # Корень диска (типа C:\ или D:\ или /) — слишком опасно
     if (len(abs_path) <= 3 and abs_path.endswith(":\\")) or (
         len(raw_norm) <= 3 and raw_norm.endswith(":\\")
-    ):
+    ) or norm in ("\\", "/"):
         return False, "Нельзя сортировать корень диска целиком"
+
+    # Запрет корня профиля пользователя (например, C:\Users\Username или /home/user)
+    home_dir = os.path.expanduser("~")
+    if home_dir:
+        home_norm = os.path.abspath(home_dir).lower().replace("/", "\\")
+        if norm == home_norm or raw_norm == home_norm:
+            return False, "Нельзя сортировать домашнюю папку пользователя целиком (укажите конкретную папку бэкапа)"
+
+    # Динамические системные переменные Windows
+    sys_env_vars = ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"]
+    for var in sys_env_vars:
+        val = os.environ.get(var)
+        if val:
+            val_norm = os.path.abspath(val).lower().replace("/", "\\")
+            if norm == val_norm or norm.startswith(val_norm + "\\"):
+                return False, f"Системная папка запрещена: {val}"
+
+    # Любой диск с системными папками (C:\Windows, D:\Windows, X:\Program Files и т.д.)
+    if re.match(r"^[a-z]:\\(windows|program files|program files \(x86\)|programdata|\$recycle\.bin)(\\|$)", norm):
+        return False, f"Системная папка запрещена: {abs_path}"
+
+    # Unix системные пути
+    norm_posix = abs_path.replace("\\", "/")
+    for bad in ("/", "/etc", "/usr", "/bin", "/sbin", "/var", "/lib", "/system", "/library"):
+        if norm_posix == bad or norm_posix.startswith(bad + "/"):
+            return False, f"Системная папка запрещена: {bad}"
+
     for bad in _FORBIDDEN_ORGANIZE_PREFIXES:
         bad_norm = bad.replace("/", "\\")
         if (
@@ -1083,10 +1157,12 @@ def main():
     host = "127.0.0.1"
     port = 8000
     url = f"http://{host}:{port}"
-    print("=" * 60)
-    print("  Yandex.Disk Backup — Web UI")
-    print(f"  {url}")
-    print("=" * 60)
+    print("=" * 65)
+    print("  Yandex.Disk Backup — Web UI by Davron (PXSYS)")
+    print(f"  Адрес: {url}")
+    print(f"  Telegram: {TELEGRAM_CHANNEL} (новости, помощь, статус Яндекса)")
+    print(f"  YouTube: {YOUTUBE_VIDEO_URL}")
+    print("=" * 65)
     print()
     print("  Сервер запускается, браузер откроется автоматически.")
     print("  Чтобы остановить — закрой это окно или нажми Ctrl+C.")

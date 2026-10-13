@@ -2,7 +2,24 @@
 
 import yadisk
 
-from downloader import DownloadJob, _download_one, _is_retryable, _wait_policy
+from downloader import (
+    DownloadJob,
+    _download_one,
+    _is_retryable,
+    _is_skipped,
+    _wait_policy,
+)
+
+
+def test_is_skipped_trash_prefix():
+    assert _is_skipped("disk:/Корзина") is True
+    assert _is_skipped("disk:/Корзина/sub/file.txt") is True
+    assert _is_skipped("/Корзина/file.txt") is True
+    assert _is_skipped("disk:/Trash/sub/file.txt") is True
+    # "Корзина2" не должна пропускаться!
+    assert _is_skipped("disk:/Корзина2") is False
+    assert _is_skipped("disk:/Корзина2/file.txt") is False
+    assert _is_skipped("disk:/Trash2/file.txt") is False
 
 
 class _Outcome:
@@ -121,3 +138,21 @@ def test_failure_is_reported_not_raised(tmp_path):
     )
     assert res.status == "failed"
     assert "PathNotFound" in (res.error or "")
+
+
+def test_close_all_clients_clears_registry():
+    import downloader
+
+    class DummyClient:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    dummy = DummyClient()
+    with downloader._all_clients_lock:
+        downloader._all_clients.append(dummy)
+    assert len(downloader._all_clients) > 0
+    downloader._close_all_clients()
+    assert len(downloader._all_clients) == 0
+    assert dummy.closed is True

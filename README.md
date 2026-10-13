@@ -2,7 +2,7 @@
 
 > **Готовый инструмент для миграции с Яндекс.Диска.** Скачивает обычные файлы через официальный REST API и скрытый безлимит (Photoslice — фото с телефонов) через куки браузера. Дедупликация по MD5, сортировка по полочкам, веб-интерфейс. Запуск одним кликом — зависимости ставятся сами.
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue) ![uv](https://img.shields.io/badge/managed%20by-uv-DE5FE9?logo=uv&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey) [![DonationAlerts](https://img.shields.io/badge/DonationAlerts-Поддержать-ff375f?logo=heart&logoColor=white)](https://www.donationalerts.com/r/davronsvv)
+![Python](https://img.shields.io/badge/Python-3.10+-blue) ![uv](https://img.shields.io/badge/managed%20by-uv-DE5FE9?logo=uv&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688) [![Telegram](https://img.shields.io/badge/Telegram-Канал_проекта-2CA5E0?logo=telegram&logoColor=white)](https://t.me/davronsv) [![YouTube](https://img.shields.io/badge/YouTube-Видеоинструкция-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=XAiJxqHkEUA) ![License](https://img.shields.io/badge/license-MIT-green) [![DonationAlerts](https://img.shields.io/badge/DonationAlerts-Поддержать-ff375f?logo=heart&logoColor=white)](https://www.donationalerts.com/r/davronsvv)
 
 **Ключевые сценарии:**
 скачать всё с Яндекс.Диска · скачать безлимит Яндекс.Фото · бэкап перед отменой подписки · миграция с Yandex Disk на Google Drive / OneDrive / локальный NAS · экспорт фото с телефона из Яндекс.Диска · download Yandex.Disk Photoslice · Yandex Disk full backup tool
@@ -22,6 +22,15 @@
 | ⚡ **Параллельность** | До 5 потоков для обычного диска, до 6 воркеров для безлимита |
 | 🛡 **Безопасность** | CSRF-защита, валидация путей, маскировка токена, atomic-write для куки |
 | 🚀 **One-click** | Двойной клик по `webui.bat` — сам установит Python-зависимости и запустит браузер |
+
+---
+
+## 💬 Сообщество и оперативные новости
+
+Проектом пользуются уже **более 3 000 человек**! Подписывайтесь на Telegram-канал автора, чтобы первыми узнавать о свежих версиях, статусе серверов Яндекса, лайфхаках по обходу лимитов и задавать вопросы:
+
+👉 **Telegram-канал:** [t.me/davronsv](https://t.me/davronsv) (`@davronsv`)  
+👉 **Видеоинструкция на YouTube:** [Смотреть видеоразбор](https://www.youtube.com/watch?v=XAiJxqHkEUA)
 
 ---
 
@@ -197,9 +206,24 @@ pip install -r requirements.txt
 
 Открой вручную: http://localhost:8000
 
+### Ошибки 500, 502, 503, 504 (Bad Gateway / Service Unavailable) и тайм-ауты серверов
+
+> **Важно: это сбои на стороне серверов и дата-центров Яндекса, а не ошибка в программе!**
+
+- В часы пиковых нагрузок или регламентных работ дата-центры Яндекса не успевают собирать zip-архивы для безлимита (`mpfs/bulk-download-prepare`) или сбрасывают сетевые соединения.
+- **Что делает скрипт:** программа автоматически распознаёт ошибку серверов Яндекса, выводит в лог понятное пояснение, делает паузу и безопасные повторные попытки (exponential backoff).
+- **Что делать вам:** не удалять базу данных и не паниковать. Просто подождите 15–30 минут либо запустите скачивание в менее загруженное время (ночью или утром). Прогресс скачивания полностью сохранён в SQLite.
+- Если сбой затянулся — проверьте статус и новости в канале [t.me/davronsv](https://t.me/davronsv).
+
+### Яндекс блокирует на 429 (Too Many Requests)
+
+- Яндекс временно ограничил частоту запросов к вашему аккаунту или IP.
+- Скрипт автоматически включает задержку (backoff) и делает паузу.
+- **Рекомендации:** снизьте `MAX_WORKERS` до 2-3 в настройках или `.env`, подождите 15–20 минут и продолжите скачивание.
+
 ### Скачивание прерывается
 
-- **БД сохраняет прогресс** на каждом файле — просто запусти скачивание снова, оно продолжит
+- **БД сохраняет прогресс** на каждом файле — просто запусти скачивание снова, оно продолжит ровно с того же места
 - Если совсем застряло — нажми кнопку **«Очистить и заново»** в карточке «Что нашлось»
 
 ### Токен перестал работать
@@ -209,12 +233,6 @@ OAuth-токен Яндекса живёт примерно год. Получи
 ### Cookies перестали работать (для безлимита)
 
 Сессионные куки браузера живут несколько часов / дней. Зайди в браузере на disk.yandex.ru заново, экспортируй cookies снова через Cookie-Editor и обнови в UI.
-
-### Яндекс блокирует на 429 (Too Many Requests)
-
-- Снизь `MAX_WORKERS` до 2-3
-- Подожди 10-15 минут и попробуй снова
-- Программа сама делает паузы при 429
 
 ### Указал DOWNLOAD_DIR=C:\ и сервер виснет
 

@@ -16,10 +16,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sqlite3
 import sys
 import time
 import zipfile
+from collections import defaultdict
 
 import requests
 from dotenv import load_dotenv
@@ -32,7 +34,7 @@ from unlim_common import (
     make_cid,
     make_session as common_make_session,
 )
-from utils import human_bytes
+from utils import TELEGRAM_CHANNEL, human_bytes
 
 PROJECT = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(PROJECT, ".env"))
@@ -206,7 +208,12 @@ def prepare_zip(s, sk, uid, paths: list[str]) -> str | None:
                    params={"m": "mpfs/bulk-download-prepare"},
                    json=body, timeout=60)
         if r.status_code != 200:
-            log.warning(f"prepare HTTP {r.status_code}: {r.text[:200]}")
+            if r.status_code == 429:
+                log.warning(f"prepare HTTP 429 (Rate limit Яндекса). Пауза... Новости: {TELEGRAM_CHANNEL}")
+            elif r.status_code >= 500:
+                log.warning(f"prepare HTTP {r.status_code} (Сбой серверов Яндекса / перегрузка): {r.text[:200]}")
+            else:
+                log.warning(f"prepare HTTP {r.status_code}: {r.text[:200]}")
             return None
         data = r.json()
         url = data.get("download_url")
@@ -214,7 +221,7 @@ def prepare_zip(s, sk, uid, paths: list[str]) -> str | None:
             url = "https:" + url
         return url
     except Exception as e:
-        log.warning(f"prepare exc: {e}")
+        log.warning(f"prepare exc (сбой связи с сервером Яндекса): {e}")
         return None
 
 
@@ -243,6 +250,26 @@ def safe_extract_dst(base_dir: str, member_name: str) -> str | None:
     if os.path.commonpath([base_real, dst_real]) != base_real:
         return None
     return dst
+
+
+def _non_colliding_path(path: str) -> str:
+    """Генерирует уникальный путь с суффиксом _1, _2 если файл уже существует."""
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    i = 1
+    while True:
+        cand = f"{base}_{i}{ext}"
+        if not os.path.exists(cand):
+            return cand
+        i += 1
+
+
+def _clean_stem(name: str) -> tuple[str, str]:
+    base = os.path.basename(name).lower()
+    stem, ext = os.path.splitext(base)
+    clean = re.sub(r"[\s_]*\(\d+\)$|_+\d+$", "", stem).strip()
+    return clean, ext
 
 
 def download_and_extract(s, url: str, worker_id: int, batch_idx: int) -> tuple[list[tuple[str, int]], int]:
@@ -303,10 +330,13 @@ def download_and_extract(s, url: str, worker_id: int, batch_idx: int) -> tuple[l
                 if dst is None:
                     log.warning(f"w{worker_id} пропускаю опасное имя в архиве: {m.filename!r}")
                     continue
-                if os.path.exists(dst) and os.path.getsize(dst) == m.file_size:
-                    extracted.append((os.path.basename(dst), m.file_size))
-                    total_bytes += m.file_size
-                    continue
+                if os.path.exists(dst):
+                    if os.path.getsize(dst) == m.file_size:
+                        extracted.append((os.path.basename(m.filename), m.file_size))
+                        total_bytes += m.file_size
+                        continue
+                    # Другой файл с тем же именем — сохраняем с уникальным суффиксом, не перезаписывая
+                    dst = _non_colliding_path(dst)
                 os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
                 try:
                     with zf.open(m) as src, open(dst, "wb") as f:
@@ -315,7 +345,7 @@ def download_and_extract(s, url: str, worker_id: int, batch_idx: int) -> tuple[l
                             if not chunk:
                                 break
                             f.write(chunk)
-                    extracted.append((os.path.basename(dst), m.file_size))
+                    extracted.append((os.path.basename(m.filename), m.file_size))
                     total_bytes += m.file_size
                 except Exception as e:
                     log.warning(f"w{worker_id} extract {m.filename}: {e}")
@@ -337,42 +367,79 @@ def split_by_extracted(
 ) -> tuple[list[str], list[str]]:
     """Делит пачку на реально приехавшие и не приехавшие файлы.
 
-    Сопоставляем по (имя файла, размер) — то, что есть и в БД, и в архиве.
-    Каждая запись архива «закрывает» ровно один файл пачки, поэтому считаем
-    кратности: две одинаковые записи в БД требуют двух записей в архиве.
+    1. Точное совпадение по (имя файла, размер).
+    2. Совпадение по базовому имени (вариации вроде 'photo (1).jpg') + расширению + размеру.
+    3. Фоллбэк только для одинакового расширения и размера (не путаем разные форматы).
     """
-    pool: dict[tuple[str, int], int] = {}
+    exact_pool: dict[tuple[str, int], int] = defaultdict(int)
     for name, size in extracted:
         key = (os.path.basename(name).lower(), int(size or 0))
-        pool[key] = pool.get(key, 0) + 1
+        exact_pool[key] += 1
 
     done: list[str] = []
     unmatched: list[dict] = []
+
+    # 1. Точное совпадение
     for item in batch:
         key = (os.path.basename(item.get("name") or "").lower(),
                int(item.get("size") or 0))
-        if pool.get(key, 0) > 0:
-            pool[key] -= 1
+        if exact_pool[key] > 0:
+            exact_pool[key] -= 1
             done.append(item["file_id"])
         else:
             unmatched.append(item)
 
-    # Второй проход — по одному размеру. Яндекс иногда переименовывает файлы
-    # в архиве (коллизии имён внутри дня), и строгое сравнение зря отправило бы
-    # их на перекачку. Остаток архива — это почти наверняка файлы этой же пачки.
-    leftovers: dict[int, int] = {}
-    for key, count in pool.items():
-        if count > 0:
-            leftovers[key[1]] = leftovers.get(key[1], 0) + count
+    if not unmatched:
+        return done, []
+
+    # Остаток записей архива
+    leftover_items: list[tuple[str, int]] = []
+    for (name, size), count in exact_pool.items():
+        for _ in range(count):
+            leftover_items.append((name, size))
+
+    still_unmatched: list[dict] = []
+
+    # 2. Совпадение по нормализованному стэму + расширению + размеру (a (1).jpg -> a.jpg)
+    leftover_stems: dict[tuple[str, str, int], int] = defaultdict(int)
+    for name, size in leftover_items:
+        clean, ext = _clean_stem(name)
+        leftover_stems[(clean, ext, size)] += 1
+
+    for item in unmatched:
+        clean, ext = _clean_stem(item.get("name") or "")
+        size = int(item.get("size") or 0)
+        key = (clean, ext, size)
+        if leftover_stems[key] > 0:
+            leftover_stems[key] -= 1
+            for idx, (lname, lsize) in enumerate(leftover_items):
+                if lsize == size and _clean_stem(lname) == (clean, ext):
+                    leftover_items.pop(idx)
+                    break
+            done.append(item["file_id"])
+        else:
+            still_unmatched.append(item)
+
+    if not still_unmatched:
+        return done, []
+
+    # 3. Фоллбэк: только если расширение и размер совпадают
+    leftover_exts: dict[tuple[str, int], int] = defaultdict(int)
+    for name, size in leftover_items:
+        ext = os.path.splitext(name.lower())[1]
+        leftover_exts[(ext, size)] += 1
 
     missing: list[str] = []
-    for item in unmatched:
+    for item in still_unmatched:
+        ext = os.path.splitext((item.get("name") or "").lower())[1]
         size = int(item.get("size") or 0)
-        if leftovers.get(size, 0) > 0:
-            leftovers[size] -= 1
+        key = (ext, size)
+        if leftover_exts[key] > 0:
+            leftover_exts[key] -= 1
             done.append(item["file_id"])
         else:
             missing.append(item["file_id"])
+
     return done, missing
 
 
@@ -389,7 +456,11 @@ def main():
     args = ap.parse_args()
 
     worker_id = args.id
-    print(f"[w{worker_id}] старт. batch={args.batch}")
+    print("=" * 65)
+    print(f"  Yandex.Disk Unlim Worker #{worker_id} — by Davron (PXSYS)")
+    print(f"  Telegram: {TELEGRAM_CHANNEL} (новости о статусе серверов)")
+    print(f"  batch={args.batch}")
+    print("=" * 65)
 
     if not os.path.exists(DB_FILE):
         sys.exit("Нет unlim_state.db — сначала запусти unlim_download.py --collect")
@@ -421,25 +492,16 @@ def main():
 
         url = prepare_zip(s, sk, uid, batch_ids)
         if not url:
-            print(f"[w{worker_id}] batch {batch_idx}: prepare FAIL → pending")
+            print(f"[w{worker_id}] batch {batch_idx}: ⚠️ Сервер Яндекса не собрал архив (перегрузка очереди Яндекса) → возвращаю в очередь")
+            print(f"             (Скрипт в порядке. Статус серверов Яндекса: {TELEGRAM_CHANNEL})")
             try:
                 sk, uid = get_sk_uid(s)
             except Exception:
                 pass
             if len(batch) > 1:
-                print(f"[w{worker_id}] batch {batch_idx}: prepare FAIL крупной пачки ({len(batch)} файлов) → возвращаю в очередь для разделения")
-                c = sqlite3.connect(DB_FILE, timeout=60)
-                try:
-                    c.execute("BEGIN IMMEDIATE")
-                    c.executemany(
-                        "UPDATE unlim_files SET status='pending', worker_id=NULL, attempts=COALESCE(attempts,0)+1, assigned_at=CURRENT_TIMESTAMP WHERE file_id=?",
-                        [(it["file_id"],) for it in batch]
-                    )
-                    c.execute("COMMIT")
-                finally:
-                    c.close()
+                mark_pending(batch_ids, "сервер Яндекса не успел подготовить архив (пачка)")
             else:
-                mark_pending(batch_ids, "prepare failed")
+                mark_pending(batch_ids, "сервер Яндекса не подготовил архив")
             time.sleep(10)
             continue
 
@@ -463,21 +525,14 @@ def main():
         else:
             # Ни один файл не приехал (сбой скачивания/распаковки архива)
             if len(batch) > 1:
-                print(f"[w{worker_id}] batch {batch_idx}: ✗ FAIL крупной пачки ({len(batch)} файлов) → возвращаю в очередь для разделения")
-                c = sqlite3.connect(DB_FILE, timeout=60)
-                try:
-                    c.execute("BEGIN IMMEDIATE")
-                    c.executemany(
-                        "UPDATE unlim_files SET status='pending', worker_id=NULL, attempts=COALESCE(attempts,0)+1, assigned_at=CURRENT_TIMESTAMP WHERE file_id=?",
-                        [(it["file_id"],) for it in batch]
-                    )
-                    c.execute("COMMIT")
-                finally:
-                    c.close()
+                print(f"[w{worker_id}] batch {batch_idx}: ⚠️ Сбой отдачи архива узлом Яндекса ({len(batch)} файлов) → возвращаю в очередь для разделения")
+                mark_pending(batch_ids, "сбой серверов Яндекса при отдаче архива (пачка)")
             else:
                 # Одиночный файл реально не качается — инкрементируем attempts
-                print(f"[w{worker_id}] batch {batch_idx}: ✗ FAIL одиночного файла → pending (attempts+1)")
-                mark_pending(missing_ids, "сбой скачивания архива с файлом")
+                att = (batch[0].get("attempts", 0) or 0) + 1
+                print(f"[w{worker_id}] batch {batch_idx}: ⚠️ Файл не отдаётся сервером Яндекса → pending (попытка {att}/{MAX_ATTEMPTS})")
+                print(f"             (Если сервер Яндекса штормит — статус в канале: {TELEGRAM_CHANNEL})")
+                mark_pending(batch_ids, "файл не отдаётся сервером Яндекса")
             time.sleep(5)
 
     # Закрываем HTTP-сессию (освобождаем sockets)

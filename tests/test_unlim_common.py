@@ -19,6 +19,7 @@ def test_load_cookies_valid(tmp_path):
             {"name": "Session_id", "value": "xyz"},
             {"name": "yandexuid", "value": "123"},
             {"name": "empty", "value": None},
+            {"name": "empty_str", "value": ""},
         ]),
         encoding="utf-8",
     )

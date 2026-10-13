@@ -157,3 +157,37 @@ def test_avoid_case_collision(tmp_path):
     same_case = avoid_case_collision(str(f_upper))
     assert same_case == str(f_upper)
 
+
+def test_classify_yandex_error():
+    from utils import TELEGRAM_CHANNEL, classify_yandex_error
+
+    # None
+    assert classify_yandex_error(None)["is_yandex_server"] is False
+
+    # 502 Bad Gateway
+    res_502 = classify_yandex_error("502 Bad Gateway: yandex backend died")
+    assert res_502["is_yandex_server"] is True
+    assert res_502["category"] == "server_down"
+    assert TELEGRAM_CHANNEL in res_502["action"]
+
+    # 429 Too Many Requests
+    res_429 = classify_yandex_error("HTTP 429 Too Many Requests")
+    assert res_429["is_yandex_server"] is True
+    assert res_429["category"] == "rate_limit"
+
+    # Connection reset
+    res_conn = classify_yandex_error(ConnectionResetError("Connection reset by peer"))
+    assert res_conn["is_yandex_server"] is True
+    assert res_conn["category"] == "connection_drop"
+
+    # 401 Unauthorized
+    res_401 = classify_yandex_error("401 Unauthorized: token expired")
+    assert res_401["is_yandex_server"] is False
+    assert res_401["category"] == "auth_expired"
+
+    # 404
+    res_404 = classify_yandex_error("404 PathNotFound")
+    assert res_404["is_yandex_server"] is False
+    assert res_404["category"] == "not_found"
+
+

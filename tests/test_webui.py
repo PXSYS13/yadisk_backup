@@ -188,3 +188,76 @@ def test_donation_url_constant():
     assert webui.DONATION_URL == "https://www.donationalerts.com/r/davronsvv"
 
 
+def test_api_status_does_not_leak_raw_token(monkeypatch):
+    secret = "y0_AgAAAAA_super_secret_raw_token_xyz"
+    monkeypatch.setattr(webui, "get_config", lambda: {
+        "token": secret,
+        "download_dir": "D:/downloads",
+        "max_workers": 4,
+    })
+    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": True, "login": "test"})
+    st = webui.api_status()
+    cfg = st["config"]
+    assert "token" not in cfg  # сырой токен НИКОГДА не должен отдаваться
+    assert "token_masked" in cfg
+    assert "secret" not in cfg["token_masked"]
+
+
+def test_organize_rejects_other_drive_windows():
+    ok, msg = webui._is_safe_organize_path(r"D:\Windows")
+    assert ok is False
+    assert "Системная" in msg
+
+    ok2, _ = webui._is_safe_organize_path(r"E:\Program Files\App")
+    assert ok2 is False
+
+
+def test_organize_rejects_user_home_dir():
+    import os
+    home = os.path.expanduser("~")
+    ok, msg = webui._is_safe_organize_path(home)
+    assert ok is False
+    assert "домашнюю папку" in msg
+
+
+def test_db_stats_excludes_category_skipped_from_bytes_done(tmp_path):
+    db = tmp_path / "stats_cat.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE files (
+            remote_path TEXT PRIMARY KEY, size INTEGER, md5 TEXT,
+            status TEXT NOT NULL DEFAULT 'pending', local_path TEXT,
+            error TEXT, downloaded_at TIMESTAMP
+        );
+        """
+    )
+    con.executemany(
+        "INSERT INTO files (remote_path, size, status, error) VALUES (?, ?, ?, ?)",
+        [
+            ("disk:/done.jpg", 10, "downloaded", None),
+            ("disk:/cat_skip.pdf", 50, "skipped", "not in selected categories"),
+            ("disk:/resumed.jpg", 30, "skipped", None),
+            ("disk:/pending.jpg", 20, "pending", None),
+        ],
+    )
+    con.commit()
+    con.close()
+
+    out = webui.db_stats(db, "files", "remote_path")
+    assert out["total"] == 4
+    # bytes_done должен считать downloaded (10) + resumed (30), НО НЕ cat_skip (50)
+    assert out["bytes_done"] == 40
+    assert out["category_skipped"] == 1
+    assert out["category_skipped_bytes"] == 50
+
+
+def test_pipeline_status_elapsed():
+    pipe = webui.Pipeline()
+    assert pipe.status()["elapsed"] is None
+    pipe.started_at = 100.0
+    pipe.finished_at = 150.0
+    assert pipe.status()["elapsed"] == 50.0
+
+
+

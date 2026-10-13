@@ -71,8 +71,11 @@ def load_cookies(cookies_file: str | None = None) -> dict[str, str]:
         raw = json.load(f)
     if not isinstance(raw, list):
         sys.exit("cookies.json должен быть массивом (формат Cookie-Editor)")
-    return {c["name"]: c["value"] for c in raw
-            if c.get("name") and c.get("value") is not None}
+    return {
+        c["name"]: c["value"]
+        for c in raw
+        if c.get("name") and c.get("value")
+    }
 
 
 def make_session(cookies: dict[str, str] | None = None,
@@ -136,14 +139,16 @@ def api_call(s: requests.Session, sk: str, uid: str, method: str,
                 sys.exit(f"Сессия истекла (HTTP {r.status_code})")
             if r.status_code == 429:
                 wait = 30 + att * 30
-                log.warning(f"{method} HTTP 429 → sleep {wait}")
+                log.warning(f"{method} HTTP 429 (Лимит запросов Яндекса) → sleep {wait}с")
                 time.sleep(wait)
                 continue
+            if r.status_code >= 500:
+                log.warning(f"{method} HTTP {r.status_code} (Сбой узлов Яндекса / дата-центра) → повтор через {2 ** att}с")
             last_err = f"HTTP {r.status_code}: {r.text[:200]}"
         except Exception as e:
             last_err = str(e)
             time.sleep(2 ** att)
-    raise RuntimeError(f"{method}: {last_err}")
+    raise RuntimeError(f"{method}: {last_err} (Проблема на стороне серверов Яндекса. Новости и статус: https://t.me/davronsv)")
 
 
 # ── Миграция БД ─────────────────────────────────────────────────────────────

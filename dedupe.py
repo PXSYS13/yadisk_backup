@@ -82,11 +82,19 @@ def main() -> int:
             print(f"     {ext or '<нет>'}  {n}")
 
         # Удаляем
-        conn.executemany(
-            "DELETE FROM files WHERE remote_path = ?",
-            [(r["remote_path"],) for r in non_media],
-        )
-        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.executemany(
+                "DELETE FROM files WHERE remote_path = ?",
+                [(r["remote_path"],) for r in non_media],
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
         print(f"  ✓ удалено {len(non_media)} записей\n")
     else:
         print("  нечего удалять\n")
@@ -97,11 +105,12 @@ def main() -> int:
     print("=" * 70)
     rows = conn.execute(
         "SELECT remote_path, size, md5, status FROM files "
-        "WHERE status IN ('pending', 'downloaded', 'skipped') AND md5 IS NOT NULL"
+        "WHERE status IN ('pending', 'downloaded', 'skipped') AND md5 IS NOT NULL AND size > 0"
     ).fetchall()
     groups: dict[tuple[str, int], list[sqlite3.Row]] = defaultdict(list)
     for r in rows:
-        groups[(r["md5"], r["size"] or 0)].append(r)
+        if (r["size"] or 0) > 0:
+            groups[(r["md5"], r["size"])].append(r)
 
     duplicates_to_skip: list[str] = []
     dup_groups = 0
@@ -136,12 +145,20 @@ def main() -> int:
     print(f"  Сэкономлено объёма: {saved_bytes/1e9:.2f} ГБ")
 
     if duplicates_to_skip:
-        conn.executemany(
-            "UPDATE files SET status='skipped', error='duplicate (md5 match)' "
-            "WHERE remote_path = ?",
-            [(p,) for p in duplicates_to_skip],
-        )
-        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.executemany(
+                "UPDATE files SET status='skipped', error='duplicate (md5 match)' "
+                "WHERE remote_path = ?",
+                [(p,) for p in duplicates_to_skip],
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
 
     # Файлы без md5 (бывает у некоторых) — могут быть дубликатами по имени+размеру
     no_md5_rows = conn.execute(

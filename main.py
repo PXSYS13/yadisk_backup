@@ -343,6 +343,9 @@ def _print_summary(counters: dict, elapsed: float) -> None:
         f"пропущено {counters['skipped']} | упало {counters['failed']} | "
         f"время {human_duration(elapsed)}"
     )
+    if counters.get("failed", 0) > 0:
+        print("  💡 Если файлы упали из-за сбоев серверов Яндекса (50x/429) — запустите: python main.py retry-failed")
+        print("     Новости и статус работы серверов Яндекса: https://t.me/davronsv")
 
 
 # ── argparse ────────────────────────────────────────────────────────────────
@@ -408,6 +411,12 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    print("=" * 65)
+    print("  Yandex.Disk Backup by Davron (PXSYS)")
+    print("  Telegram: https://t.me/davronsv (новости, помощь, статус Яндекса)")
+    print("  YouTube: https://www.youtube.com/watch?v=XAiJxqHkEUA")
+    print("=" * 65)
 
     # stats и verify читают только локальную БД — токен не нужен
     require_token = args.cmd not in ("stats", "verify")

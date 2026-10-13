@@ -217,10 +217,20 @@ def cmd_retry_failed():
         print("БД пуста — запусти --collect")
         return
     db_init()
-    n = db().execute(
-        "UPDATE unlim_files SET status='pending', attempts=0, error=NULL, "
-        "worker_id=NULL WHERE status IN ('failed', 'in_progress')"
-    ).rowcount
+    c = db()
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        n = c.execute(
+            "UPDATE unlim_files SET status='pending', attempts=0, error=NULL, "
+            "worker_id=NULL WHERE status IN ('failed', 'in_progress')"
+        ).rowcount
+        c.execute("COMMIT")
+    except Exception:
+        try:
+            c.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
     print(f"Возвращено в очередь: {n}")
 
 

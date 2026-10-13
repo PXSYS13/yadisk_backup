@@ -30,7 +30,9 @@ from tqdm import tqdm
 
 from state import State
 from utils import (
+    TELEGRAM_CHANNEL,
     avoid_case_collision,
+    classify_yandex_error,
     ensure_dir,
     file_size_safe,
     resolve_local_path,
@@ -39,8 +41,8 @@ from utils import (
 
 log = logging.getLogger("yadisk_backup")
 
-# Скип-листы для путей которые НИКОГДА не качаем
-SKIP_PATH_PREFIXES = ("disk:/Корзина", "disk:/Trash", "/Корзина", "/Trash")
+# Скип-листы для путей которые НИКОГДА не качаем (полное совпадение или как родительская папка)
+SKIP_PATH_PREFIXES = ("disk:/Корзина", "disk:/Trash")
 
 
 # ── retry-обёртка для сетевых вызовов ───────────────────────────────────────
@@ -76,13 +78,22 @@ def _wait_policy(retry_state) -> float:
     """429 → ждём минуту, 50x ошибки хранилища Яндекса → 5 сек, остальное → экспонента."""
     exc = retry_state.outcome.exception() if retry_state.outcome else None
     if isinstance(exc, yadisk.exceptions.TooManyRequestsError):
-        log.warning("Поймали 429 TooManyRequests — жду %.0f сек", RATE_LIMIT_WAIT_SEC)
+        log.warning(
+            "Яндекс вернул 429 TooManyRequests (лимит запросов). Жду %.0f сек... Новости: %s",
+            RATE_LIMIT_WAIT_SEC,
+            TELEGRAM_CHANNEL,
+        )
         return RATE_LIMIT_WAIT_SEC
     if isinstance(exc, (yadisk.exceptions.InternalServerError,
                         yadisk.exceptions.BadGatewayError,
                         yadisk.exceptions.GatewayTimeoutError,
                         yadisk.exceptions.UnavailableError)):
-        log.warning("Временная ошибка узла Яндекса (%s) — пауза %.0f сек...", type(exc).__name__, SERVER_ERROR_WAIT_SEC)
+        log.warning(
+            "Сбой серверов Яндекса (%s, дата-центр). Проблема на стороне Яндекса. Пауза %.0f сек... Статус: %s",
+            type(exc).__name__,
+            SERVER_ERROR_WAIT_SEC,
+            TELEGRAM_CHANNEL,
+        )
         return SERVER_ERROR_WAIT_SEC
     return _wait_exponential(retry_state)
 
@@ -108,7 +119,12 @@ def _normalize_remote(path: str) -> str:
 
 
 def _is_skipped(path: str) -> bool:
-    return any(path.startswith(p) for p in SKIP_PATH_PREFIXES)
+    """Проверяет, лежит ли путь в корзине (не задевая папки вроде Корзина2)."""
+    norm = _normalize_remote(path)
+    for p in SKIP_PATH_PREFIXES:
+        if norm == p or norm.startswith(p + "/"):
+            return True
+    return False
 
 
 def scan_tree(
@@ -120,15 +136,23 @@ def scan_tree(
 ) -> tuple[int, int]:
     """Обходит дерево начиная с root. Регистрирует файлы как pending.
     Возвращает (количество файлов, суммарный размер).
+    Для корня диска использует быстрый плоский scan_all_files.
     """
+    norm_root = _normalize_remote(root)
+    if norm_root in ("disk:/", "disk:"):
+        try:
+            return scan_all_files(client, state, on_file=on_file)
+        except Exception as e:
+            log.warning("get_files недоступен (%s), переключаюсь на обход дерева папок", e)
+
     files_count = 0
     bytes_total = 0
 
-    # Очередь путей для обхода — итеративный BFS, не плодим рекурсию на 10 уровней
+    # Очередь путей для обхода — BFS
     queue: list[str] = [root]
 
     while queue:
-        cur = queue.pop()
+        cur = queue.pop(0)
         if _is_skipped(_normalize_remote(cur)):
             log.info("Пропускаю корзину: %s", cur)
             continue
@@ -229,22 +253,19 @@ def scan_media(
 @_retry
 def _get_files_page(
     client: yadisk.Client,
-    media_type: str,
+    media_type: str | None,
     offset: int,
     limit: int,
 ) -> list:
     """Одна страница из get_files с retry."""
-    return list(
-        client.get_files(
-            media_type=media_type,
-            offset=offset,
-            limit=limit,
-        )
-    )
+    kwargs = {"offset": offset, "limit": limit}
+    if media_type:
+        kwargs["media_type"] = media_type
+    return list(client.get_files(**kwargs))
 
 
-def _iter_files(client: yadisk.Client, media_type: str, page_size: int = 200):
-    """Итератор по всем файлам диска для заданного media_type.
+def _iter_files(client: yadisk.Client, media_type: str | None = None, page_size: int = 200):
+    """Итератор по файлам диска для заданного media_type (или всех файлов, если media_type=None).
 
     Сами пагинируем — yadisk.get_files() умеет итератор, но мы хотим
     обернуть КАЖДУЮ страницу в retry, а не одну общую попытку.
@@ -259,6 +280,45 @@ def _iter_files(client: yadisk.Client, media_type: str, page_size: int = 200):
         if len(page) < page_size:
             return
         offset += page_size
+
+
+def scan_all_files(
+    client: yadisk.Client,
+    state: State,
+    on_file: Callable[[str, int], None] | None = None,
+) -> tuple[int, int]:
+    """Быстрое сканирование всего диска плоским get_files() вместо рекурсии по папкам.
+    Берёт страницы по 200 файлов за 1 запрос к API Яндекса.
+    """
+    files_count = 0
+    bytes_total = 0
+    page_batch = []
+
+    for entry in _iter_files(client, media_type=None, page_size=200):
+        entry_path = entry.path
+        if _is_skipped(entry_path):
+            continue
+        if entry.type != "file":
+            continue
+
+        size = int(entry.size) if entry.size is not None else None
+        md5 = getattr(entry, "md5", None)
+        page_batch.append((entry_path, size, md5))
+        files_count += 1
+        if entry.size:
+            bytes_total += int(entry.size)
+        if on_file:
+            on_file(entry_path, int(entry.size or 0))
+
+        if len(page_batch) >= 200:
+            state.mark_pending_batch(page_batch)
+            page_batch.clear()
+
+    if page_batch:
+        state.mark_pending_batch(page_batch)
+        page_batch.clear()
+
+    return files_count, bytes_total
 
 
 # ── скачивание ──────────────────────────────────────────────────────────────
@@ -332,13 +392,18 @@ def _download_one(
     except yadisk.exceptions.TooManyRequestsError as e:
         # Все попытки с паузами исчерпаны — фиксируем как fail
         dur = int((time.monotonic() - start) * 1000)
-        return DownloadResult(job, "failed", None, 0, f"429 TooManyRequests: {e}", dur)
+        return DownloadResult(job, "failed", None, 0, f"429 TooManyRequests (лимит Яндекса): {e}", dur)
     except yadisk.exceptions.PathNotFoundError as e:
         dur = int((time.monotonic() - start) * 1000)
         return DownloadResult(job, "failed", None, 0, f"PathNotFound: {e}", dur)
     except Exception as e:
         dur = int((time.monotonic() - start) * 1000)
-        return DownloadResult(job, "failed", None, 0, f"{type(e).__name__}: {e}", dur)
+        diag = classify_yandex_error(e)
+        if diag["is_yandex_server"]:
+            err_msg = f"{type(e).__name__} [СБОЙ СЕРВЕРА ЯНДЕКСА]: {e}"
+        else:
+            err_msg = f"{type(e).__name__}: {e}"
+        return DownloadResult(job, "failed", None, 0, err_msg, dur)
 
     bytes_written = file_size_safe(local_path) or 0
     dur = int((time.monotonic() - start) * 1000)
@@ -434,7 +499,7 @@ def download_all(
         client = _get_thread_client(token)
         return _download_one(job, client, download_dir)
 
-    # Без `with`: его выход дожидается ВСЕЙ очереди, и Ctrl+C выглядит зависанием.
+    _close_all_clients()
     pool = ThreadPoolExecutor(max_workers=workers)
     try:
         futures = {pool.submit(worker, j): j for j in jobs_list}
@@ -443,17 +508,15 @@ def download_all(
                 res = fut.result()
                 _apply_result(state, res, counters, file_bar, byte_bar)
         except KeyboardInterrupt:
-            file_bar.close()
-            byte_bar.close()
             print("\nCtrl+C — отменяю очередь, дожидаюсь только текущих файлов...",
                   file=sys.stderr)
             log.warning("Ctrl+C — отменяю оставшиеся задачи и закрываю пул...")
             pool.shutdown(wait=False, cancel_futures=True)
             raise
-        pool.shutdown(wait=True)
-        # Закрываем сокеты только когда воркеры точно остановились
-        _close_all_clients()
+        else:
+            pool.shutdown(wait=True)
     finally:
+        _close_all_clients()
         file_bar.close()
         byte_bar.close()
 
@@ -492,12 +555,23 @@ def _apply_result(
     else:
         state.mark_failed(res.job.remote_path, res.error or "unknown")
         counters["failed"] += 1
-        log.error(
-            "FAIL | %s | %s | %s",
-            res.error,
-            res.duration_ms,
-            res.job.remote_path,
-        )
+        diag = classify_yandex_error(res.error)
+        if diag["is_yandex_server"]:
+            log.warning(
+                "FAIL (Сервер Яндекса) | %s | %s ms | %s | Инфо: %s | Канал: %s",
+                res.error,
+                res.duration_ms,
+                res.job.remote_path,
+                diag["message"],
+                TELEGRAM_CHANNEL,
+            )
+        else:
+            log.error(
+                "FAIL | %s | %s | %s",
+                res.error,
+                res.duration_ms,
+                res.job.remote_path,
+            )
     file_bar.update(1)
 
 

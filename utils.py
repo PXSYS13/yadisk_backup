@@ -268,3 +268,108 @@ def human_duration_ru(seconds: float | None) -> str:
         return f"{m}м {s:02d}с"
     return f"{s}с"
 
+
+# ── Ссылки сообщества ────────────────────────────────────────────────────────
+TELEGRAM_CHANNEL = "https://t.me/davronsv"
+TELEGRAM_HANDLE = "@davronsv"
+YOUTUBE_VIDEO_URL = "https://www.youtube.com/watch?v=XAiJxqHkEUA"
+
+
+def classify_yandex_error(exc: BaseException | str | None) -> dict:
+    """Анализирует ошибку и определяет, возникла ли она на стороне серверов Яндекса.
+
+    Возвращает словарь:
+    {
+        "is_yandex_server": bool,
+        "category": str,
+        "title": str,
+        "message": str,
+        "action": str,
+    }
+    """
+    if exc is None:
+        return {
+            "is_yandex_server": False,
+            "category": "none",
+            "title": "Ошибок нет",
+            "message": "Всё работает штатно",
+            "action": "",
+        }
+
+    err_str = str(exc).lower()
+    type_name = type(exc).__name__ if isinstance(exc, BaseException) else ""
+
+    # 1. 429 Too Many Requests (Rate limit Яндекса)
+    if "429" in err_str or "toomanyrequests" in err_str or "toomanyrequests" in type_name.lower():
+        return {
+            "is_yandex_server": True,
+            "category": "rate_limit",
+            "title": "Лимит запросов Яндекса (HTTP 429 Too Many Requests)",
+            "message": "Серверы Яндекса временно ограничили частоту скачивания. Скрипт ожидает паузу.",
+            "action": f"Рекомендуется снизить число параллельных воркеров до 2–3. Новости: {TELEGRAM_CHANNEL}",
+        }
+
+    # 2. Сбои оборудования / дата-центров Яндекса (500, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout)
+    server_codes = ("500", "502", "503", "504")
+    server_types = ("badgateway", "gatewaytimeout", "internalserver", "unavailableerror", "servererror")
+    if (
+        any(code in err_str for code in server_codes)
+        or any(st in type_name.lower() for st in server_types)
+        or "bad gateway" in err_str
+        or "service unavailable" in err_str
+        or "gateway timeout" in err_str
+        or "prepare failed" in err_str
+    ):
+        return {
+            "is_yandex_server": True,
+            "category": "server_down",
+            "title": "Сбой дата-центра Яндекса (HTTP 50x / шторм серверов)",
+            "message": "Проблема на стороне серверов Яндекса (перегрузка или сбой узлов). Скрипт НЕ сломался!",
+            "action": f"Скрипт автоматически подождёт и продолжит. Проверьте статус в Telegram: {TELEGRAM_CHANNEL}",
+        }
+
+    # 3. Обрывы связи и сбросы TCP-соединений CDN Яндекса
+    conn_indicators = (
+        "connectionreset", "connection reset", "remotedisconnected",
+        "connection aborted", "read timed out", "connect timed out",
+        "connectionerror", "timeouterror"
+    )
+    if any(ci in err_str for ci in conn_indicators) or isinstance(exc, (ConnectionError, TimeoutError)):
+        return {
+            "is_yandex_server": True,
+            "category": "connection_drop",
+            "title": "Разрыв связи с сервером Яндекса",
+            "message": "CDN-узел Яндекса сбросил TCP-соединение или задержал ответ по таймауту.",
+            "action": "Скрипт автоматически восстановит соединение и повторит скачивание файла.",
+        }
+
+    # 4. Проблемы с авторизацией (клиентские: 401, 403, протухли куки/токен)
+    if "401" in err_str or "unauthorized" in err_str or "403" in err_str or "forbidden" in err_str or "passport.yandex" in err_str:
+        return {
+            "is_yandex_server": False,
+            "category": "auth_expired",
+            "title": "Срок действия токена или cookies истёк (401/403)",
+            "message": "Яндекс отклонил ключ доступа. Токен или cookies.json устарели.",
+            "action": f"Обновите токен или куки во вкладке 'Настройка'. Инструкция: {YOUTUBE_VIDEO_URL}",
+        }
+
+    # 5. Файл не найден (404)
+    if "404" in err_str or "pathnotfound" in err_str or "notfound" in err_str:
+        return {
+            "is_yandex_server": False,
+            "category": "not_found",
+            "title": "Файл не найден на Яндекс.Диске (404)",
+            "message": "Файл был удалён или перемещён в корзину на Диске.",
+            "action": "Файл безопасно пропущен в очереди.",
+        }
+
+    # 6. Прочие ошибки
+    return {
+        "is_yandex_server": False,
+        "category": "generic",
+        "title": "Ошибка скачивания",
+        "message": str(exc),
+        "action": f"При повторении проблемы напишите в Telegram: {TELEGRAM_CHANNEL}",
+    }
+
+

@@ -11,12 +11,12 @@ import sqlite3
 import threading
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 
 def _utc_now() -> str:
     """Текущее время UTC в том же формате, что писали раньше (utcnow() устарел)."""
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
 
 SCHEMA = """

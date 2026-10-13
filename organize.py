@@ -117,7 +117,8 @@ def compute_md5_batch(files: list[dict]):
     print("\n[2/4] MD5 для подозреваемых...")
     by_size = defaultdict(list)
     for f in files:
-        by_size[f["size"]].append(f)
+        if (f.get("size") or 0) > 0:
+            by_size[f["size"]].append(f)
     suspect = [f for v in by_size.values() if len(v) > 1 for f in v]
     print(f"  Подозреваемых: {len(suspect)}")
     for i, f in enumerate(suspect):
@@ -132,7 +133,7 @@ def compute_md5_batch(files: list[dict]):
 def find_dup_paths(files: list[dict]) -> set[str]:
     g = defaultdict(list)
     for f in files:
-        if f.get("md5"):
+        if f.get("md5") and (f.get("size") or 0) > 0:
             g[(f["size"], f["md5"])].append(f)
     out = set()
     for grp in g.values():
@@ -159,6 +160,18 @@ def main():
     root = os.path.abspath(args.input)
     if not os.path.isdir(root):
         sys.exit(f"Нет папки: {root}")
+
+    # Лёгкая проверка безопасности пути (без импорта тяжёлого webui.py)
+    import re as _re
+    _norm = root.lower().replace("/", "\\")
+    _abs_norm = os.path.abspath(root).lower().replace("/", "\\")
+    if (len(_abs_norm) <= 3 and _abs_norm.endswith(":\\")) or _norm in ("\\", "/"):
+        sys.exit("Опасный путь для сортировки: корень диска")
+    home = os.path.expanduser("~")
+    if home and os.path.abspath(root).lower() == os.path.abspath(home).lower():
+        sys.exit("Опасный путь для сортировки: домашняя папка")
+    if _re.match(r"^[a-z]:\\(windows|program files|program files \(x86\)|programdata|\$recycle\.bin)(\\|$)", _abs_norm):
+        sys.exit(f"Опасный путь для сортировки: системная папка: {root}")
 
     print("=" * 60)
     print(f"  СОРТИРОВКА: {root}")
@@ -208,11 +221,11 @@ def main():
     err = 0
     last = time.time()
     for src, dst, is_dup in plan:
-        if os.path.abspath(src) == os.path.abspath(dst):
+        if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(dst)):
             continue  # Файл уже лежит в нужной папке
         try:
             target = unique_path(dst)
-            if os.path.abspath(src) == os.path.abspath(target):
+            if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(target)):
                 continue
             os.makedirs(os.path.dirname(target), exist_ok=True)
             shutil.move(src, target)
