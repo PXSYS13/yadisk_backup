@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
     "fastapi>=0.115.0",
+    "markdown>=3.6",
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
     "tenacity>=8.2.0",

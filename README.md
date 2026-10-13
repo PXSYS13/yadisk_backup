@@ -31,7 +31,7 @@
 
 👉 **Telegram-канал:** [t.me/davronsv](https://t.me/davronsv) (`@davronsv`)  
 👉 **Видеоинструкция на YouTube:** [Смотреть видеоразбор](https://www.youtube.com/watch?v=XAiJxqHkEUA)  
-👉 **Подробная пошаговая инструкция для новичков:** [Полное иллюстрированное руководство (INSTRUCTION_GET_TOKEN.md)](INSTRUCTION_GET_TOKEN.md)
+👉 **Подробная пошаговая инструкция для новичков:** [открыть инструкцию](https://github.com/PXSYS13/yadisk_backup/blob/main/INSTRUCTION_GET_TOKEN.md) (в программе: ссылка «Инструкция» внизу страницы)
 
 ---
 

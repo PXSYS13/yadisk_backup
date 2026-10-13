@@ -18,6 +18,7 @@
     --text-tertiary:#8e8e93;
     --accent:#0a84ff;
     --accent-hover:#3a9eff;
+    --link:#6cb8ff;
     --green:#30d158;
     --red:#ff453a;
     --yellow:#ffd60a;
@@ -296,7 +297,9 @@
   }
   .info ol{padding-left:22px;margin-top:8px;color:var(--text-secondary)}
   .info li{margin-bottom:6px;padding-left:4px}
-  .info a{color:var(--accent);text-decoration:none}
+  a{color:var(--link)}
+  a:hover{text-decoration:underline}
+  .info a{color:var(--link);text-decoration:none}
   .info a:hover{text-decoration:underline}
   .info code{
     background:var(--surface2);padding:1px 7px;border-radius:5px;
@@ -352,7 +355,7 @@
   .ico-lg{width:22px;height:22px}
 
   /* Cat icon backgrounds */
-  .bg-photo{background:rgba(10,132,255,.15);color:var(--accent)}
+  .bg-photo{background:rgba(10,132,255,.15);color:var(--link)}
   .bg-video{background:rgba(191,90,242,.15);color:var(--purple)}
   .bg-audio{background:rgba(255,159,10,.15);color:var(--orange)}
   .bg-doc{background:rgba(255,214,10,.15);color:var(--yellow)}
@@ -798,7 +801,7 @@
   .yx-affect.fail .dot{background:var(--red);box-shadow:0 0 8px rgba(255,69,58,.5)}
   .yx-reco{font-size:13.5px;color:var(--text);line-height:1.45;margin-top:4px}
   .yx-links{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-  .yx-links a{font-size:12.5px;padding:6px 12px;border-radius:99px;border:0.5px solid var(--hairline-strong);color:var(--accent);text-decoration:none;background:var(--surface)}
+  .yx-links a{font-size:12.5px;padding:6px 12px;border-radius:99px;border:0.5px solid var(--hairline-strong);color:var(--link);text-decoration:none;background:var(--surface)}
   .probe-grid{display:grid;gap:14px;grid-template-columns:1fr 1fr;margin-bottom:16px}
   @media(max-width:720px){.probe-grid{grid-template-columns:1fr}}
   .probe-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px}
@@ -852,9 +855,9 @@
   .ob-why{font-size:13.5px;color:var(--text-secondary);line-height:1.5;background:var(--surface2);border-radius:10px;padding:10px 14px;margin-bottom:12px}
   .ob-list{padding-left:22px;margin:0 0 14px;font-size:14px;line-height:1.6}
   .ob-list li{margin-bottom:6px}
-  .ob-inline{padding:3px 10px;font-size:12.5px;vertical-align:middle;color:var(--accent);border-color:rgba(10,132,255,.4)}
+  .ob-inline{padding:3px 10px;font-size:12.5px;vertical-align:middle;color:var(--link);border-color:rgba(10,132,255,.4)}
   .ob-help{margin-top:14px;font-size:13px;color:var(--text-secondary)}
-  .ob-help summary{cursor:pointer;color:var(--accent);font-weight:500}
+  .ob-help summary{cursor:pointer;color:var(--link);font-weight:500}
   .ob-help ul{padding-left:20px;margin-top:8px;line-height:1.55}
   .ob-help li{margin-bottom:6px}
   .acc-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:8px}
@@ -1060,7 +1063,7 @@
     <div class="console" id="pipeline-console"><div class="console-empty">жду запуска…</div></div>
     <div style="margin-top:8px;font-size:12px;color:var(--text-tertiary);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
       <span>При ошибках 500/502/504 или 429 скрипт повторяет запросы сам — это нагрузка серверов Яндекса.</span>
-      <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;display:inline-flex;align-items:center;gap:4px">
+      <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:var(--link);text-decoration:none;display:inline-flex;align-items:center;gap:4px">
         <svg class="ico" style="width:13px;height:13px"><use href="#i-telegram"/></svg>
         <span>Канал @davronsv</span>
       </a>
@@ -1122,7 +1125,7 @@
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
       <select id="log-select" class="input" style="max-width:340px;margin:0" onchange="loadLogTail()"></select>
       <button class="btn" onclick="refreshLogList()">Обновить</button>
-      <a class="btn" href="/api/logs/bundle" style="text-decoration:none;color:var(--accent);border-color:rgba(10,132,255,.4)">Скачать архив логов для поддержки</a>
+      <a class="btn" href="/api/logs/bundle" style="text-decoration:none;color:var(--link);border-color:rgba(10,132,255,.4)">Скачать архив логов для поддержки</a>
     </div>
     <div class="console" id="log-view" style="max-height:360px"><div class="console-empty">выберите файл</div></div>
   </div>
@@ -1143,8 +1146,8 @@
         <a href="https://www.youtube.com/watch?v=XAiJxqHkEUA" target="_blank" rel="noopener" class="btn" style="font-size:12px;padding:6px 12px;text-decoration:none;color:#ff3b30">
           Смотреть видео ▶
         </a>
-        <a href="https://github.com/PXSYS13/yadisk_backup/blob/main/INSTRUCTION_GET_TOKEN.md" target="_blank" rel="noopener" class="btn" style="font-size:12px;padding:6px 12px;text-decoration:none;color:var(--text)">
-          📖 Текстовый гайд
+        <a href="/guide" target="_blank" rel="noopener" class="btn" style="font-size:12px;padding:6px 12px;text-decoration:none;color:var(--text)">
+          📖 Пошаговая инструкция
         </a>
         <a href="https://t.me/davronsv" target="_blank" rel="noopener" class="btn" style="font-size:12px;padding:6px 12px;text-decoration:none;color:#29b6f6">
           <svg class="ico" style="width:13px;height:13px"><use href="#i-telegram"/></svg> Telegram @davronsv
@@ -1223,7 +1226,7 @@
         <li>Установи <a href="https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm" target="_blank">расширение Cookie-Editor</a></li>
         <li>Открой <a href="https://disk.yandex.ru/client/disk" target="_blank">disk.yandex.ru</a> и залогинься</li>
         <li>Кликни на иконку Cookie-Editor → <strong>Export → Export as JSON</strong></li>
-        <li>Вставь JSON ниже → <strong>«Проверить cookies»</strong> → потом <strong>«Сохранить cookies»</strong>. Новые cookies заменяют старые; «Удалить cookies» — стирает их совсем.</li>
+        <li>Вставь JSON ниже и нажми <strong>«Сохранить cookies»</strong>: программа сама проверит, что нужные куки на месте. Новые cookies заменяют старые; «Удалить cookies» стирает их совсем.</li>
       </ol>
       <span class="muted" style="font-size:12.5px">Куки сохраняются только локально, в git не попадают.</span>
     </div>
@@ -1243,7 +1246,7 @@
       <button onclick="testCookies()" title="Проверить, что в JSON есть обязательные куки; ничего не сохраняет">
         <svg class="ico-sm"><use href="#i-check"/></svg>Проверить cookies
       </button>
-      <button class="primary" id="btn-save-cookies" onclick="saveCookies()" disabled title="Записать проверенные cookies в cookies.json (заменит прежние)">
+      <button class="primary" id="btn-save-cookies" onclick="saveCookies()" title="Проверить и записать cookies в cookies.json (заменит прежние)">
         <svg class="ico-sm"><use href="#i-save"/></svg>Сохранить cookies
       </button>
     </div>
@@ -1340,7 +1343,7 @@
       <div class="console" id="disk-console"><div class="console-empty">жду запуска…</div></div>
       <div style="margin-top:6px;font-size:11px;color:var(--text-tertiary);display:flex;justify-content:space-between;align-items:center">
         <span>Статус серверов Яндекса:</span>
-        <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">t.me/davronsv</a>
+        <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:var(--link);text-decoration:none">t.me/davronsv</a>
       </div>
     </div>
     <div class="card">
@@ -1437,7 +1440,7 @@
       <div class="console" id="unlim-console"><div class="console-empty">жду запуска…</div></div>
       <div style="margin-top:6px;font-size:11px;color:var(--text-tertiary);display:flex;justify-content:space-between;align-items:center">
         <span>Перегрузка архивации — на стороне серверов Яндекса. Инфо:</span>
-        <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">t.me/davronsv</a>
+        <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:var(--link);text-decoration:none">t.me/davronsv</a>
       </div>
     </div>
     <div class="card">
@@ -1613,7 +1616,7 @@
   <nav class="footer-links">
     <a href="https://t.me/davronsv" target="_blank" rel="noopener">Telegram-канал</a>
     <a href="https://github.com/PXSYS13/yadisk_backup" target="_blank" rel="noopener">GitHub</a>
-    <a href="https://github.com/PXSYS13/yadisk_backup/blob/main/INSTRUCTION_GET_TOKEN.md" target="_blank" rel="noopener">Инструкция</a>
+    <a href="/guide" target="_blank" rel="noopener">Инструкция</a>
     <a href="https://www.donationalerts.com/r/davronsvv" target="_blank" rel="noopener">Поддержать проект</a>
   </nav>
 </footer>
@@ -1726,7 +1729,7 @@
           <li>Откройте официальную страницу Полигона: <button class="btn btn-sm ob-inline" onclick="window.open('https://yandex.ru/dev/disk/poligon/','_blank','noopener')">Открыть Полигон ↗</button></li>
           <li>Справа вверху нажмите <b>«Получить OAuth-токен»</b> и в окне Яндекса — <b>«Разрешить»</b>.</li>
           <li>Скопируйте строку, которая начинается на <code>y0_</code> (кнопка «Скопировать» рядом с ней).</li>
-          <li>Вставьте её в поле ниже и нажмите <b>«Проверить»</b> — мы покажем, чей это аккаунт и сколько там данных.</li>
+          <li>Вставьте её в поле ниже и нажмите <b>«Проверить токен»</b>: покажем, чей это аккаунт и сколько там данных.</li>
         </ol>
         <label class="field-label">Токен</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1741,7 +1744,7 @@
             <li><b>Полигон просит войти</b> — войдите в аккаунт Яндекса в этой же вкладке и повторите «Получить OAuth-токен».</li>
             <li><b>Показывает чужой логин</b> — в браузере активен другой аккаунт: выйдите на passport.yandex.ru и войдите нужным.</li>
             <li><b>Сетевая ошибка или 50x</b> — Яндекс сейчас сбоит, смотрите вкладку «Статус Яндекса» и повторите через пару минут.</li>
-            <li>Подробный гид со скриншотами: <a href="https://github.com/PXSYS13/yadisk_backup/blob/main/INSTRUCTION_GET_TOKEN.md" target="_blank" rel="noopener">INSTRUCTION_GET_TOKEN.md</a>, видео: <a href="https://www.youtube.com/watch?v=XAiJxqHkEUA" target="_blank" rel="noopener">YouTube</a>.</li>
+            <li>Пошаговая инструкция: <a href="/guide" target="_blank" rel="noopener">открыть</a>, видео: <a href="https://www.youtube.com/watch?v=XAiJxqHkEUA" target="_blank" rel="noopener">YouTube</a>.</li>
           </ul>
         </details>
       </div>
@@ -1771,13 +1774,13 @@
           <li>Установите расширение Cookie-Editor: <a href="https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm" target="_blank" rel="noopener">Chrome / Яндекс.Браузер / Edge / Opera</a> или <a href="https://addons.mozilla.org/ru/firefox/addon/cookie-editor/" target="_blank" rel="noopener">Firefox</a>.</li>
           <li>Откройте <a href="https://disk.yandex.ru/client/photo" target="_blank" rel="noopener">disk.yandex.ru/client/photo</a> и убедитесь, что видите свои фото.</li>
           <li>Нажмите иконку Cookie-Editor 🍪 (если скрыта — значок «пазл» справа вверху) → внизу <b>Export</b> → <b>Export as JSON</b>. Куки уже в буфере обмена.</li>
-          <li>Вставьте в поле ниже (Ctrl+V) и нажмите <b>«Проверить»</b>.</li>
+          <li>Вставьте в поле ниже (Ctrl+V) и нажмите <b>«Сохранить cookies»</b>: программа сама проверит, что нужные куки на месте.</li>
         </ol>
         <label class="field-label">JSON из Cookie-Editor</label>
         <textarea id="ob-cookies" placeholder='[{"name":"Session_id","value":"…"}, …]' style="min-height:90px;margin:0" oninput="obCookiesInput()"></textarea>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
           <button class="btn" onclick="obCheckCookies(this)" title="Проверить, что в JSON есть обязательные куки; ничего не сохраняет">Проверить cookies</button>
-          <button class="btn" id="ob-cookies-save" style="background:var(--accent);color:#fff;border-color:transparent" onclick="obSaveCookies(this)" disabled title="Записать проверенные cookies в cookies.json">Сохранить cookies</button>
+          <button class="btn" id="ob-cookies-save" style="background:var(--accent);color:#fff;border-color:transparent" onclick="obSaveCookies(this)" title="Проверить и записать cookies в cookies.json">Сохранить cookies</button>
           <button class="btn" onclick="obSkipCookies()" title="Безлимит скачиваться не будет; можно вернуться к этому шагу позже">Пропустить — безлимита нет</button>
         </div>
         <div id="ob-cookies-result" style="margin-top:10px"></div>
@@ -2159,10 +2162,7 @@ document.addEventListener('DOMContentLoaded', ()=>{
   }
   const ckIn = document.getElementById('cookies-input');
   if(ckIn){
-    ckIn.addEventListener('input', ()=>{
-      _verifiedCookies = null;
-      document.getElementById('btn-save-cookies').disabled = true;
-    });
+    ckIn.addEventListener('input', ()=>{ _verifiedCookies = null });
   }
 });
 
@@ -2254,12 +2254,11 @@ async function testCookies(){
   } catch(e){ toast('Сеть: '+e.message,'err') }
 }
 
+// «Проверить» не обязательна: сервер сам проверяет cookies при сохранении и
+// возвращает понятную ошибку, если чего-то не хватает
 async function saveCookies(){
   const arr = _parseCookies();
   if(!arr) return;
-  if(!_verifiedCookies){
-    toast('Сначала «Проверить»','err'); return;
-  }
   try {
     const {d, err} = await postJSON('/api/cookies', {cookies:arr});
     if(!err && d.ok){
@@ -2879,7 +2878,7 @@ function obToggleToken(){ const i = document.getElementById('ob-token'); i.type 
 async function obClearToken(){ await clearToken(); await refresh(); obRenderDynamic() }
 async function obClearCookies(){ await clearCookies(); await refresh(); obRenderDynamic() }
 function obTokenInput(){ _obVerifiedToken = null; document.getElementById('ob-token-result').innerHTML = '' }
-function obCookiesInput(){ _obVerifiedCookies = null; document.getElementById('ob-cookies-save').disabled = true }
+function obCookiesInput(){ _obVerifiedCookies = null; document.getElementById('ob-cookies-result').innerHTML = '' }
 
 async function obCheckToken(btn){
   const tok = document.getElementById('ob-token').value.trim();
@@ -2964,16 +2963,27 @@ async function obCheckCookies(btn){
   if(btn) btn.disabled = false;
 }
 
+// Раньше здесь сравнивались два разных объекта из JSON.parse — сохранение не срабатывало никогда.
+// Теперь сохраняем сразу: сервер сам проверит обязательные куки и вернёт понятную ошибку.
 async function obSaveCookies(btn){
-  const arr = obParseCookies(); if(!arr || arr !== _obVerifiedCookies){ toast('Сначала «Проверить»','err'); return }
+  const arr = obParseCookies(); if(!arr) return;
+  const out = document.getElementById('ob-cookies-result');
   if(btn) btn.disabled = true;
   try {
     const {d, err} = await postJSON('/api/cookies', {cookies: arr});
-    if(err || !d.ok){ toast(err || 'Ошибка','err'); if(btn) btn.disabled = false; return }
+    if(err || !d.ok){
+      const msg = err || 'Не удалось сохранить';
+      out.innerHTML = `<div class="task-banner err"><div class="task-banner-body"><div class="task-banner-title">Не сохранено</div><div class="task-banner-sub">${esc(msg)}</div></div></div>`;
+      toast(msg,'err');
+      if(btn) btn.disabled = false;
+      return;
+    }
     toast(`Сохранено ${d.saved_count} куки`,'ok');
     document.getElementById('ob-cookies').value = '';
     _obVerifiedCookies = null;
     try { localStorage.removeItem('ob_skip_cookies') } catch(e){}
+    if(btn) btn.disabled = false;
+    out.innerHTML = '';
     await refresh();
     obGo(4);
   } catch(e){ toast('Сеть: '+e.message,'err'); if(btn) btn.disabled = false }
@@ -3083,9 +3093,9 @@ function renderWizard(){
   const hcls = hstate === 'ok' ? 'ok' : hstate === 'unknown' ? '' : hstate === 'down' ? 'err' : 'warn';
   const diagLine = p.diagnostics && p.diagnostics.title ? `<div class="task-banner" style="margin-top:12px"><div class="task-banner-body"><div class="task-banner-title">${esc(p.diagnostics.title)}</div><div class="task-banner-sub">${esc(p.diagnostics.recommendation||'')}</div></div></div>` : '';
   document.getElementById('wz-access').innerHTML = `
-    <div class="check-row ${tok.ok ? 'ok' : 'err'}"><span class="dot"></span>OAuth-токен: ${tok.ok ? 'валиден (' + esc(tok.login||'') + ')' : 'нет — обычный диск недоступен'}<span class="sub"><a href="#" onclick="closeWizard();switchTab('setup');return false" style="color:var(--accent)">настроить</a></span></div>
-    <div class="check-row ${ck.ok ? 'ok' : 'warn'}"><span class="dot"></span>Cookies: ${ck.ok ? 'загружены (' + (ck.count||0) + ' шт)' : 'нет — безлимит недоступен'}<span class="sub"><a href="#" onclick="closeWizard();switchTab('setup');return false" style="color:var(--accent)">настроить</a></span></div>
-    <div class="check-row ${hcls}"><span class="dot"></span>Серверы Яндекса: ${STATE_LABEL[hstate] || hstate}${h ? ' — ' + esc(h.summary||'') : ''}<span class="sub"><a href="#" onclick="closeWizard();switchTab('status');return false" style="color:var(--accent)">подробнее</a></span></div>
+    <div class="check-row ${tok.ok ? 'ok' : 'err'}"><span class="dot"></span>OAuth-токен: ${tok.ok ? 'валиден (' + esc(tok.login||'') + ')' : 'нет — обычный диск недоступен'}<span class="sub"><a href="#" onclick="closeWizard();switchTab('setup');return false" style="color:var(--link)">настроить</a></span></div>
+    <div class="check-row ${ck.ok ? 'ok' : 'warn'}"><span class="dot"></span>Cookies: ${ck.ok ? 'загружены (' + (ck.count||0) + ' шт)' : 'нет — безлимит недоступен'}<span class="sub"><a href="#" onclick="closeWizard();switchTab('setup');return false" style="color:var(--link)">настроить</a></span></div>
+    <div class="check-row ${hcls}"><span class="dot"></span>Серверы Яндекса: ${STATE_LABEL[hstate] || hstate}${h ? ' — ' + esc(h.summary||'') : ''}<span class="sub"><a href="#" onclick="closeWizard();switchTab('status');return false" style="color:var(--link)">подробнее</a></span></div>
     <div class="check-row ${p.free_space ? 'ok' : 'warn'}"><span class="dot"></span>Папка: <code style="margin-left:4px">${esc(p.download_dir||'')}</code><span class="sub">${p.free_space ? 'свободно ' + human(p.free_space.free) : 'папка недоступна'}</span></div>
     ${diagLine}`;
 

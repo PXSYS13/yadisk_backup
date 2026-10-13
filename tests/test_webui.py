@@ -929,6 +929,29 @@ def test_logs_bundle_contains_logs_and_support_info(tmp_path, monkeypatch):
     assert info["config"]["token_ok"] is False
 
 
+def test_guide_renders_instruction_with_working_toc():
+    """Инструкция открывается в программе: якоря оглавления совпадают с заголовками."""
+    import re as _re
+
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    resp = client.get("/guide")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "Получение OAuth-токена" in html
+    assert "[!NOTE]" not in html and "flowchart" not in html
+    assert 'class="note"' in html
+    ids = set(_re.findall(r'id="([^"]+)"', html))
+    toc = {h[1:] for h in _re.findall(r'href="(#[^"]+)"', html)}
+    assert toc and toc <= ids, sorted(toc - ids)
+
+
+def test_ui_has_no_bare_instruction_filename_links():
+    """«INSTRUCTION_GET_TOKEN.md» как текст ссылки: Telegram и браузер считают .md доменом."""
+    html = (webui.TEMPLATES_DIR / "index.html").read_text(encoding="utf-8")
+    assert ">INSTRUCTION_GET_TOKEN.md<" not in html
+    assert 'href="/guide"' in html
+
+
 def test_unlim_retry_without_db_does_not_create_it(tmp_path, monkeypatch):
     db_file = tmp_path / "unlim_state.db"
     monkeypatch.setattr(webui, "UNLIM_DB_FILE", db_file)
