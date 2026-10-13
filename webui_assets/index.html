@@ -316,10 +316,15 @@
   .badge.run{background:rgba(255,214,10,.12);border-color:rgba(255,214,10,.3);color:var(--yellow)}
 
   /* ── Footer ── */
-  footer{
-    margin-top:40px;text-align:center;
-    color:var(--text-tertiary);font-size:12px;
+  .site-footer{
+    margin-top:48px;padding-top:20px;border-top:0.5px solid var(--hairline);
+    display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+    color:var(--text-tertiary);font-size:13px;
   }
+  .footer-links{display:flex;gap:18px;flex-wrap:wrap}
+  .footer-links a{color:var(--text-secondary);text-decoration:none;transition:color .15s}
+  .footer-links a:hover{color:var(--text)}
+  @media(max-width:640px){.site-footer{flex-direction:column;align-items:flex-start}}
 
   /* ── Toast ── */
   #toast{
@@ -1603,11 +1608,14 @@
 
 </div>
 
-<footer>
-  <span class="author" style="font-size:14px">by Davron</span> · 
-  <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:#29b6f6;text-decoration:none;font-weight:500">Telegram @davronsv ✈️</a> · 
-  <a href="https://www.donationalerts.com/r/davronsvv" target="_blank" rel="noopener" style="color:var(--pink);text-decoration:none">Поддержать проект ❤️</a> · 
-  обновляется каждые 1.5 сек
+<footer class="site-footer">
+  <div class="footer-brand">Yandex.Disk Backup <span id="footer-version"></span> · автор Davron</div>
+  <nav class="footer-links">
+    <a href="https://t.me/davronsv" target="_blank" rel="noopener">Telegram-канал</a>
+    <a href="https://github.com/PXSYS13/yadisk_backup" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/PXSYS13/yadisk_backup/blob/main/INSTRUCTION_GET_TOKEN.md" target="_blank" rel="noopener">Инструкция</a>
+    <a href="https://www.donationalerts.com/r/davronsvv" target="_blank" rel="noopener">Поддержать проект</a>
+  </nav>
 </footer>
 
 </div>
@@ -2286,10 +2294,18 @@ async function bigStart(){
   };
   if(!opts.do_disk && !opts.do_unlim){ toast('Выбери хотя бы одно: диск или безлимит','err'); return }
   try {
-    const {err} = await postJSON('/api/start', opts);
-    if(err){ toast(err,'err') } else { toast('Запущено','ok') }
+    const {d, err} = await postJSON('/api/start', opts);
+    if(err){ toast(err,'err') }
+    else { toast(startNoteText(d) || 'Скачивание запущено','ok') }
   } catch(e){ toast('Сеть: '+e.message,'err') }
   refresh();
+}
+
+// Сервер пропустил часть источников (нет токена или cookies) — скажем об этом сразу
+function startNoteText(d){
+  const notes = (d && d.notes) || [];
+  if(!notes.length) return null;
+  return 'Запущено. ' + notes[0].replace(/^⚠️\s*/, '').split('. Добавить')[0] + '.';
 }
 async function bigStop(){
   if(!confirm('Остановить выполнение?')) return;
@@ -3142,10 +3158,10 @@ async function startPlan(btn){
   };
   if(btn) btn.disabled = true;
   try {
-    const {err} = await postJSON('/api/plan/start', body);
+    const {d, err} = await postJSON('/api/plan/start', body);
     if(err){ toast(err,'err'); if(btn) btn.disabled = false; return }
     requestNotificationPermission();
-    toast('Скачивание запущено','ok');
+    toast(startNoteText(d) || 'Скачивание запущено','ok');
     closeWizard();
     switchTab('home');
     refresh();
@@ -3485,6 +3501,8 @@ async function _refreshInner(){
     // Версия в шапке
     const ver = document.getElementById('app-version');
     if(ver && s.app_version) ver.textContent = 'v' + s.app_version;
+    const fver = document.getElementById('footer-version');
+    if(fver && s.app_version) fver.textContent = 'v' + s.app_version;
 
     // Сохранённый токен — карточка с данными аккаунта от API Яндекса
     const savedTokenCard = document.getElementById('saved-token-card');
@@ -3663,8 +3681,10 @@ async function _refreshInner(){
         if(!_celebratedKeys.has(key)){
           _celebratedKeys.add(key);
           showCelebrationModal({
-            title: 'Полный бэкап успешно завершён!',
-            subtitle: 'Все выбранные файлы с диска и безлимита сохранены на ваш компьютер.',
+            title: pl.partial ? 'Скачивание завершено' : 'Полный бэкап успешно завершён!',
+            subtitle: pl.partial
+              ? 'Часть источников пропущена: не было токена или cookies. Добавьте их на Главной и запустите снова — скачанное повторно не качается.'
+              : 'Все выбранные файлы с диска и безлимита сохранены на ваш компьютер.',
             files: totalFiles,
             size: totalBytes,
             time: dur(pl.elapsed),

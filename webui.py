@@ -417,6 +417,43 @@ def _launch_unlim_workers(
     return {"ok": True, "started": started, "failed": failed}
 
 
+def plan_sources(do_disk: bool, do_unlim: bool, token_ok: bool, cookies_ok: bool) -> dict:
+    """Что реально можно скачать при текущих токене и cookies.
+
+    Нет токена — обычный диск пропускаем, если есть что качать в безлимите; нет
+    cookies — наоборот. Ошибка только когда скачать нечего совсем: тогда пользователь
+    получает подсказку, что настроить, а не падение на первом шаге.
+    """
+    run_disk = do_disk and token_ok
+    run_unlim = do_unlim and cookies_ok
+    notes: list[str] = []
+    if do_disk and not token_ok and run_unlim:
+        notes.append("⚠️ Токен не задан или не работает: обычный диск пропускаю, качаю только безлимит. "
+                     "Добавить токен: на Главной кнопка «Получить и ввести токен».")
+    if do_unlim and not cookies_ok and run_disk:
+        notes.append("⚠️ Cookies не загружены: безлимит пропускаю, качаю только обычный диск. "
+                     "Добавить cookies: на Главной кнопка «Добавить cookies».")
+    error = None
+    if not run_disk and not run_unlim:
+        if do_disk and do_unlim:
+            error = ("Нечего скачивать: нет ни токена, ни cookies. "
+                     "Настройте хотя бы одно на Главной в блоке «Путь к бэкапу».")
+        elif do_disk:
+            error = "Для обычного диска нужен токен: на Главной кнопка «Получить и ввести токен»."
+        elif do_unlim:
+            error = "Для безлимита нужны cookies: на Главной кнопка «Добавить cookies»."
+        else:
+            error = "Выберите хотя бы одно: обычный диск или безлимит."
+    return {"run_disk": run_disk, "run_unlim": run_unlim, "notes": notes, "error": error}
+
+
+def preflight_sources(do_disk: bool, do_unlim: bool) -> dict:
+    """plan_sources по текущим настройкам — до запуска, чтобы ответить пользователю сразу."""
+    token_ok = bool(check_token(get_config()["token"]).get("ok")) if do_disk else False
+    cookies_ok = bool(check_cookies().get("ok")) if do_unlim else False
+    return plan_sources(do_disk, do_unlim, token_ok, cookies_ok)
+
+
 def _release_orphaned_unlim() -> int:
     """Живых воркеров нет — значит, все in_progress осиротели: воркер с другим id
     (например, после запуска с 4 воркерами, а потом с 2) их сам не сбросит никогда.
@@ -472,6 +509,8 @@ class Pipeline:
         # None — качать всё; список категорий — отфильтровать после scan/collect
         self.disk_categories: list[str] | None = None
         self.unlim_categories: list[str] | None = None
+        # Часть запрошенных источников пропущена (нет токена или cookies)
+        self.partial: bool = False
 
     def _own_start(self, slot: str, script: str, args: list[str]) -> tuple[bool, str]:
         """Запускает задачу через tm и помечает её как принадлежащую pipeline'у."""
@@ -508,6 +547,7 @@ class Pipeline:
             self.skip_unlim = not do_unlim
             self.disk_categories = list(disk_categories) if disk_categories is not None else None
             self.unlim_categories = list(unlim_categories) if unlim_categories is not None else None
+            self.partial = False
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
             return True, "Pipeline запущен"
@@ -604,17 +644,32 @@ class Pipeline:
         try:
             cfg = get_config()
 
-            # === ДИСК ===
+            # === Что реально можно скачать: без токена — только безлимит, без cookies — только диск ===
+            self.step = "проверка доступа"
+            tok: dict = {"ok": False}
             if not self.skip_disk:
-                self.step = "проверка токена"
                 self._log("🔑 Проверяю токен...")
                 tok = check_token(cfg["token"])
-                if not tok.get("ok"):
-                    self._log(f"❌ Токен невалиден: {tok.get('msg')}")
-                    self.state = "failed"
-                    return
-                self._log(f"✓ Токен OK: {tok.get('login')}, {tok.get('used', 0) / 1e9:.1f} ГБ занято")
+                if tok.get("ok"):
+                    self._log(f"✓ Токен OK: {tok.get('login')}, {tok.get('used', 0) / 1e9:.1f} ГБ занято")
+                else:
+                    self._log(f"✗ Токен: {tok.get('msg')}")
+            cookies: dict = {"ok": False}
+            if not self.skip_unlim:
+                cookies = check_cookies()
+                self._log(f"{'✓' if cookies.get('ok') else '✗'} Cookies: {cookies.get('msg')}")
+            src = plan_sources(not self.skip_disk, not self.skip_unlim,
+                               bool(tok.get("ok")), bool(cookies.get("ok")))
+            for note in src["notes"]:
+                self._log(note)
+            if src["error"]:
+                self._log(f"❌ {src['error']}")
+                self.state = "failed"
+                return
+            self.partial = bool(src["notes"])
 
+            # === ДИСК ===
+            if src["run_disk"]:
                 if self._stop:
                     self._abort()
                     return
@@ -635,52 +690,48 @@ class Pipeline:
                     tolerate_partial=True,
                 ):
                     return
-            else:
+            elif self.skip_disk:
                 self._log("⏭ Шаг 'диск' пропущен")
 
             # === БЕЗЛИМИТ ===
-            if not self.skip_unlim:
-                cookies = check_cookies()
-                if not cookies.get("ok"):
-                    self._log(f"⚠️ Cookies не загружены, пропускаю безлимит: {cookies.get('msg')}")
-                else:
-                    if self._stop:
-                        self._abort()
-                        return
-                    self.step = "собираю список безлимита"
-                    if not self._run_step(SLOT_UNLIM_COLLECT, "unlim_download.py", ["--collect"],
-                                          "🗂 Запускаю unlim collect...", "✓ список безлимита собран",
-                                          "сбор списка безлимита"):
-                        return
-                    if self.unlim_categories is not None:
-                        self._apply_categories(UNLIM_DB_FILE, "unlim_files", "file_id",
-                                               self.unlim_categories, "Безлимит")
+            if src["run_unlim"]:
+                if self._stop:
+                    self._abort()
+                    return
+                self.step = "собираю список безлимита"
+                if not self._run_step(SLOT_UNLIM_COLLECT, "unlim_download.py", ["--collect"],
+                                      "🗂 Запускаю unlim collect...", "✓ список безлимита собран",
+                                      "сбор списка безлимита"):
+                    return
+                if self.unlim_categories is not None:
+                    self._apply_categories(UNLIM_DB_FILE, "unlim_files", "file_id",
+                                           self.unlim_categories, "Безлимит")
 
-                    # workers
-                    self.step = f"скачиваю безлимит ({self.workers} воркеров, batch={self.batch})"
-                    self._log(f"🚀 Запускаю {self.workers} воркеров (пачка={self.batch})...")
-                    res = _launch_unlim_workers(self.workers, self.batch, starter=self._own_start)
-                    for i in res["started"]:
-                        self._log(f"  ✓ воркер {i} запущен")
-                    for f in res["failed"]:
-                        self._log(f"  ✗ воркер {f['id']}: {f['msg']}")
+                # workers
+                self.step = f"скачиваю безлимит ({self.workers} воркеров, batch={self.batch})"
+                self._log(f"🚀 Запускаю {self.workers} воркеров (пачка={self.batch})...")
+                res = _launch_unlim_workers(self.workers, self.batch, starter=self._own_start)
+                for i in res["started"]:
+                    self._log(f"  ✓ воркер {i} запущен")
+                for f in res["failed"]:
+                    self._log(f"  ✗ воркер {f['id']}: {f['msg']}")
 
-                    # Ждём пока все воркеры закончат
-                    while not self._stop and tm.any_alive(UNLIM_WORKER_SLOT_PREFIX):
-                        time.sleep(1.0)
-                    if self._stop:
-                        self._abort()
-                        return
-                    outcome = self._workers_outcome(res["started"])
-                    if outcome == "stopped":
-                        self._log("⏹ воркеры безлимита остановлены пользователем")
-                        self._abort()
-                        return
-                    if outcome == "failed":
-                        self.state = "failed"
-                        return
-                    self._log("✓ все воркеры безлимита завершили работу")
-            else:
+                # Ждём пока все воркеры закончат
+                while not self._stop and tm.any_alive(UNLIM_WORKER_SLOT_PREFIX):
+                    time.sleep(1.0)
+                if self._stop:
+                    self._abort()
+                    return
+                outcome = self._workers_outcome(res["started"])
+                if outcome == "stopped":
+                    self._log("⏹ воркеры безлимита остановлены пользователем")
+                    self._abort()
+                    return
+                if outcome == "failed":
+                    self.state = "failed"
+                    return
+                self._log("✓ все воркеры безлимита завершили работу")
+            elif self.skip_unlim:
                 self._log("⏭ Шаг 'безлимит' пропущен")
 
             if self._stop:
@@ -689,7 +740,7 @@ class Pipeline:
 
             self.state = "done"
             self.step = "финиш"
-            self._log("🏆 ВСЁ ГОТОВО!")
+            self._log("🏁 Готово, но часть источников пропущена (см. выше)" if self.partial else "🏆 ВСЁ ГОТОВО!")
         except Exception as e:
             diag = classify_yandex_error(e)
             if diag["is_yandex_server"]:
@@ -720,6 +771,7 @@ class Pipeline:
             "step": self.step,
             "started_at": self.started_at,
             "elapsed": elapsed,
+            "partial": self.partial,
             "log": list(self.log),
         }
 
@@ -1263,13 +1315,16 @@ class StartPayload(BaseModel):
 
 @app.post("/api/start")
 def api_start(payload: StartPayload):
+    src = preflight_sources(payload.do_disk, payload.do_unlim)
+    if src["error"]:
+        return {"ok": False, "msg": src["error"]}
     ok, msg = pipeline.start(workers=payload.workers,
                              do_disk=payload.do_disk,
                              do_unlim=payload.do_unlim,
                              batch=payload.batch,
                              disk_categories=payload.disk_categories,
                              unlim_categories=payload.unlim_categories)
-    return {"ok": ok, "msg": msg}
+    return {"ok": ok, "msg": msg, "notes": src["notes"] if ok else []}
 
 
 # ── Мастер «План восстановления» ────────────────────────────────────────────
@@ -1329,13 +1384,16 @@ def api_plan_start(payload: PlanStartPayload):
         return {"ok": False, "msg": "Выберите хотя бы одно: диск или безлимит"}
     if tm.any_alive(""):
         return {"ok": False, "msg": "Сначала остановите текущие задачи"}
+    src = preflight_sources(payload.do_disk, payload.do_unlim)
+    if src["error"]:
+        return {"ok": False, "msg": src["error"]}
     ok, msg = pipeline.start(
         workers=payload.workers, batch=payload.batch,
         do_disk=payload.do_disk, do_unlim=payload.do_unlim,
         disk_categories=payload.disk_categories if payload.do_disk else None,
         unlim_categories=payload.unlim_categories if payload.do_unlim else None,
     )
-    return {"ok": ok, "msg": msg}
+    return {"ok": ok, "msg": msg, "notes": src["notes"] if ok else []}
 
 
 @app.post("/api/start/stop")

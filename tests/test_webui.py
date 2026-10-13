@@ -722,6 +722,7 @@ def test_pipeline_fails_when_workers_exit_with_auth_error(monkeypatch):
 
 
 def test_pipeline_unlim_only_skips_token_check(monkeypatch):
+    """Только безлимит и нет cookies: токен не проверяем, и честно падаем — скачивать нечего."""
     calls = []
     monkeypatch.setattr(webui, "check_token", lambda tok: calls.append(tok) or {"ok": False, "msg": "no"})
     monkeypatch.setattr(webui, "check_cookies", lambda: {"ok": False, "msg": "нет кук"})
@@ -729,7 +730,54 @@ def test_pipeline_unlim_only_skips_token_check(monkeypatch):
     pipe.skip_disk = True
     pipe._run()
     assert calls == []
+    assert pipe.state == "failed"
+    assert any("нужны cookies" in line for line in pipe.log)
+
+
+def test_plan_sources_matrix():
+    ps = webui.plan_sources
+    full = ps(True, True, True, True)
+    assert (full["run_disk"], full["run_unlim"], full["notes"], full["error"]) == (True, True, [], None)
+
+    no_token = ps(True, True, False, True)
+    assert (no_token["run_disk"], no_token["run_unlim"]) == (False, True)
+    assert "пропускаю" in no_token["notes"][0] and no_token["error"] is None
+
+    no_cookies = ps(True, True, True, False)
+    assert (no_cookies["run_disk"], no_cookies["run_unlim"]) == (True, False)
+    assert "безлимит пропускаю" in no_cookies["notes"][0]
+
+    nothing = ps(True, True, False, False)
+    assert nothing["error"] and "ни токена, ни cookies" in nothing["error"]
+    assert "токен" in ps(True, False, False, True)["error"]
+    assert "cookies" in ps(False, True, True, False)["error"]
+    assert ps(False, False, True, True)["error"]
+
+
+def test_pipeline_without_token_downloads_unlim_only(monkeypatch):
+    """Ровно то, что было в логе: «Скачать всё» без токена, но с cookies — раньше падало целиком."""
+    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    monkeypatch.setattr(webui, "check_cookies", lambda: {"ok": True, "msg": "Куки OK (23 шт)", "count": 23})
+    started = []
+    monkeypatch.setattr(webui.tm, "start", lambda slot, script, args: (started.append(slot), (True, "ok"))[1])
+    pipe = webui.Pipeline()
+    monkeypatch.setattr(pipe, "_wait_task", lambda slot, on_finish_msg="": 0)
+    pipe._run()
     assert pipe.state == "done"
+    assert pipe.partial is True
+    assert "disk" not in started and "unlim_collect" in started
+    assert any("обычный диск пропускаю" in line for line in pipe.log)
+    assert pipe.status()["partial"] is True
+
+
+def test_api_start_refuses_when_nothing_configured(monkeypatch):
+    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    resp = client.post("/api/start", json={"do_disk": True, "do_unlim": True})
+    body = resp.json()
+    assert body["ok"] is False
+    assert "ни токена, ни cookies" in body["msg"]
+    assert webui.pipeline.is_running() is False
 
 
 def test_pipeline_applies_categories_after_scan(tmp_path, monkeypatch):
