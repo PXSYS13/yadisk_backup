@@ -145,6 +145,21 @@ def make_cid(uid: str) -> str:
     return f"{uid}{int(time.time() * 1000)}{random.randint(100, 999)}"
 
 
+def response_trace(r) -> str:
+    """Идентификаторы ответа Яндекса для логов — по ним поддержка Яндекса находит запрос."""
+    headers = getattr(r, "headers", None) or {}
+    parts = []
+    for h in ("x-request-id", "x-yandex-req-id", "yandexuid-req-id"):
+        v = headers.get(h) if hasattr(headers, "get") else None
+        if v:
+            parts.append(f"{h}={v}")
+            break
+    ctype = headers.get("content-type") if hasattr(headers, "get") else None
+    if ctype:
+        parts.append(f"type={str(ctype).split(';')[0]}")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
 def api_call(s: requests.Session, sk: str, uid: str, method: str,
              params=None, retries: int = 3):
     """Вызов web-API Яндекс.Диска с retry и обработкой rate limit."""
@@ -154,8 +169,11 @@ def api_call(s: requests.Session, sk: str, uid: str, method: str,
             body = {"sk": sk, "connection_id": make_cid(uid), "apiMethod": method}
             if params is not None:
                 body["requestParams"] = params
+            t0 = time.monotonic()
             r = s.post(f"{BASE}/models-v2", params={"m": method},
                        json=body, timeout=120)
+            log.info("%s: HTTP %s за %d мс%s", method, r.status_code,
+                     int((time.monotonic() - t0) * 1000), response_trace(r))
             if r.status_code == 200:
                 try:
                     data = r.json()

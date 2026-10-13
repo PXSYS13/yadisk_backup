@@ -81,6 +81,53 @@ def test_local_disk_errors_are_not_retried():
     assert _is_retryable(OSError("generic io without errno")) is True
 
 
+def test_account_info_maps_api_fields():
+    from datetime import datetime
+
+    from downloader import account_info, describe_account
+
+    class User:
+        login = "ivan"
+        display_name = "Иван"
+        uid = 42
+        country = "ru"
+        reg_time = datetime(2015, 3, 4)
+
+    class Info:
+        used_space = 50 * 1024 ** 3
+        total_space = 100 * 1024 ** 3
+        trash_size = 1024 ** 3
+        photounlim_size = 230 * 1024 ** 3
+        is_paid = True
+        unlimited_autoupload_enabled = True
+        max_file_size = 10 * 1024 ** 3
+        free_photounlim_end_date = None
+        user = User()
+
+    class Client:
+        def get_disk_info(self):
+            return Info()
+
+    acc = account_info(Client())
+    assert acc["login"] == "ivan" and acc["display_name"] == "Иван" and acc["uid"] == "42"
+    assert acc["free"] == 50 * 1024 ** 3
+    assert acc["photo_unlim"] == 230 * 1024 ** 3
+    assert acc["reg_time"].startswith("2015-03-04")
+    line = describe_account(acc)
+    assert "ivan (Иван)" in line and "платный" in line and "230.00 GB" in line
+
+
+def test_api_error_details_from_yadisk_exception():
+    from downloader import api_error_details
+
+    class Resp:
+        status = 503
+
+    e = yadisk.exceptions.UnavailableError("DiskUnavailable", "boom", Resp())
+    assert api_error_details(e) == " [error_type=DiskUnavailable, http=503]"
+    assert api_error_details(ValueError("x")) == ""
+
+
 def test_makedirs_failure_becomes_failed_result_not_exception(tmp_path, monkeypatch):
     """Раньше исключение из makedirs в потоке роняло весь download_all."""
     import errno

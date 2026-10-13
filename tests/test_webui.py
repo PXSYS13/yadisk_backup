@@ -1,5 +1,6 @@
 """Тесты серверной логики дашборда (без запуска uvicorn)."""
 
+import json
 import sqlite3
 
 import pytest
@@ -791,6 +792,93 @@ def test_unlim_preview_categorizes_by_name(tmp_path, monkeypatch):
     assert out["categories"]["videos"]["count"] == 1
     skipped, kept = webui.filter_to_categories(db, "unlim_files", "file_id", ["photos"])
     assert (skipped, kept) == (1, 1)
+
+
+def test_onboarding_state_next_step():
+    cfg_unset = {"download_dir_set": False}
+    empty = {"total": 0, "downloaded": 0}
+    st = webui.onboarding_state(cfg_unset, {"ok": False}, {"ok": False}, empty, empty)
+    assert st["next"] == "token" and st["token"] is False
+    st = webui.onboarding_state(cfg_unset, {"ok": True}, {"ok": False}, empty, empty)
+    assert st["next"] == "dir"
+    st = webui.onboarding_state({"download_dir_set": True}, {"ok": True}, {"ok": False}, empty, empty)
+    assert st["next"] == "cookies"
+    st = webui.onboarding_state({"download_dir_set": True}, {"ok": True}, {"ok": True},
+                                {"total": 10, "downloaded": 0}, empty)
+    assert st["next"] == "download" and st["scanned"] is True
+    st = webui.onboarding_state({"download_dir_set": True}, {"ok": True}, {"ok": True},
+                                {"total": 10, "downloaded": 10}, empty)
+    assert st["next"] == "done"
+
+
+def test_status_exposes_onboarding_and_version(monkeypatch):
+    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    st = webui.api_status()
+    assert st["app_version"] == webui.APP_VERSION
+    assert st["onboarding"]["next"] == "token"
+    assert st["config"]["download_dir_set"] is False
+
+
+def test_task_writes_log_file(tmp_path):
+    class Proc:
+        stdout = ["первая строка\n", "12:00:00  вторая\n"]
+        pid = 1
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    log_file = tmp_path / "logs" / "tasks" / "disk.log"
+    t = webui.Task("disk", Proc(), log_file=log_file, cmd=["main.py", "scan"])
+    t.thread.join(timeout=2)
+    text = log_file.read_text(encoding="utf-8")
+    assert "старт: main.py scan" in text
+    assert "первая строка" in text and "вторая" in text
+    assert "конец: exit=0" in text
+    assert t.snapshot()["log_file"] == "disk.log"
+
+
+def test_logs_api_lists_tails_and_rejects_traversal(tmp_path, monkeypatch):
+    logs = tmp_path / "logs"
+    (logs / "tasks").mkdir(parents=True)
+    (logs / "webui.log").write_text("a\nb\nc\n", encoding="utf-8")
+    (logs / "tasks" / "disk.log").write_text("\n".join(f"line{i}" for i in range(500)) + "\n", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("nope", encoding="utf-8")
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+
+    names = {entry["name"] for entry in client.get("/api/logs").json()["logs"]}
+    assert names == {"webui.log", "tasks/disk.log"}
+
+    tail = client.get("/api/logs/tail", params={"name": "tasks/disk.log", "lines": 3}).json()
+    assert tail["lines"] == ["line497", "line498", "line499"]
+    assert client.get("/api/logs/tail", params={"name": "webui.log"}).json()["lines"] == ["a", "b", "c"]
+
+    assert client.get("/api/logs/tail", params={"name": "../secret.txt"}).status_code == 400
+    assert client.get("/api/logs/tail", params={"name": "tasks/../../secret.txt"}).status_code == 400
+    assert client.get("/api/logs/tail", params={"name": "missing.log"}).status_code == 404
+
+
+def test_logs_bundle_contains_logs_and_support_info(tmp_path, monkeypatch):
+    import io
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "unlim_worker.log").write_text("w1 b1 download: not_zip\n", encoding="utf-8")
+    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    resp = client.get("/api/logs/bundle")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/zip")
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        names = set(zf.namelist())
+        assert "unlim_worker.log" in names and "support-info.json" in names
+        info = json.loads(zf.read("support-info.json"))
+    assert info["app_version"] == webui.APP_VERSION
+    assert "token" not in info["config"]          # сырой токен не уходит
+    assert info["config"]["token_ok"] is False
 
 
 def test_unlim_retry_without_db_does_not_create_it(tmp_path, monkeypatch):

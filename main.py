@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import platform
 import sys
 import time
 from contextlib import closing
@@ -33,6 +34,7 @@ from downloader import (
 )
 from state import State
 from utils import (
+    APP_VERSION,
     MAX_DISK_WORKERS,
     TELEGRAM_CHANNEL,
     YOUTUBE_VIDEO_URL,
@@ -51,6 +53,8 @@ LOG_FILE = LOG_DIR / "backup.log"
 DB_FILE = PROJECT_DIR / "state.db"
 
 EMPTY_COUNTERS = {"downloaded": 0, "skipped": 0, "failed": 0, "bytes": 0}
+
+log = logging.getLogger("yadisk_backup")
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -221,11 +225,24 @@ def cmd_scan(cfg: dict, args: argparse.Namespace) -> int:
             finally:
                 progress.close()
             print(f"  → {root}: {files} файлов, {human_bytes(bytes_)}")
+            log.info("scan %s: %d файлов, %s", root, files, human_bytes(bytes_))
             total_files += files
             total_bytes += bytes_
 
     print(f"\nИтого: {total_files} файлов, {human_bytes(total_bytes)}")
+    log.info("scan итого: %d файлов, %s; в БД %s", total_files, human_bytes(total_bytes), _stats_line())
     return 0
+
+
+def _stats_line() -> str:
+    """Короткая сводка по БД для логов."""
+    try:
+        with State(str(DB_FILE)) as state:
+            s = state.get_stats()
+        return (f"pending={s['pending']} downloaded={s['downloaded']} skipped={s['skipped']} "
+                f"failed={s['failed']} всего={human_bytes(s['bytes_total'])}")
+    except Exception as e:  # noqa: BLE001 — сводка для лога не должна ронять команду
+        return f"нет данных ({e})"
 
 
 def cmd_scan_media(cfg: dict, args: argparse.Namespace) -> int:
@@ -423,8 +440,15 @@ def main(argv: list[str] | None = None) -> int:
     require_token = args.cmd not in ("stats", "verify")
     cfg = load_config(require_token=require_token)
     setup_logging(cfg["log_level"])
+    log.info(
+        "yadisk_backup %s | python %s | %s | команда: %s | БД: %s | папка: %s | workers=%s",
+        APP_VERSION, platform.python_version(), platform.platform(), args.cmd,
+        DB_FILE, cfg["download_dir"], cfg["max_workers"],
+    )
 
-    return args.func(cfg, args)
+    code = args.func(cfg, args)
+    log.info("команда %s завершена с кодом %s", args.cmd, code)
+    return code
 
 
 if __name__ == "__main__":

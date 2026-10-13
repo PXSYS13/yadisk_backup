@@ -46,9 +46,11 @@ from unlim_common import (
     make_cid,
     make_session as common_make_session,
     reset_failed_files,
+    response_trace,
     unlim_tx,
 )
 from utils import (
+    APP_VERSION,
     DEFAULT_UNLIM_BATCH,
     TELEGRAM_CHANNEL,
     ensure_utf8_stdio,
@@ -273,6 +275,19 @@ def reset_failed() -> int:
     return reset_failed_files(DB_FILE)
 
 
+def queue_summary() -> str:
+    """Состояние очереди одной строкой — для старта воркера и логов."""
+    try:
+        with _tx() as c:
+            rows = c.execute(
+                "SELECT status, COUNT(*) AS n, COALESCE(SUM(size), 0) AS b FROM unlim_files GROUP BY status"
+            ).fetchall()
+    except Exception as e:  # noqa: BLE001 — сводка не должна мешать работе
+        return f"очередь: нет данных ({e})"
+    parts = [f"{r['status']}={r['n']} ({human_bytes(r['b'])})" for r in rows]
+    return "очередь: " + (", ".join(parts) if parts else "пусто")
+
+
 # ── HTTP: подготовка ZIP ────────────────────────────────────────────────────
 
 
@@ -328,14 +343,15 @@ def _prepare_http_error(r) -> PrepareError:
         )
         log.error(str(err))
         return err
+    trace = response_trace(r)
     if code == 429:
-        err = PrepareError("rate_limit", f"HTTP 429 Too Many Requests (Rate limit Яндекса). Новости: {TELEGRAM_CHANNEL}", code)
+        err = PrepareError("rate_limit", f"HTTP 429 Too Many Requests (Rate limit Яндекса). Новости: {TELEGRAM_CHANNEL}{trace}", code)
     elif code == 504:
-        err = PrepareError("server_50x", "HTTP 504 Gateway Timeout (Сервер Яндекса не успел упаковать ZIP по тайм-ауту)", code)
+        err = PrepareError("server_50x", f"HTTP 504 Gateway Timeout (Сервер Яндекса не успел упаковать ZIP по тайм-ауту){trace}", code)
     elif code in (500, 502, 503):
-        err = PrepareError("server_50x", f"HTTP {code} (Сбой узлов архивации Яндекса / перегрузка): {r.text[:200]}", code)
+        err = PrepareError("server_50x", f"HTTP {code} (Сбой узлов архивации Яндекса / перегрузка): {r.text[:200]}{trace}", code)
     else:
-        err = PrepareError("prepare_failed", f"HTTP {code}: {r.text[:120]}", code)
+        err = PrepareError("prepare_failed", f"HTTP {code}: {r.text[:200]}{trace}", code)
     log.warning(f"prepare {err}")
     return err
 
@@ -370,20 +386,22 @@ def prepare_zip(s, sk, uid, paths: list[str]) -> tuple[str | None, PrepareError 
         data = r.json()
     except Exception:
         data = None
+    trace = response_trace(r)
     if data is None:
-        err = PrepareError("invalid_json", f"Ответ Яндекса не JSON ({r.text[:100]})")
+        err = PrepareError("invalid_json", f"Ответ Яндекса не JSON ({r.text[:200]}){trace}")
     elif not isinstance(data, dict):
-        err = PrepareError("prepare_failed", f"Неожиданный формат ответа Яндекса: {type(data).__name__}")
+        err = PrepareError("prepare_failed", f"Неожиданный формат ответа Яндекса: {type(data).__name__}{trace}")
     elif "error" in data:
         e = data.get("error")
         e_str = (e.get("title") or e.get("id") or str(e)) if isinstance(e, dict) else str(e)
-        err = PrepareError("prepare_failed", f"Ошибка сервиса Яндекса: {e_str}")
+        err = PrepareError("prepare_failed", f"Ошибка сервиса Яндекса: {e_str} | ответ: {str(e)[:200]}{trace}")
     elif not data.get("download_url"):
-        err = PrepareError("prepare_failed", "В ответе Яндекса отсутствует download_url")
+        err = PrepareError("prepare_failed", f"В ответе Яндекса отсутствует download_url | ответ: {str(data)[:200]}{trace}")
     else:
         url = data["download_url"]
         if url.startswith("//"):
             url = "https:" + url
+        log.info("prepare OK → %s%s", url.split("?")[0][:120], trace)
         return url, None
     log.warning(str(err))
     return None, err
@@ -488,19 +506,24 @@ def _download_zip(
 ) -> FetchFailure | None:
     """Стримит ZIP во временный .part и атомарно переименовывает. None — успех."""
     tmp = zip_path + ".part"
+    t0 = time.monotonic()
     try:
         with s.get(url, stream=True, timeout=(30, 300)) as r:
             r.raise_for_status()
             headers = getattr(r, "headers", {}) or {}
+            trace = response_trace(r)
             ctype = (headers.get("Content-Type") or "").lower()
             if any(t in ctype for t in _NOT_ZIP_CONTENT_TYPES):
                 # Яндекс отдал страницу/JSON вместо архива: так выглядит «функция отключена»
                 snippet = next(iter(r.iter_content(512)), b"")[:200]
                 return FetchFailure(
                     "not_zip",
-                    f"вместо ZIP пришёл {ctype.split(';')[0]}: {snippet.decode('utf-8', 'replace')!r}",
+                    f"вместо ZIP пришёл {ctype.split(';')[0]}: {snippet.decode('utf-8', 'replace')!r}{trace}",
                 )
             content_len = int(headers.get("Content-Length", 0) or 0)
+            log.info("w%d b%d: архив %s%s, качаю%s", worker_id, batch_idx,
+                     ctype.split(";")[0] or "без типа",
+                     f" {human_bytes(content_len)}" if content_len else "", trace)
             written = 0
             last_log = time.monotonic()
             with open(tmp, "wb") as f:
@@ -522,15 +545,20 @@ def _download_zip(
                 head = f.read(200)
             remove_quiet(zip_path)
             return FetchFailure("not_zip", f"скачанный файл не ZIP (первые байты: {head!r})")
+        dur = max(0.001, time.monotonic() - t0)
+        log.info("w%d b%d: архив скачан %s за %.1f с (%s/с)", worker_id, batch_idx,
+                 human_bytes(written), dur, human_bytes(written / dur))
         return None
     except requests.exceptions.HTTPError as e:
-        code = getattr(getattr(e, "response", None), "status_code", None)
+        resp = getattr(e, "response", None)
+        code = getattr(resp, "status_code", None)
+        trace = response_trace(resp) if resp is not None else ""
         if code == 429:
-            failure = FetchFailure("rate_limit", f"HTTP 429 при скачивании архива: {e}")
+            failure = FetchFailure("rate_limit", f"HTTP 429 при скачивании архива: {e}{trace}")
         elif code is not None and code >= 500:
-            failure = FetchFailure("server_50x", f"HTTP {code} при скачивании архива: {e}")
+            failure = FetchFailure("server_50x", f"HTTP {code} при скачивании архива: {e}{trace}")
         else:
-            failure = FetchFailure("refused", f"HTTP {code} при скачивании архива: {e}")
+            failure = FetchFailure("refused", f"HTTP {code} при скачивании архива: {e}{trace}")
     except requests.exceptions.Timeout as e:
         failure = FetchFailure("timeout", f"таймаут при скачивании архива: {e}")
     except requests.exceptions.ConnectionError as e:
@@ -549,20 +577,23 @@ def _extract_zip(zip_path: str, worker_id: int, batch_idx: int) -> FetchResult:
     """Распаковывает архив в EXTRACT_DIR."""
     extracted: list[ExtractedItem] = []
     total_bytes = 0
+    reused = 0
+    errors = 0
     try:
         with zipfile.ZipFile(zip_path) as zf:
-            for m in zf.infolist():
-                if m.is_dir():
-                    continue
+            members = [m for m in zf.infolist() if not m.is_dir()]
+            for m in members:
                 dst = safe_extract_dst(EXTRACT_DIR, m.filename)
                 if dst is None:
                     log.warning(f"w{worker_id} пропускаю опасное имя в архиве: {m.filename!r}")
+                    errors += 1
                     continue
                 try:
                     if os.path.exists(dst):
                         if os.path.getsize(dst) == m.file_size:
                             extracted.append(ExtractedItem(os.path.basename(m.filename), m.file_size, dst))
                             total_bytes += m.file_size
+                            reused += 1
                             continue
                         # Другой файл с тем же именем — сохраняем с уникальным суффиксом, не перезаписывая
                         dst = _non_colliding_path(dst)
@@ -577,12 +608,17 @@ def _extract_zip(zip_path: str, worker_id: int, batch_idx: int) -> FetchResult:
                         log.error(f"w{worker_id} b{batch_idx} extract {m.filename}: {e}")
                         return FetchResult(extracted, total_bytes,
                                            FetchFailure("local_disk", f"ошибка записи при распаковке: {e}"))
+                    errors += 1
                     log.warning(f"w{worker_id} extract {m.filename}: {e}")
                 except Exception as e:
+                    errors += 1
                     log.warning(f"w{worker_id} extract {m.filename}: {e}")
     except zipfile.BadZipFile as e:
         log.error(f"w{worker_id} b{batch_idx} bad zip: {e}")
         return FetchResult([], 0, FetchFailure("bad_zip", f"архив повреждён: {e}"))
+    log.info("w%d b%d: в архиве %d файлов, распаковано %d (%s), уже были %d, ошибок %d",
+             worker_id, batch_idx, len(members), len(extracted) - reused,
+             human_bytes(total_bytes), reused, errors)
     return FetchResult(extracted, total_bytes, None)
 
 
@@ -780,10 +816,17 @@ class Worker:
             return
         self._disk_full_streak = 0
 
+        total = sum(_batch_size(it) for it in batch)
+        max_att = max((int(it.get("attempts") or 0) for it in batch), default=0)
+        log.info("w%d b%d: пачка %d файлов, %s, попыток у худшего %d", self.id, self.batch_idx,
+                 len(batch), human_bytes(total), max_att)
+
+        t_prep = time.monotonic()
         url, err = prepare_zip(self.session, self.sk, self.uid, ids)
         if err is not None:
             self._on_prepare_failed(batch, err)
             return
+        log.info("w%d b%d: Яндекс собрал архив за %.1f с", self.id, self.batch_idx, time.monotonic() - t_prep)
 
         start = time.monotonic()
         result = download_and_extract(self.session, url, self.id, self.batch_idx, on_progress=self._heartbeat)
@@ -975,10 +1018,12 @@ def main() -> int:
     _setup_logging()
     worker = Worker(args.id, args.batch)
     print("=" * 65)
-    print(f"  Yandex.Disk Unlim Worker #{worker.id} — by Davron (PXSYS)")
+    print(f"  Yandex.Disk Unlim Worker #{worker.id} — by Davron (PXSYS) · v{APP_VERSION}")
     print(f"  Telegram: {TELEGRAM_CHANNEL} (новости о статусе серверов)")
-    print(f"  batch={worker.target_batch}")
+    print(f"  batch={worker.target_batch} · папка: {EXTRACT_DIR}")
     print("=" * 65)
+    log.info("worker %d старт: v%s, batch=%d, БД=%s, папка=%s", worker.id, APP_VERSION,
+             worker.target_batch, DB_FILE, EXTRACT_DIR)
 
     if not os.path.exists(DB_FILE):
         sys.exit("Нет unlim_state.db — сначала запусти unlim_download.py --collect")
@@ -993,8 +1038,17 @@ def main() -> int:
     if n_rec:
         worker.say(f"возвращено {n_rec} зависших файлов в очередь")
 
+    summary = queue_summary()
+    ok_space, free = check_disk_space(DOWNLOAD_DIR, 0)
+    free_str = human_bytes(free) if free >= 0 else "неизвестно"
+    worker.say(f"{summary}; свободно на диске {free_str}")
+    log.info("worker %d: %s; свободно %s", worker.id, summary, free_str)
+
     worker.authorize()
-    return worker.run()
+    code = worker.run()
+    log.info("worker %d завершён: код %s, %d файлов, %s", worker.id, code,
+             worker.total_files, human_bytes(worker.total_bytes))
+    return code
 
 
 if __name__ == "__main__":

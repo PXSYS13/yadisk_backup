@@ -28,6 +28,8 @@ IS_WINDOWS = sys.platform.startswith("win")
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
+APP_VERSION = "1.1.0"
+
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 
 # Больше 5 параллельных скачиваний через REST API — Яндекс режет по rate limit.

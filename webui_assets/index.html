@@ -832,6 +832,30 @@
   .check-row .dot{width:9px;height:9px;border-radius:50%;background:var(--text-tertiary);flex-shrink:0}
   .check-row.ok .dot{background:var(--green)} .check-row.warn .dot{background:var(--orange)} .check-row.err .dot{background:var(--red)}
   .check-row .sub{color:var(--text-tertiary);font-size:12.5px;margin-left:auto}
+
+  /* ── Воронка первого запуска ── */
+  .ob-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:0.5px solid var(--hairline)}
+  .ob-row:last-child{border-bottom:none}
+  .ob-num{width:28px;height:28px;border-radius:50%;background:var(--surface2);display:inline-flex;align-items:center;justify-content:center;font-size:13px;font-weight:600;color:var(--text-secondary);flex-shrink:0}
+  .ob-row.done .ob-num{background:var(--green);color:#000}
+  .ob-row.current .ob-num{background:var(--accent);color:#fff}
+  .ob-row-title{font-size:14.5px;font-weight:500}
+  .ob-row.done .ob-row-title{color:var(--text-secondary)}
+  .ob-row-sub{font-size:12.5px;color:var(--text-tertiary)}
+  .ob-row .badge{margin-left:auto}
+  .ob-step{display:none} .ob-step.active{display:block}
+  .ob-why{font-size:13.5px;color:var(--text-secondary);line-height:1.5;background:var(--surface2);border-radius:10px;padding:10px 14px;margin-bottom:12px}
+  .ob-list{padding-left:22px;margin:0 0 14px;font-size:14px;line-height:1.6}
+  .ob-list li{margin-bottom:6px}
+  .ob-inline{padding:3px 10px;font-size:12.5px;vertical-align:middle;color:var(--accent);border-color:rgba(10,132,255,.4)}
+  .ob-help{margin-top:14px;font-size:13px;color:var(--text-secondary)}
+  .ob-help summary{cursor:pointer;color:var(--accent);font-weight:500}
+  .ob-help ul{padding-left:20px;margin-top:8px;line-height:1.55}
+  .ob-help li{margin-bottom:6px}
+  .acc-grid{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-top:8px}
+  .acc-item{background:var(--surface2);border-radius:10px;padding:8px 12px}
+  .acc-item .v{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
+  .acc-item .l{font-size:11.5px;color:var(--text-tertiary)}
 </style>
 
 <!-- SVG sprite -->
@@ -927,7 +951,7 @@
     <div class="brand-logo"><svg class="ico" style="color:#fff"><use href="#i-cloud"/></svg></div>
     <div>
       <div class="brand-name">Yandex.Disk Backup</div>
-      <div class="brand-sub">Локальный бэкап · <span class="author">by Davron</span></div>
+      <div class="brand-sub">Локальный бэкап · <span class="author">by Davron</span> · <span id="app-version"></span></div>
     </div>
   </div>
   <div class="pills">
@@ -987,6 +1011,18 @@
         <div class="yx-links" id="diag-links"></div>
       </div>
     </div>
+  </div>
+
+  <!-- Воронка первого запуска -->
+  <div class="card" id="onboarding-card" style="display:none;padding:16px 18px;margin-bottom:18px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+      <div>
+        <div class="card-title" style="font-size:17px;margin-bottom:2px">Путь к бэкапу</div>
+        <div class="card-sub" style="margin-bottom:0" id="ob-progress-text">4 шага · около 3 минут</div>
+      </div>
+      <button class="btn" style="background:var(--accent);color:#fff;border-color:transparent" id="ob-continue" onclick="openOnboarding()">Начать настройку</button>
+    </div>
+    <div id="ob-steps"></div>
   </div>
 
   <div class="hero">
@@ -1074,6 +1110,17 @@
   </div>
 
   <div class="muted" style="font-size:12.5px">Пробы выполняются с вашего компьютера раз в минуту: один GET к REST API и один к веб-версии Диска. История хранится локально в <code>logs/yandex_health.jsonl</code>.</div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="card-title" style="font-size:16px">Логи</div>
+    <div class="card-sub" style="margin-bottom:10px">Сервер, каждая задача и монитор пишут в папку <code>logs/</code>. Если что-то не работает — скачайте архив одним файлом и пришлите в поддержку: в нём нет токена и кук.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+      <select id="log-select" class="input" style="max-width:340px;margin:0" onchange="loadLogTail()"></select>
+      <button class="btn" onclick="refreshLogList()">Обновить</button>
+      <a class="btn" href="/api/logs/bundle" style="text-decoration:none;color:var(--accent);border-color:rgba(10,132,255,.4)">Скачать архив логов для поддержки</a>
+    </div>
+    <div class="console" id="log-view" style="max-height:360px"><div class="console-empty">выберите файл</div></div>
+  </div>
 </div>
 
 <div class="panel" data-panel="setup">
@@ -1126,6 +1173,7 @@
         </div>
         <button class="danger" onclick="clearToken()" style="padding:6px 12px;font-size:12px">Удалить</button>
       </div>
+      <div id="saved-token-account" style="font-size:12.5px;color:var(--text-secondary);margin-top:8px;line-height:1.5"></div>
     </div>
 
     <label class="field-label">Новый токен</label>
@@ -1643,6 +1691,123 @@
   </div>
 </div>
 
+<!-- Воронка первого запуска: токен → папка → куки → скачивание -->
+<div id="ob-backdrop" class="modal-backdrop" onclick="if(event.target===this) closeOnboarding()">
+  <div class="wizard" role="dialog" aria-modal="true">
+    <div class="wizard-head">
+      <div>
+        <div style="font-size:20px;font-weight:600;letter-spacing:-.02em">Настройка за 4 шага</div>
+        <div style="font-size:13px;color:var(--text-secondary)">Логин и пароль не нужны: только ключи доступа, которые Яндекс выдаёт вам сам. Всё хранится на вашем компьютере.</div>
+      </div>
+      <button class="btn" onclick="closeOnboarding()" style="padding:6px 12px">Закрыть</button>
+    </div>
+    <div class="wizard-body">
+      <div class="stepper" id="ob-stepper">
+        <div class="step active" data-step="1" onclick="obGo(1)"><span class="n">1</span>Токен</div>
+        <div class="step" data-step="2" onclick="obGo(2)"><span class="n">2</span>Папка</div>
+        <div class="step" data-step="3" onclick="obGo(3)"><span class="n">3</span>Cookies</div>
+        <div class="step" data-step="4" onclick="obGo(4)"><span class="n">4</span>Скачать</div>
+      </div>
+
+      <!-- Шаг 1: токен -->
+      <div class="ob-step" data-step="1">
+        <div class="ob-why">Токен нужен, чтобы программа скачивала <b>обычные файлы и папки</b> через официальный API Яндекс.Диска. Живёт около года, хранится только в вашем <code>.env</code>.</div>
+        <div id="ob-token-saved" class="task-banner done" style="display:none;margin:10px 0"><div class="task-banner-body"><div class="task-banner-title">Токен уже сохранён</div><div class="task-banner-sub" id="ob-token-saved-sub"></div></div></div>
+        <ol class="ob-list">
+          <li>Откройте <a href="https://disk.yandex.ru" target="_blank" rel="noopener">disk.yandex.ru</a> и убедитесь, что вы вошли в <b>тот аккаунт</b>, который нужно сохранить.</li>
+          <li>Откройте официальную страницу Полигона: <button class="btn btn-sm ob-inline" onclick="window.open('https://yandex.ru/dev/disk/poligon/','_blank','noopener')">Открыть Полигон ↗</button></li>
+          <li>Справа вверху нажмите <b>«Получить OAuth-токен»</b> и в окне Яндекса — <b>«Разрешить»</b>.</li>
+          <li>Скопируйте строку, которая начинается на <code>y0_</code> (кнопка «Скопировать» рядом с ней).</li>
+          <li>Вставьте её в поле ниже и нажмите <b>«Проверить»</b> — мы покажем, чей это аккаунт и сколько там данных.</li>
+        </ol>
+        <label class="field-label">Токен</label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="password" id="ob-token" placeholder="y0_AgAAA…" style="flex:1;min-width:240px;margin:0" oninput="obTokenInput()">
+          <button class="btn" onclick="obToggleToken()">Показать</button>
+          <button class="btn" onclick="obCheckToken(this)">Проверить</button>
+        </div>
+        <div id="ob-token-result" style="margin-top:10px"></div>
+        <details class="ob-help"><summary>Что-то пошло не так?</summary>
+          <ul>
+            <li><b>«Токен невалиден» или 401</b> — скопирован не целиком или с пробелом. Скопируйте заново кнопкой «Скопировать» на Полигоне.</li>
+            <li><b>Полигон просит войти</b> — войдите в аккаунт Яндекса в этой же вкладке и повторите «Получить OAuth-токен».</li>
+            <li><b>Показывает чужой логин</b> — в браузере активен другой аккаунт: выйдите на passport.yandex.ru и войдите нужным.</li>
+            <li><b>Сетевая ошибка или 50x</b> — Яндекс сейчас сбоит, смотрите вкладку «Статус Яндекса» и повторите через пару минут.</li>
+            <li>Подробный гид со скриншотами: <a href="https://github.com/PXSYS13/yadisk_backup/blob/main/INSTRUCTION_GET_TOKEN.md" target="_blank" rel="noopener">INSTRUCTION_GET_TOKEN.md</a>, видео: <a href="https://www.youtube.com/watch?v=XAiJxqHkEUA" target="_blank" rel="noopener">YouTube</a>.</li>
+          </ul>
+        </details>
+      </div>
+
+      <!-- Шаг 2: папка -->
+      <div class="ob-step" data-step="2">
+        <div class="ob-why">Сюда лягут все файлы: обычный диск — как на Диске, безлимит — в подпапку <code>_unlim</code>. Папка создастся сама.</div>
+        <div id="ob-dir-need" class="muted" style="font-size:13px;margin:6px 0 10px"></div>
+        <ul class="ob-list">
+          <li>Подойдёт отдельная папка на диске с запасом места: <code>D:\YandexBackup</code>, <code>E:\Backup\Яндекс</code>, на Mac — <code>/Users/имя/YandexBackup</code>.</li>
+          <li>Нельзя: корень диска (<code>C:\</code>), системные папки, домашняя папка целиком — программа такие отклонит.</li>
+          <li>Внешний диск годится, но не отключайте его во время скачивания.</li>
+        </ul>
+        <label class="field-label">Путь к папке</label>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input type="text" id="ob-dir" placeholder="D:\YandexBackup" style="flex:1;min-width:240px;margin:0">
+          <button class="btn" style="background:var(--accent);color:#fff;border-color:transparent" onclick="obSaveDir(this)">Сохранить</button>
+        </div>
+        <div id="ob-dir-result" style="margin-top:10px"></div>
+      </div>
+
+      <!-- Шаг 3: cookies -->
+      <div class="ob-step" data-step="3">
+        <div class="ob-why">Фото и видео с телефона Яндекс хранит в скрытом <b>безлимите</b>, через API их не достать. Нужны cookies вашей веб-сессии — их экспортирует бесплатное расширение. Если безлимита у вас нет — шаг можно пропустить.</div>
+        <div id="ob-cookies-saved" class="task-banner done" style="display:none;margin:10px 0"><div class="task-banner-body"><div class="task-banner-title">Cookies уже сохранены</div><div class="task-banner-sub" id="ob-cookies-saved-sub"></div></div></div>
+        <ol class="ob-list">
+          <li>Установите расширение Cookie-Editor: <a href="https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm" target="_blank" rel="noopener">Chrome / Яндекс.Браузер / Edge / Opera</a> или <a href="https://addons.mozilla.org/ru/firefox/addon/cookie-editor/" target="_blank" rel="noopener">Firefox</a>.</li>
+          <li>Откройте <a href="https://disk.yandex.ru/client/photo" target="_blank" rel="noopener">disk.yandex.ru/client/photo</a> и убедитесь, что видите свои фото.</li>
+          <li>Нажмите иконку Cookie-Editor 🍪 (если скрыта — значок «пазл» справа вверху) → внизу <b>Export</b> → <b>Export as JSON</b>. Куки уже в буфере обмена.</li>
+          <li>Вставьте в поле ниже (Ctrl+V) и нажмите <b>«Проверить»</b>.</li>
+        </ol>
+        <label class="field-label">JSON из Cookie-Editor</label>
+        <textarea id="ob-cookies" placeholder='[{"name":"Session_id","value":"…"}, …]' style="min-height:90px;margin:0" oninput="obCookiesInput()"></textarea>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+          <button class="btn" onclick="obCheckCookies(this)">Проверить</button>
+          <button class="btn" id="ob-cookies-save" style="background:var(--accent);color:#fff;border-color:transparent" onclick="obSaveCookies(this)" disabled>Сохранить</button>
+          <button class="btn" onclick="obSkipCookies()">Пропустить — безлимита нет</button>
+        </div>
+        <div id="ob-cookies-result" style="margin-top:10px"></div>
+        <details class="ob-help"><summary>Что-то пошло не так?</summary>
+          <ul>
+            <li><b>«Не хватает кук: Session_id…»</b> — экспорт сделан не на странице Диска или вы не вошли. Откройте disk.yandex.ru, войдите, повторите Export.</li>
+            <li><b>«Невалидный JSON»</b> — выбран Export as Netscape/Header String. Нужен именно <b>Export as JSON</b>.</li>
+            <li>Куки живут от нескольких дней до недель. Если воркер пишет <code>auth_expired</code> — повторите этот шаг.</li>
+          </ul>
+        </details>
+      </div>
+
+      <!-- Шаг 4: скачать -->
+      <div class="ob-step" data-step="4">
+        <div id="ob-summary"></div>
+        <div class="grid-2" style="margin-top:14px">
+          <div class="card" style="padding:14px 16px">
+            <div class="card-title" style="font-size:16px">План восстановления</div>
+            <div class="card-sub" style="margin-bottom:10px">Рекомендуется. Выберете, что качать первым (фото, видео, документы), увидите объём и время, запустите в щадящем режиме, если Яндекс сбоит.</div>
+            <button class="btn" style="background:var(--accent);color:#fff;border-color:transparent" onclick="closeOnboarding();openWizard()">Составить план</button>
+          </div>
+          <div class="card" style="padding:14px 16px">
+            <div class="card-title" style="font-size:16px">Скачать всё сразу</div>
+            <div class="card-sub" style="margin-bottom:10px">Сканирование → скачивание диска → сбор безлимита → воркеры. Без выбора категорий.</div>
+            <button class="btn" onclick="closeOnboarding();bigStart()">Запустить всё</button>
+          </div>
+        </div>
+        <div class="muted" style="font-size:12.5px;margin-top:12px">Прогресс сохраняется в базе: можно закрывать программу и продолжать позже. Уже скачанные файлы не качаются повторно.</div>
+      </div>
+    </div>
+    <div class="wizard-foot">
+      <button class="btn" id="ob-back" onclick="obGo(_obStep-1)">Назад</button>
+      <div style="font-size:12.5px;color:var(--text-tertiary)" id="ob-foot-note"></div>
+      <button class="btn" id="ob-next" onclick="obGo(_obStep+1)" style="background:var(--accent);color:#fff;border-color:transparent">Далее</button>
+    </div>
+  </div>
+</div>
+
 <!-- Мастер «План восстановления» -->
 <div id="wizard-backdrop" class="modal-backdrop" onclick="if(event.target===this) closeWizard()">
   <div class="wizard" role="dialog" aria-modal="true">
@@ -1744,9 +1909,10 @@ function switchTab(name){
   document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
   tabEl.classList.add('active');
   panelEl.classList.add('active');
-  // При переходе на диск/безлимит — подтянем превью
+  // При переходе на диск/безлимит — подтянем превью, на статус — список логов
   if(name === 'disk') refreshPreview('disk');
   if(name === 'photos') refreshPreview('unlim');
+  if(name === 'status') refreshLogList();
   try {
     const url = new URL(window.location);
     url.searchParams.set('tab', name);
@@ -2547,6 +2713,270 @@ function updateYandexStatus(s){
   }
 }
 
+// ────── Воронка первого запуска ──────
+let _obStep = 1;
+let _obStatus = null;        // последний /api/status
+let _obAutoOpened = false;
+let _obVerifiedToken = null;
+let _obVerifiedCookies = null;
+
+function obSkipped(){ try { return localStorage.getItem('ob_skip_cookies') === '1' } catch(e){ return false } }
+function obDismissed(){ try { return sessionStorage.getItem('ob_dismissed') === '1' } catch(e){ return false } }
+
+function accountGrid(acc){
+  if(!acc) return '';
+  const items = [
+    ['Аккаунт', esc(acc.login || '?') + (acc.display_name ? ` · ${esc(acc.display_name)}` : '')],
+    ['Занято на Диске', `${human(acc.used||0)} из ${human(acc.total||0)}`],
+    ['Безлимит (фото с телефона)', human(acc.photo_unlim||0)],
+    ['Корзина', human(acc.trash||0)],
+    ['Тариф', acc.is_paid ? 'платный' : 'бесплатный'],
+  ];
+  return `<div class="acc-grid">${items.map(([l,v]) => `<div class="acc-item"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('')}</div>`;
+}
+
+const OB_STEPS = [
+  {key:'token',    title:'Токен Яндекс.Диска',    sub:'1 минута · для обычных файлов и папок'},
+  {key:'dir',      title:'Папка для файлов',      sub:'куда сохранять бэкап'},
+  {key:'cookies',  title:'Cookies для безлимита', sub:'опционально · фото и видео с телефона'},
+  {key:'download', title:'Скачать данные',        sub:'план восстановления или всё сразу'},
+];
+
+function renderOnboardingCard(s){
+  _obStatus = s;
+  const card = document.getElementById('onboarding-card');
+  if(!card) return;
+  const ob = s.onboarding || {};
+  const done = {token: !!ob.token, dir: !!ob.dir, cookies: !!ob.cookies || obSkipped(), download: !!ob.downloaded};
+  if(done.download){ card.style.display = 'none'; return }
+  card.style.display = 'block';
+  const current = (OB_STEPS.find(st => !done[st.key]) || {}).key;
+  const doneCount = OB_STEPS.filter(st => done[st.key]).length;
+  document.getElementById('ob-progress-text').textContent =
+    doneCount === 0 ? '4 шага · около 3 минут' : `Готово ${doneCount} из 4`;
+  const btn = document.getElementById('ob-continue');
+  btn.textContent = doneCount === 0 ? 'Начать настройку' : (current === 'download' ? 'Перейти к скачиванию' : 'Продолжить настройку');
+  btn.onclick = () => current === 'download' ? openWizard() : openOnboarding(OB_STEPS.findIndex(st => st.key === current) + 1);
+  const acc = (s.token && s.token.account) || {};
+  const subs = {
+    token: done.token ? `${esc(s.token.login || '')} · занято ${human(acc.used||0)} из ${human(acc.total||0)}` : OB_STEPS[0].sub,
+    dir: done.dir ? esc(s.config.download_dir || '') + (s.free_space ? ` · свободно ${human(s.free_space.free)}` : '') : OB_STEPS[1].sub,
+    cookies: ob.cookies ? `${s.cookies.count || 0} шт · безлимит ${human(acc.photo_unlim||0)}` : (obSkipped() ? 'пропущено — только обычный диск' : OB_STEPS[2].sub),
+    download: ob.scanned ? 'список файлов собран — можно запускать' : OB_STEPS[3].sub,
+  };
+  document.getElementById('ob-steps').innerHTML = OB_STEPS.map((st, i) => {
+    const cls = done[st.key] ? 'done' : (st.key === current ? 'current' : '');
+    const badge = done[st.key] ? '<span class="badge ok">готово</span>'
+      : st.key === current ? '<span class="badge run">сейчас</span>' : '<span class="badge">потом</span>';
+    const action = st.key === 'download'
+      ? `openWizard()` : `openOnboarding(${i+1})`;
+    return `<div class="ob-row ${cls}"><span class="ob-num">${done[st.key] ? '✓' : i+1}</span>
+      <div style="flex:1;min-width:0"><div class="ob-row-title">${st.title}</div><div class="ob-row-sub">${subs[st.key]}</div></div>
+      ${badge}
+      <button class="btn btn-sm" style="padding:4px 10px;font-size:12px" onclick="${action}">${done[st.key] ? 'Изменить' : 'Открыть'}</button></div>`;
+  }).join('');
+
+  // Самый первый запуск: ничего не настроено — открываем мастер сами, один раз за сессию
+  if(!_obAutoOpened && !ob.token && !ob.cookies && !obDismissed()){
+    _obAutoOpened = true;
+    openOnboarding(1);
+  }
+}
+
+function openOnboarding(step){
+  const s = _obStatus || {};
+  const dirIn = document.getElementById('ob-dir');
+  if(dirIn && !dirIn.value && s.config) dirIn.value = s.config.download_dir || '';
+  document.getElementById('ob-backdrop').classList.add('show');
+  obGo(step || 1);
+}
+function closeOnboarding(){
+  document.getElementById('ob-backdrop').classList.remove('show');
+  try { sessionStorage.setItem('ob_dismissed', '1') } catch(e){}
+}
+function obGo(n){
+  n = Math.max(1, Math.min(4, n));
+  _obStep = n;
+  document.querySelectorAll('#ob-stepper .step').forEach(el => {
+    const k = +el.dataset.step;
+    el.className = 'step' + (k === n ? ' active' : k < n ? ' done' : '');
+  });
+  document.querySelectorAll('.ob-step').forEach(el => el.classList.toggle('active', +el.dataset.step === n));
+  document.getElementById('ob-back').style.visibility = n === 1 ? 'hidden' : 'visible';
+  document.getElementById('ob-next').style.display = n === 4 ? 'none' : 'inline-flex';
+  document.getElementById('ob-foot-note').textContent = `Шаг ${n} из 4`;
+  obRenderDynamic();
+}
+
+function obRenderDynamic(){
+  const s = _obStatus || {};
+  const tok = s.token || {}, ck = s.cookies || {}, acc = tok.account || {};
+  // Шаг 1
+  const savedTok = document.getElementById('ob-token-saved');
+  if(savedTok){
+    savedTok.style.display = tok.ok ? 'flex' : 'none';
+    if(tok.ok) document.getElementById('ob-token-saved-sub').textContent =
+      `${tok.login || ''} · занято ${human(acc.used||0)} из ${human(acc.total||0)} · безлимит ${human(acc.photo_unlim||0)}. Можно идти дальше или вставить другой токен.`;
+  }
+  // Шаг 2
+  const need = (acc.used||0) + (acc.photo_unlim||0);
+  const needEl = document.getElementById('ob-dir-need');
+  if(needEl) needEl.textContent = need
+    ? `По данным Яндекса вам понадобится около ${human(need)} (диск ${human(acc.used||0)} + безлимит ${human(acc.photo_unlim||0)}); сейчас в папке скачивания свободно ${s.free_space ? human(s.free_space.free) : '—'}.`
+    : 'Сначала проверьте токен на шаге 1 — мы подскажем, сколько места понадобится.';
+  // Шаг 3
+  const savedCk = document.getElementById('ob-cookies-saved');
+  if(savedCk){
+    savedCk.style.display = ck.ok ? 'flex' : 'none';
+    if(ck.ok) document.getElementById('ob-cookies-saved-sub').textContent = `${ck.count || 0} шт. Безлимит по данным Яндекса: ${human(acc.photo_unlim||0)}.`;
+  }
+  // Шаг 4
+  const sum = document.getElementById('ob-summary');
+  if(sum){
+    const rows = [
+      [tok.ok ? 'ok' : 'err', 'Токен', tok.ok ? `${esc(tok.login||'')} · ${human(acc.used||0)} на Диске` : 'не настроен — обычный диск качаться не будет'],
+      [s.config && s.config.download_dir_set ? 'ok' : 'warn', 'Папка', esc((s.config||{}).download_dir || '') + (s.free_space ? ` · свободно ${human(s.free_space.free)}` : '')],
+      [ck.ok ? 'ok' : 'warn', 'Cookies', ck.ok ? `${ck.count} шт · безлимит ${human(acc.photo_unlim||0)}` : (obSkipped() ? 'пропущено' : 'не настроены — безлимит качаться не будет')],
+    ];
+    sum.innerHTML = rows.map(([c,t,v]) => `<div class="check-row ${c}"><span class="dot"></span>${t}: ${v}</div>`).join('');
+  }
+}
+
+function obToggleToken(){ const i = document.getElementById('ob-token'); i.type = i.type === 'password' ? 'text' : 'password' }
+function obTokenInput(){ _obVerifiedToken = null; document.getElementById('ob-token-result').innerHTML = '' }
+function obCookiesInput(){ _obVerifiedCookies = null; document.getElementById('ob-cookies-save').disabled = true }
+
+async function obCheckToken(btn){
+  const tok = document.getElementById('ob-token').value.trim();
+  const out = document.getElementById('ob-token-result');
+  if(!tok){ toast('Вставьте токен','err'); return }
+  if(btn) btn.disabled = true;
+  out.innerHTML = '<div class="muted" style="font-size:13px">Спрашиваю Яндекс…</div>';
+  try {
+    const {d, err} = await postJSON('/api/config/token/check', {token: tok});
+    if(!err && d.ok){
+      _obVerifiedToken = tok;
+      out.innerHTML = `<div class="task-banner done"><div class="task-banner-body"><div class="task-banner-title">Токен работает</div><div class="task-banner-sub">Проверьте, что это нужный аккаунт, и сохраняйте.</div></div></div>
+        ${accountGrid(d.account)}
+        <div style="margin-top:10px"><button class="btn" style="background:var(--accent);color:#fff;border-color:transparent" onclick="obSaveToken(this)">Сохранить и далее</button></div>`;
+    } else {
+      out.innerHTML = `<div class="task-banner err"><div class="task-banner-body"><div class="task-banner-title">Не принят</div><div class="task-banner-sub">${esc(err || d.msg || 'ошибка')}</div></div></div>`;
+    }
+  } catch(e){ out.innerHTML = `<div class="task-banner err"><div class="task-banner-body"><div class="task-banner-title">Сеть</div><div class="task-banner-sub">${esc(e.message)}</div></div></div>` }
+  if(btn) btn.disabled = false;
+}
+
+async function obSaveToken(btn){
+  const tok = document.getElementById('ob-token').value.trim();
+  if(!tok || tok !== _obVerifiedToken){ toast('Сначала «Проверить»','err'); return }
+  if(btn) btn.disabled = true;
+  try {
+    const {d, err} = await postJSON('/api/config/token', {token: tok});
+    if(err || !(d.check && d.check.ok)){ toast(err || (d.check && d.check.msg) || 'Ошибка','err'); if(btn) btn.disabled = false; return }
+    toast('Токен сохранён: ' + d.check.login, 'ok');
+    document.getElementById('ob-token').value = '';
+    _obVerifiedToken = null;
+    await refresh();
+    obGo(2);
+  } catch(e){ toast('Сеть: '+e.message,'err'); if(btn) btn.disabled = false }
+}
+
+async function obSaveDir(btn){
+  const dir = document.getElementById('ob-dir').value.trim();
+  const out = document.getElementById('ob-dir-result');
+  if(!dir){ toast('Укажите папку','err'); return }
+  if(btn) btn.disabled = true;
+  try {
+    const {d, err} = await postJSON('/api/config/download_dir', {download_dir: dir});
+    if(err){
+      out.innerHTML = `<div class="task-banner err"><div class="task-banner-body"><div class="task-banner-title">Папка не подходит</div><div class="task-banner-sub">${esc(err)}</div></div></div>`;
+    } else {
+      const free = d.free_space ? ` Свободно: ${human(d.free_space.free)}.` : '';
+      out.innerHTML = `<div class="task-banner done"><div class="task-banner-body"><div class="task-banner-title">Сохранено</div><div class="task-banner-sub">${esc(d.download_dir)}.${free}</div></div></div>`;
+      toast('Папка сохранена','ok');
+      await refresh();
+      obGo(3);
+    }
+  } catch(e){ toast('Сеть: '+e.message,'err') }
+  if(btn) btn.disabled = false;
+}
+
+function obParseCookies(){
+  const txt = document.getElementById('ob-cookies').value.trim();
+  if(!txt){ toast('Вставьте JSON из Cookie-Editor','err'); return null }
+  let arr;
+  try { arr = JSON.parse(txt) } catch(e){ toast('Невалидный JSON: нужен именно «Export as JSON»','err'); return null }
+  if(!Array.isArray(arr)){ toast('Должен быть массив куки от Cookie-Editor','err'); return null }
+  return arr;
+}
+
+async function obCheckCookies(btn){
+  const arr = obParseCookies(); if(!arr) return;
+  const out = document.getElementById('ob-cookies-result');
+  if(btn) btn.disabled = true;
+  try {
+    const {d, err} = await postJSON('/api/cookies/check', {cookies: arr});
+    if(!err && d.ok){
+      _obVerifiedCookies = arr;
+      document.getElementById('ob-cookies-save').disabled = false;
+      out.innerHTML = `<div class="task-banner done"><div class="task-banner-body"><div class="task-banner-title">Куки в порядке</div><div class="task-banner-sub">${esc(d.msg)}. Нажмите «Сохранить».</div></div></div>`;
+    } else {
+      _obVerifiedCookies = null;
+      document.getElementById('ob-cookies-save').disabled = true;
+      out.innerHTML = `<div class="task-banner err"><div class="task-banner-body"><div class="task-banner-title">Не подходят</div><div class="task-banner-sub">${esc(err || d.msg || 'ошибка')}</div></div></div>`;
+    }
+  } catch(e){ toast('Сеть: '+e.message,'err') }
+  if(btn) btn.disabled = false;
+}
+
+async function obSaveCookies(btn){
+  const arr = obParseCookies(); if(!arr || arr !== _obVerifiedCookies){ toast('Сначала «Проверить»','err'); return }
+  if(btn) btn.disabled = true;
+  try {
+    const {d, err} = await postJSON('/api/cookies', {cookies: arr});
+    if(err || !d.ok){ toast(err || 'Ошибка','err'); if(btn) btn.disabled = false; return }
+    toast(`Сохранено ${d.saved_count} куки`,'ok');
+    document.getElementById('ob-cookies').value = '';
+    _obVerifiedCookies = null;
+    try { localStorage.removeItem('ob_skip_cookies') } catch(e){}
+    await refresh();
+    obGo(4);
+  } catch(e){ toast('Сеть: '+e.message,'err'); if(btn) btn.disabled = false }
+}
+
+function obSkipCookies(){
+  try { localStorage.setItem('ob_skip_cookies', '1') } catch(e){}
+  if(_obStatus) renderOnboardingCard(_obStatus);
+  obGo(4);
+}
+
+// ────── Логи ──────
+async function refreshLogList(){
+  const sel = document.getElementById('log-select');
+  if(!sel) return;
+  try {
+    const r = await fetch('/api/logs');
+    const d = await r.json();
+    const prev = sel.value;
+    sel.innerHTML = (d.logs || []).map(l => `<option value="${esc(l.name)}">${esc(l.name)} · ${human(l.size)}</option>`).join('')
+      || '<option value="">логов пока нет</option>';
+    if(prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+    loadLogTail();
+  } catch(e){ console.warn('logs', e) }
+}
+async function loadLogTail(){
+  const sel = document.getElementById('log-select');
+  const view = document.getElementById('log-view');
+  if(!sel || !view || !sel.value){ if(view) view.innerHTML = '<div class="console-empty">логов пока нет</div>'; return }
+  try {
+    const r = await fetch(`/api/logs/tail?name=${encodeURIComponent(sel.value)}&lines=300`);
+    const d = await r.json();
+    if(!r.ok){ view.textContent = d.detail || 'ошибка'; return }
+    view.textContent = (d.lines || []).join('\n') || '(пусто)';
+    view.scrollTop = view.scrollHeight;
+  } catch(e){ view.textContent = 'Сеть: ' + e.message }
+}
+
 // ────── Мастер «План восстановления» ──────
 let _wzStep = 1;
 let _wzPlan = null;
@@ -3033,15 +3463,24 @@ async function _refreshInner(){
     cc.textContent = s.cookies.msg;
     cc.className = 'badge '+(s.cookies.ok?'ok':'err');
 
-    // Сохранённый токен — карточка
+    // Версия в шапке
+    const ver = document.getElementById('app-version');
+    if(ver && s.app_version) ver.textContent = 'v' + s.app_version;
+
+    // Сохранённый токен — карточка с данными аккаунта от API Яндекса
     const savedTokenCard = document.getElementById('saved-token-card');
     if(s.config.token_masked && s.token.ok){
       savedTokenCard.style.display = 'block';
-      document.getElementById('saved-token-login').textContent = s.token.login || '—';
+      const acc = s.token.account || {};
+      document.getElementById('saved-token-login').textContent = (s.token.login || '—') + (acc.display_name ? ` · ${acc.display_name}` : '');
       document.getElementById('saved-token-masked').textContent = s.config.token_masked;
+      document.getElementById('saved-token-account').innerHTML = accountGrid(acc);
     } else {
       savedTokenCard.style.display = 'none';
     }
+
+    // Воронка первого запуска
+    renderOnboardingCard(s);
 
     // Сохранённые куки
     const savedCkCard = document.getElementById('saved-cookies-card');

@@ -16,7 +16,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import platform
 import re
 import shutil
 import sqlite3
@@ -24,16 +26,19 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from collections import deque
 from collections.abc import Callable
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from dotenv import load_dotenv, set_key
+from dotenv import dotenv_values, load_dotenv, set_key
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from downloader import account_info, api_error_details, make_client
 from unlim_common import (
     RELEASE_IN_PROGRESS_SQL,
     missing_required_cookies,
@@ -41,6 +46,7 @@ from unlim_common import (
     unlim_tx,
 )
 from utils import (
+    APP_VERSION,
     CATEGORY_LABELS,
     DEFAULT_UNLIM_BATCH,
     DONATION_URL,
@@ -69,10 +75,30 @@ DB_FILE = PROJECT / "state.db"
 UNLIM_DB_FILE = PROJECT / "unlim_state.db"
 COOKIES_FILE = PROJECT / "cookies.json"
 TEMPLATES_DIR = PROJECT / "webui_assets"
-HEALTH_LOG = PROJECT / "logs" / "yandex_health.jsonl"
+LOG_DIR = PROJECT / "logs"
+TASK_LOG_DIR = LOG_DIR / "tasks"
+WEBUI_LOG = LOG_DIR / "webui.log"
+HEALTH_LOG = LOG_DIR / "yandex_health.jsonl"
+# Лог задачи дописывается при каждом запуске слота; при превышении — уходит в .1
+TASK_LOG_MAX_BYTES = 10 * 1024 * 1024
 
 HOST = "127.0.0.1"
 PORT = 8000
+
+log = logging.getLogger("webui")
+
+
+def _setup_logging() -> None:
+    """Файл-лог сервера: действия пользователя, запуски задач, ошибки — без секретов."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+                            datefmt="%Y-%m-%d %H:%M:%S")
+    handler = RotatingFileHandler(WEBUI_LOG, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    handler.setFormatter(fmt)
+    for name in ("webui", "uvicorn.error"):
+        lg = logging.getLogger(name)
+        lg.setLevel(logging.INFO)
+        lg.addHandler(handler)
 
 # Ссылки для объяснений в UI: что происходит с Яндексом и где следить за новостями
 NEWS_LINKS = [
@@ -112,9 +138,15 @@ CATEGORY_SKIP_MARKER = "not in selected categories"
 def get_config() -> dict:
     """Перечитывает .env заново."""
     load_dotenv(ENV_FILE, override=True)
+    try:
+        saved = dotenv_values(ENV_FILE) if ENV_FILE.exists() else {}
+    except Exception:
+        saved = {}
     return {
         "token": (os.getenv("YA_DISK_TOKEN", "") or "").strip(),
         "download_dir": (os.getenv("DOWNLOAD_DIR", str(PROJECT / "downloads")) or "").strip(),
+        # Папку выбирали осознанно (есть в .env), а не взяли дефолт
+        "download_dir_set": bool((saved.get("DOWNLOAD_DIR") or "").strip()),
         "max_workers": safe_int(os.getenv("MAX_WORKERS"), default=4, min_val=1, max_val=16),
     }
 
@@ -163,18 +195,39 @@ async def csrf_guard(request, call_next):
 
 
 class Task:
-    """Один фоновый процесс + поток, читающий его stdout в кольцевой буфер."""
+    """Один фоновый процесс + поток, читающий его stdout в кольцевой буфер и в файл.
 
-    def __init__(self, name: str, proc: subprocess.Popen):
+    Кольцевой буфер (300 строк) — для живой консоли в UI; файл logs/tasks/<slot>.log —
+    чтобы после перезапуска сервера было что прислать в поддержку.
+    """
+
+    def __init__(self, name: str, proc: subprocess.Popen, log_file: Path | None = None,
+                 cmd: list[str] | None = None):
         self.name = name
         self.proc = proc
+        self.cmd = list(cmd or [])
+        self.log_file = log_file
         self.started_at = time.time()
         self.was_stopped = False
         self.log: deque[str] = deque(maxlen=300)
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
 
+    def _open_log_file(self):
+        if self.log_file is None:
+            return None
+        try:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
+            if self.log_file.exists() and self.log_file.stat().st_size > TASK_LOG_MAX_BYTES:
+                os.replace(self.log_file, str(self.log_file) + ".1")
+            f = open(self.log_file, "a", encoding="utf-8")
+            f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} старт: {' '.join(self.cmd)} =====\n")
+            return f
+        except OSError:
+            return None
+
     def _read(self):
+        f = self._open_log_file()
         try:
             for line in self.proc.stdout:  # type: ignore
                 line = line.rstrip("\r\n")
@@ -183,6 +236,11 @@ class Task:
                         ts = time.strftime("%H:%M:%S")
                         line = f"{ts}  {line}"
                     self.log.append(line)
+                    if f is not None:
+                        try:
+                            f.write(line + "\n")
+                        except OSError:
+                            f = None
         except Exception:
             pass
         finally:
@@ -191,6 +249,13 @@ class Task:
                 self.proc.wait(timeout=10)
             except Exception:
                 pass
+            if f is not None:
+                try:
+                    f.write(f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} конец: exit={self.proc.poll()}"
+                            f"{' (остановлено пользователем)' if self.was_stopped else ''} =====\n")
+                    f.close()
+                except OSError:
+                    pass
 
     def alive(self) -> bool:
         return self.proc.poll() is None
@@ -228,6 +293,7 @@ class Task:
             "exit_code": self.proc.poll(),
             "was_stopped": self.was_stopped,
             "log_tail": list(self.log)[-80:],
+            "log_file": self.log_file.name if self.log_file else None,
         }
 
 
@@ -262,7 +328,8 @@ class TaskManager:
                 text=True, encoding="utf-8", errors="replace",
                 env=env,
             )
-            self._tasks[slot] = Task(slot, proc)
+            log.info("задача %s запущена: %s %s (pid %s)", slot, script, " ".join(args), proc.pid)
+            self._tasks[slot] = Task(slot, proc, log_file=TASK_LOG_DIR / f"{slot}.log", cmd=[script, *args])
             return True, f"Запущено: {slot}"
 
     def get(self, slot: str) -> Task | None:
@@ -275,6 +342,7 @@ class TaskManager:
             if not t or not t.alive():
                 return False, f"Нет активной задачи {slot}"
             t.stop()
+            log.info("задача %s остановлена пользователем", slot)
             return True, f"Остановлено: {slot}"
 
     def stop_matching(self, prefix: str) -> list[Task]:
@@ -285,6 +353,7 @@ class TaskManager:
                 if slot.startswith(prefix) and t.alive():
                     t.stop()
                     stopped.append(t)
+                    log.info("задача %s остановлена (по префиксу %r)", slot, prefix)
         return stopped
 
     def stop_all(self) -> int:
@@ -414,6 +483,7 @@ class Pipeline:
     def _log(self, msg: str):
         ts = time.strftime("%H:%M:%S")
         self.log.append(f"{ts}  {msg}")
+        log.info("pipeline: %s", msg)
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -816,24 +886,47 @@ def check_token(token: str) -> dict:
             and now - _token_check_cache["at"] < _TOKEN_TTL):
         return _token_check_cache["data"]
     try:
-        import yadisk
-        cli = yadisk.Client(token=token)
+        cli = make_client(token)
         try:
             if not cli.check_token():
-                return {"ok": False, "msg": "Токен невалиден"}
-            info = cli.get_disk_info()
+                data = {"ok": False, "msg": "Токен невалиден: Яндекс ответил, что он не действует. "
+                                           "Скопируйте токен заново целиком."}
+                _token_check_cache.update({"token": token, "at": now, "data": data})
+                return data
+            acc = account_info(cli)
         finally:
             cli.close()
-        used = getattr(info, "used_space", 0) or 0
-        total = getattr(info, "total_space", 0) or 0
-        photo_unlim = getattr(info, "photounlim_size", 0) or 0
-        login = getattr(info.user, "login", "?") if getattr(info, "user", None) else "?"
-        data = {"ok": True, "msg": "OK", "used": used, "total": total,
-                "photo_unlim": photo_unlim, "login": login}
+        data = {"ok": True, "msg": "OK", "used": acc["used"], "total": acc["total"],
+                "photo_unlim": acc["photo_unlim"], "login": acc["login"], "account": acc}
+        log.info("токен проверен: %s, занято %s из %s, безлимит %s", acc["login"],
+                 acc["used"], acc["total"], acc["photo_unlim"])
     except Exception as e:
-        data = {"ok": False, "msg": f"{type(e).__name__}: {e}"}
+        data = {"ok": False, "msg": f"{type(e).__name__}: {e}{api_error_details(e)}"}
+        log.warning("проверка токена не удалась: %s", data["msg"])
     _token_check_cache.update({"token": token, "at": now, "data": data})
     return data
+
+
+def onboarding_state(cfg: dict, token: dict, cookies: dict, disk_db: dict, unlim_db: dict) -> dict:
+    """Воронка первого запуска: что уже настроено, какой шаг следующий."""
+    steps = {
+        "token": bool(token.get("ok")),
+        "dir": bool(cfg.get("download_dir_set")),
+        "cookies": bool(cookies.get("ok")),
+        "scanned": bool(disk_db.get("total") or unlim_db.get("total")),
+        "downloaded": bool(disk_db.get("downloaded") or unlim_db.get("downloaded")),
+    }
+    if not steps["token"] and not steps["cookies"]:
+        next_step = "token"
+    elif not steps["dir"]:
+        next_step = "dir"
+    elif not steps["cookies"]:
+        next_step = "cookies"   # опционально — UI даёт «пропустить»
+    elif not steps["downloaded"]:
+        next_step = "download"
+    else:
+        next_step = "done"
+    return {**steps, "next": next_step}
 
 
 def _cookies_report(arr: list) -> dict:
@@ -999,23 +1092,30 @@ def api_status():
     cfg = get_config()
     safe_config = {
         "download_dir": cfg.get("download_dir", ""),
+        "download_dir_set": cfg.get("download_dir_set", False),
         "max_workers": cfg.get("max_workers", 4),
         "token_masked": mask_token(cfg.get("token", "")),
     }
+    token = check_token(cfg["token"])
+    cookies = check_cookies()
+    disk_db = db_stats(DB_FILE, "files", "remote_path")
+    unlim_db = db_stats(UNLIM_DB_FILE, "unlim_files", "file_id")
     return {
+        "app_version": APP_VERSION,
         "donation_url": DONATION_URL,
         "telegram_url": TELEGRAM_CHANNEL,
         "telegram_handle": TELEGRAM_HANDLE,
         "youtube_url": YOUTUBE_VIDEO_URL,
         "config": safe_config,
-        "token": check_token(cfg["token"]),
-        "cookies": check_cookies(),
+        "token": token,
+        "cookies": cookies,
+        "onboarding": onboarding_state(cfg, token, cookies, disk_db, unlim_db),
         "disk": {
-            "db": db_stats(DB_FILE, "files", "remote_path"),
+            "db": disk_db,
             "local": local_size(cfg["download_dir"]),
         },
         "unlim": {
-            "db": db_stats(UNLIM_DB_FILE, "unlim_files", "file_id"),
+            "db": unlim_db,
             "local": local_size(os.path.join(cfg["download_dir"], "_unlim")),
         },
         "tasks": tm.status(),
@@ -1025,6 +1125,130 @@ def api_status():
         "free_space": _free_space(cfg["download_dir"]),
         "news": NEWS_LINKS,
     }
+
+
+# ── Логи: просмотр и архив для поддержки ────────────────────────────────────
+
+_LOG_NAME_RE = re.compile(r"^(tasks/)?[A-Za-z0-9_.-]+\.(log|jsonl)(\.\d+)?$")
+
+
+def _log_path(name: str) -> Path:
+    """Путь к файлу лога по имени из API. Только внутри logs/, только логи."""
+    if not _LOG_NAME_RE.match(name or ""):
+        raise HTTPException(400, "Недопустимое имя лога")
+    p = (LOG_DIR / name).resolve()
+    if LOG_DIR.resolve() not in p.parents:
+        raise HTTPException(400, "Недопустимое имя лога")
+    if not p.is_file():
+        raise HTTPException(404, "Лог не найден")
+    return p
+
+
+def list_logs() -> list[dict]:
+    out = []
+    if not LOG_DIR.exists():
+        return out
+    for p in sorted(LOG_DIR.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(LOG_DIR).as_posix()
+        if not _LOG_NAME_RE.match(rel):
+            continue
+        st = p.stat()
+        out.append({"name": rel, "size": st.st_size, "mtime": st.st_mtime})
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out
+
+
+def tail_file(path: Path, lines: int) -> list[str]:
+    """Последние N строк файла без чтения всего файла в память."""
+    lines = max(1, min(lines, 2000))
+    chunk = 64 * 1024
+    data = b""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        pos = f.tell()
+        while pos > 0 and data.count(b"\n") <= lines:
+            step = min(chunk, pos)
+            pos -= step
+            f.seek(pos)
+            data = f.read(step) + data
+    text = data.decode("utf-8", errors="replace")
+    return text.splitlines()[-lines:]
+
+
+@app.get("/api/logs")
+def api_logs():
+    return {"logs": list_logs(), "dir": str(LOG_DIR)}
+
+
+@app.get("/api/logs/tail")
+def api_logs_tail(name: str, lines: int = 200):
+    p = _log_path(name)
+    return {"name": name, "lines": tail_file(p, lines), "size": p.stat().st_size}
+
+
+def support_info() -> dict:
+    """Диагностика для поддержки: версия, окружение, конфиг без секретов, состояние БД и задач."""
+    cfg = get_config()
+    token = check_token(cfg["token"])
+    acc = token.get("account") or {}
+    return {
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "app_version": APP_VERSION,
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "config": {
+            "download_dir": cfg["download_dir"],
+            "download_dir_set": cfg["download_dir_set"],
+            "max_workers": cfg["max_workers"],
+            "token_masked": mask_token(cfg["token"]),
+            "token_ok": token.get("ok"),
+            "token_msg": token.get("msg"),
+            "login": acc.get("login"),
+            "disk_used": acc.get("used"),
+            "disk_total": acc.get("total"),
+            "photo_unlim": acc.get("photo_unlim"),
+            "is_paid": acc.get("is_paid"),
+        },
+        "cookies": check_cookies(),
+        "free_space": _free_space(cfg["download_dir"]),
+        "disk_db": db_stats(DB_FILE, "files", "remote_path"),
+        "unlim_db": db_stats(UNLIM_DB_FILE, "unlim_files", "file_id"),
+        "tasks": tm.status(),
+        "pipeline": pipeline.status(),
+        "diagnostics": diagnose_tasks(),
+        "yandex_health": health_monitor.snapshot() if health_monitor else None,
+    }
+
+
+def build_support_bundle() -> Path:
+    """ZIP со всеми логами и support-info.json — одним файлом в поддержку."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    # Старые архивы не копим
+    for old in LOG_DIR.glob("yadisk-logs-*.zip"):
+        try:
+            if time.time() - old.stat().st_mtime > 3600:
+                old.unlink()
+        except OSError:
+            pass
+    name = f"yadisk-logs-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+    bundle = LOG_DIR / name
+    with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as zf:
+        for entry in list_logs():
+            try:
+                zf.write(LOG_DIR / entry["name"], entry["name"])
+            except OSError:
+                pass
+        zf.writestr("support-info.json", json.dumps(support_info(), ensure_ascii=False, indent=2, default=str))
+    log.info("собран архив логов для поддержки: %s", name)
+    return bundle
+
+
+@app.get("/api/logs/bundle")
+def api_logs_bundle():
+    bundle = build_support_bundle()
+    return FileResponse(str(bundle), media_type="application/zip", filename=bundle.name)
 
 
 class StartPayload(BaseModel):
@@ -1142,7 +1366,9 @@ def api_set_token(payload: TokenPayload):
     _ensure_env_file()
     set_key(str(ENV_FILE), "YA_DISK_TOKEN", token, quote_mode="always")
     load_dotenv(ENV_FILE, override=True)
-    return {"ok": True, "check": check_token(token)}
+    check = check_token(token)
+    log.info("токен сохранён (%s): %s", mask_token(token), check.get("login") if check.get("ok") else check.get("msg"))
+    return {"ok": True, "check": check}
 
 
 @app.post("/api/config/token/clear")
@@ -1150,6 +1376,7 @@ def api_clear_token():
     if ENV_FILE.exists():
         set_key(str(ENV_FILE), "YA_DISK_TOKEN", "", quote_mode="never")
         load_dotenv(ENV_FILE, override=True)
+    log.info("токен удалён пользователем")
     return {"ok": True}
 
 
@@ -1162,11 +1389,13 @@ def api_set_dir(payload: DownloadDirPayload):
     d = (payload.download_dir or "").strip()
     ok, msg = is_safe_download_dir(d)
     if not ok:
+        log.warning("папка отклонена: %r — %s", d, msg)
         raise HTTPException(400, msg)
     _ensure_env_file()
     set_key(str(ENV_FILE), "DOWNLOAD_DIR", d, quote_mode="always")
     load_dotenv(ENV_FILE, override=True)
-    return {"ok": True, "download_dir": d}
+    log.info("папка скачивания сохранена: %s", d)
+    return {"ok": True, "download_dir": d, "free_space": _free_space(d)}
 
 
 class CookiesPayload(BaseModel):
@@ -1197,6 +1426,7 @@ def api_set_cookies(payload: CookiesPayload):
             except OSError:
                 pass
         raise HTTPException(500, f"Не удалось сохранить cookies.json: {e}")
+    log.info("cookies сохранены: %d шт", len(arr))
     return {"ok": True, "check": check_cookies(), "saved_count": len(arr)}
 
 
@@ -1207,6 +1437,7 @@ def api_clear_cookies():
             COOKIES_FILE.unlink()
         except OSError as e:
             return {"ok": False, "msg": str(e)}
+    log.info("cookies удалены пользователем")
     return {"ok": True}
 
 
@@ -1527,6 +1758,9 @@ def _open_browser_when_ready(host: str, port: int):
 def main():
     global health_monitor
     ensure_utf8_stdio()
+    _setup_logging()
+    log.info("webui v%s старт: python %s, %s, проект %s", APP_VERSION,
+             platform.python_version(), platform.platform(), PROJECT)
 
     import uvicorn
     url = f"http://{HOST}:{PORT}"
@@ -1535,7 +1769,7 @@ def main():
     health_monitor = HealthMonitor(token_getter=lambda: get_config()["token"], log_path=HEALTH_LOG)
     health_monitor.start()
     print("=" * 65)
-    print("  Yandex.Disk Backup — Web UI by Davron (PXSYS)")
+    print(f"  Yandex.Disk Backup — Web UI by Davron (PXSYS) · v{APP_VERSION}")
     print(f"  Адрес: {url}")
     print(f"  Telegram: {TELEGRAM_CHANNEL} (новости, помощь, статус Яндекса)")
     print(f"  YouTube: {YOUTUBE_VIDEO_URL}")

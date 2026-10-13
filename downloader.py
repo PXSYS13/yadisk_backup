@@ -92,6 +92,59 @@ def make_client(token: str) -> yadisk.Client:
     return yadisk.Client(token=token, default_args={"timeout": DEFAULT_TIMEOUT})
 
 
+def account_info(client: yadisk.Client) -> dict:
+    """Всё полезное, что API Яндекса сообщает об аккаунте: логин, место, безлимит, корзина, тариф."""
+    info = client.get_disk_info()
+    user = getattr(info, "user", None)
+
+    def g(obj, name, default=None):
+        v = getattr(obj, name, None) if obj is not None else None
+        return default if v is None else v
+
+    used = int(g(info, "used_space", 0))
+    total = int(g(info, "total_space", 0))
+    reg = g(user, "reg_time") or g(info, "reg_time")
+    return {
+        "login": g(user, "login", "?"),
+        "display_name": g(user, "display_name", ""),
+        "uid": str(g(user, "uid", "")),
+        "country": g(user, "country", ""),
+        "used": used,
+        "total": total,
+        "free": max(0, total - used),
+        "trash": int(g(info, "trash_size", 0)),
+        "photo_unlim": int(g(info, "photounlim_size", 0)),
+        "is_paid": bool(g(info, "is_paid", False)),
+        "unlimited_autoupload_enabled": bool(g(info, "unlimited_autoupload_enabled", False)),
+        "max_file_size": int(g(info, "max_file_size", 0)),
+        "reg_time": reg.isoformat() if hasattr(reg, "isoformat") else (str(reg) if reg else None),
+        "photo_unlim_until": g(info, "free_photounlim_end_date"),
+    }
+
+
+def describe_account(acc: dict) -> str:
+    """Одна строка про аккаунт — для консоли и логов."""
+    name = f" ({acc['display_name']})" if acc.get("display_name") else ""
+    tariff = "платный" if acc.get("is_paid") else "бесплатный"
+    return (
+        f"Аккаунт {acc.get('login', '?')}{name}: занято {human_bytes(acc.get('used', 0))} "
+        f"из {human_bytes(acc.get('total', 0))}, безлимит {human_bytes(acc.get('photo_unlim', 0))}, "
+        f"корзина {human_bytes(acc.get('trash', 0))}, {tariff} тариф"
+    )
+
+
+def api_error_details(e: BaseException) -> str:
+    """Что ещё сообщил API: код ошибки yadisk и HTTP-статус. Пусто, если ничего."""
+    parts = []
+    error_type = getattr(e, "error_type", None)
+    if error_type:
+        parts.append(f"error_type={error_type}")
+    status = getattr(getattr(e, "response", None), "status", None)
+    if status:
+        parts.append(f"http={status}")
+    return f" [{', '.join(parts)}]" if parts else ""
+
+
 def _is_retryable(exc: BaseException) -> bool:
     """Решает, стоит ли retry-ить исключение."""
     if isinstance(exc, NON_RETRYABLE) or is_local_disk_error(exc):
@@ -358,20 +411,21 @@ def _download_with_retry(client: yadisk.Client, remote: str, local: str) -> None
 def _describe_download_error(e: BaseException) -> str:
     """Текст ошибки для БД и логов. Префикс до ' | ' — категория, её читает диагностика Web UI."""
     name = type(e).__name__
+    api = api_error_details(e)
     if is_local_disk_error(e):
         # Проверяем ПЕРВЫМ: текст OSError содержит путь, а в пути бывает «500» или «notfound»
         return f"local_disk | {name}: {e} [ПРОБЛЕМА ЛОКАЛЬНОГО ДИСКА: место, права или отключённый диск]"
     if isinstance(e, yadisk.exceptions.TooManyRequestsError):
-        return f"rate_limit | 429 TooManyRequests (лимит Яндекса): {e}"
+        return f"rate_limit | 429 TooManyRequests (лимит Яндекса): {e}{api}"
     if isinstance(e, yadisk.exceptions.PathNotFoundError):
-        return f"PathNotFound: {e}"
+        return f"PathNotFound: {e}{api}"
     if isinstance(e, (yadisk.exceptions.UnauthorizedError, yadisk.exceptions.ForbiddenError)):
-        return f"auth_expired | {name}: {e}"
+        return f"auth_expired | {name}: {e}{api}"
     if isinstance(e, TIMEOUT_ERRORS):
-        return f"download_timeout | {name}: {e}"
+        return f"download_timeout | {name}: {e}{api}"
     if classify_yandex_error(e)["is_yandex_server"]:
-        return f"server_50x | {name} [СБОЙ СЕРВЕРА ЯНДЕКСА]: {e}"
-    return f"{name}: {e}"
+        return f"server_50x | {name} [СБОЙ СЕРВЕРА ЯНДЕКСА]: {e}{api}"
+    return f"{name}: {e}{api}"
 
 
 def _already_downloaded(job: DownloadJob, local_path: str) -> bool:
@@ -513,6 +567,13 @@ def download_all(
     if total_files == 0:
         log.info("Нет файлов для скачивания.")
         return counters
+    started = time.monotonic()
+    log.info(
+        "Старт download: workers=%d | папка=%s | в очереди %s файлов, %s",
+        workers, download_dir,
+        "?" if total_files is None else total_files,
+        "?" if total_bytes is None else human_bytes(total_bytes),
+    )
 
     # В терминале — tqdm-бары; в subprocess под Web UI (не TTY) они превращаются
     # в мусор из \r и escape-кодов, поэтому там печатаем простую строку прогресса.
@@ -598,6 +659,12 @@ def download_all(
         _close_all_clients()
         file_bar.close()
         byte_bar.close()
+        elapsed = max(0.001, time.monotonic() - started)
+        log.info(
+            "Итог download: скачано %d (%s), пропущено %d, ошибок %d за %.0f с, средняя %s/с",
+            counters["downloaded"], human_bytes(counters["bytes"]), counters["skipped"],
+            counters["failed"], elapsed, human_bytes(counters["bytes"] / elapsed),
+        )
 
     return counters
 
@@ -665,17 +732,16 @@ def check_token(token: str) -> tuple[bool, str]:
                 "Токен невалиден (Яндекс ответил, что он не работает). "
                 "Получи новый на https://yandex.ru/dev/disk/poligon/"
             )
-        info = cli.get_disk_info()
-        used = getattr(info, "used_space", 0) or 0
-        total = getattr(info, "total_space", 0) or 0
-        return True, f"Токен OK. Использовано {used / 1e9:.2f} ГБ из {total / 1e9:.2f} ГБ."
-    except yadisk.exceptions.UnauthorizedError:
+        acc = account_info(cli)
+        log.info("Токен OK. %s", describe_account(acc))
+        return True, f"Токен OK. {describe_account(acc)}."
+    except yadisk.exceptions.UnauthorizedError as e:
         return False, (
             "Токен не принят (401 Unauthorized). Получи новый на "
-            "https://yandex.ru/dev/disk/poligon/"
+            f"https://yandex.ru/dev/disk/poligon/{api_error_details(e)}"
         )
     except Exception as e:
-        return False, f"Не удалось проверить токен: {type(e).__name__}: {e}"
+        return False, f"Не удалось проверить токен: {type(e).__name__}: {e}{api_error_details(e)}"
     finally:
         if cli is not None:
             try:
