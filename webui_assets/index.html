@@ -1027,16 +1027,16 @@
 
   <div class="hero">
 
-    <div class="hero-title">Скачать всё</div>
-    <div class="hero-sub">Автоматически: сканирование, выбор файлов, скачивание</div>
-    <button id="big-start" class="big-btn" onclick="bigStart()">
-      <svg class="ico"><use href="#i-play"/></svg>Запустить
+    <div class="hero-title">Скачивание</div>
+    <div class="hero-sub">«Скачать всё» — сканирование, диск, затем безлимит, без вопросов. «Выбрать, что скачать» — по шагам: категории, объём, время.</div>
+    <button id="big-start" class="big-btn" onclick="bigStart()" title="Просканирует диск, скачает все файлы, затем соберёт и скачает безлимит">
+      <svg class="ico"><use href="#i-play"/></svg>Скачать всё
     </button>
-    <button id="big-stop" class="big-btn danger" style="display:none" onclick="bigStop()">
-      <svg class="ico"><use href="#i-stop"/></svg>Остановить
+    <button id="big-stop" class="big-btn danger" style="display:none" onclick="bigStop()" title="Останавливает все запущенные задачи; прогресс сохраняется">
+      <svg class="ico"><use href="#i-stop"/></svg>Остановить скачивание
     </button>
-    <button id="big-plan" class="big-btn" style="background:var(--surface2);color:var(--text);box-shadow:none;margin-left:10px" onclick="openWizard()">
-      <svg class="ico"><use href="#i-search"/></svg>План восстановления
+    <button id="big-plan" class="big-btn" style="background:var(--surface2);color:var(--text);box-shadow:none;margin-left:10px" onclick="openWizard()" title="Пошагово: проверка доступа → выбор категорий (фото, видео, документы) → объём и время → запуск">
+      <svg class="ico"><use href="#i-search"/></svg>Выбрать, что скачать
     </button>
     <div class="opts">
       <label class="opt-pill"><input type="checkbox" id="opt-disk" checked> Обычный диск</label>
@@ -1159,7 +1159,7 @@
         <li>Залогинься своим аккаунтом Яндекса</li>
         <li>Справа вверху: <strong>«Получить OAuth-токен»</strong></li>
         <li>Скопируй строку <code>y0_xxxx…</code>, вставь ниже</li>
-        <li>Сначала <strong>«Проверить»</strong>, потом <strong>«Сохранить»</strong> когда статус зелёный</li>
+        <li>Сначала <strong>«Проверить токен»</strong>, потом <strong>«Сохранить токен»</strong>, когда статус зелёный. Новый токен заменяет старый; «Удалить токен» — стирает его совсем.</li>
       </ol>
     </div>
 
@@ -1171,7 +1171,7 @@
           <div style="font-size:15px;font-weight:600" id="saved-token-login">—</div>
           <div style="font-size:12px;color:var(--text-secondary);font-family:'SF Mono',monospace;margin-top:2px" id="saved-token-masked">—</div>
         </div>
-        <button class="danger" onclick="clearToken()" style="padding:6px 12px;font-size:12px">Удалить</button>
+        <button class="danger" onclick="clearToken()" style="padding:6px 12px;font-size:12px" title="Стереть токен из .env; обычный диск перестанет скачиваться, пока не введёте новый">Удалить токен</button>
       </div>
       <div id="saved-token-account" style="font-size:12.5px;color:var(--text-secondary);margin-top:8px;line-height:1.5"></div>
     </div>
@@ -1179,13 +1179,13 @@
     <label class="field-label">Новый токен</label>
     <input type="password" id="token-input" placeholder="y0_AgAAA…">
     <div class="actions">
-      <button onclick="testToken()">
-        <svg class="ico-sm"><use href="#i-check"/></svg>Проверить
+      <button onclick="testToken()" title="Спросить у Яндекса, работает ли токен и чей это аккаунт; ничего не сохраняет">
+        <svg class="ico-sm"><use href="#i-check"/></svg>Проверить токен
       </button>
-      <button class="primary" id="btn-save-token" onclick="saveToken()" disabled>
-        <svg class="ico-sm"><use href="#i-save"/></svg>Сохранить
+      <button class="primary" id="btn-save-token" onclick="saveToken()" disabled title="Записать проверенный токен в .env (заменит прежний)">
+        <svg class="ico-sm"><use href="#i-save"/></svg>Сохранить токен
       </button>
-      <button class="ghost" onclick="toggleTokenView()">Показать</button>
+      <button class="ghost" onclick="toggleTokenView()">Показать / скрыть символы</button>
     </div>
     <hr>
     <div style="display:flex;justify-content:space-between;align-items:center;font-size:13.5px">
@@ -1218,7 +1218,7 @@
         <li>Установи <a href="https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm" target="_blank">расширение Cookie-Editor</a></li>
         <li>Открой <a href="https://disk.yandex.ru/client/disk" target="_blank">disk.yandex.ru</a> и залогинься</li>
         <li>Кликни на иконку Cookie-Editor → <strong>Export → Export as JSON</strong></li>
-        <li>Вставь JSON ниже → <strong>«Проверить»</strong> → потом <strong>«Сохранить»</strong></li>
+        <li>Вставь JSON ниже → <strong>«Проверить cookies»</strong> → потом <strong>«Сохранить cookies»</strong>. Новые cookies заменяют старые; «Удалить cookies» — стирает их совсем.</li>
       </ol>
       <span class="muted" style="font-size:12.5px">Куки сохраняются только локально, в git не попадают.</span>
     </div>
@@ -1228,18 +1228,18 @@
       <div style="font-size:12px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Сейчас сохранено</div>
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="font-size:14px" id="saved-cookies-count">—</div>
-        <button class="danger" onclick="clearCookies()" style="padding:6px 12px;font-size:12px">Удалить</button>
+        <button class="danger" onclick="clearCookies()" style="padding:6px 12px;font-size:12px" title="Стереть cookies.json; безлимит перестанет скачиваться, пока не добавите новые">Удалить cookies</button>
       </div>
     </div>
 
     <label class="field-label">JSON массив кук</label>
     <textarea id="cookies-input" placeholder='[{"name":"Session_id","value":"…","domain":".yandex.ru", …}, …]'></textarea>
     <div class="actions">
-      <button onclick="testCookies()">
-        <svg class="ico-sm"><use href="#i-check"/></svg>Проверить
+      <button onclick="testCookies()" title="Проверить, что в JSON есть обязательные куки; ничего не сохраняет">
+        <svg class="ico-sm"><use href="#i-check"/></svg>Проверить cookies
       </button>
-      <button class="primary" id="btn-save-cookies" onclick="saveCookies()" disabled>
-        <svg class="ico-sm"><use href="#i-save"/></svg>Сохранить
+      <button class="primary" id="btn-save-cookies" onclick="saveCookies()" disabled title="Записать проверенные cookies в cookies.json (заменит прежние)">
+        <svg class="ico-sm"><use href="#i-save"/></svg>Сохранить cookies
       </button>
     </div>
     <hr>
@@ -1712,7 +1712,7 @@
       <!-- Шаг 1: токен -->
       <div class="ob-step" data-step="1">
         <div class="ob-why">Токен нужен, чтобы программа скачивала <b>обычные файлы и папки</b> через официальный API Яндекс.Диска. Живёт около года, хранится только в вашем <code>.env</code>.</div>
-        <div id="ob-token-saved" class="task-banner done" style="display:none;margin:10px 0"><div class="task-banner-body"><div class="task-banner-title">Токен уже сохранён</div><div class="task-banner-sub" id="ob-token-saved-sub"></div></div></div>
+        <div id="ob-token-saved" class="task-banner done" style="display:none;margin:10px 0"><div class="task-banner-body"><div class="task-banner-title">Токен уже сохранён</div><div class="task-banner-sub" id="ob-token-saved-sub"></div><div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-sm" onclick="obGo(2)" title="Оставить этот токен и перейти к папке">Оставить и перейти дальше</button><button class="btn btn-sm" onclick="obClearToken()" style="color:var(--red);border-color:rgba(255,69,58,.4)" title="Стереть токен из .env">Удалить токен</button></div></div></div>
         <ol class="ob-list">
           <li>Откройте <a href="https://disk.yandex.ru" target="_blank" rel="noopener">disk.yandex.ru</a> и убедитесь, что вы вошли в <b>тот аккаунт</b>, который нужно сохранить.</li>
           <li>Откройте официальную страницу Полигона: <button class="btn btn-sm ob-inline" onclick="window.open('https://yandex.ru/dev/disk/poligon/','_blank','noopener')">Открыть Полигон ↗</button></li>
@@ -1723,8 +1723,8 @@
         <label class="field-label">Токен</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input type="password" id="ob-token" placeholder="y0_AgAAA…" style="flex:1;min-width:240px;margin:0" oninput="obTokenInput()">
-          <button class="btn" onclick="obToggleToken()">Показать</button>
-          <button class="btn" onclick="obCheckToken(this)">Проверить</button>
+          <button class="btn" onclick="obToggleToken()">Показать символы</button>
+          <button class="btn" onclick="obCheckToken(this)" title="Спросить у Яндекса, работает ли токен и чей это аккаунт; ничего не сохраняет">Проверить токен</button>
         </div>
         <div id="ob-token-result" style="margin-top:10px"></div>
         <details class="ob-help"><summary>Что-то пошло не так?</summary>
@@ -1750,7 +1750,7 @@
         <label class="field-label">Путь к папке</label>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <input type="text" id="ob-dir" placeholder="D:\YandexBackup" style="flex:1;min-width:240px;margin:0">
-          <button class="btn" style="background:var(--accent);color:#fff;border-color:transparent" onclick="obSaveDir(this)">Сохранить</button>
+          <button class="btn" style="background:var(--accent);color:#fff;border-color:transparent" onclick="obSaveDir(this)" title="Проверить путь, записать в .env и перейти дальше">Сохранить папку</button>
         </div>
         <div id="ob-dir-result" style="margin-top:10px"></div>
       </div>
@@ -1758,7 +1758,7 @@
       <!-- Шаг 3: cookies -->
       <div class="ob-step" data-step="3">
         <div class="ob-why">Фото и видео с телефона Яндекс хранит в скрытом <b>безлимите</b>, через API их не достать. Нужны cookies вашей веб-сессии — их экспортирует бесплатное расширение. Если безлимита у вас нет — шаг можно пропустить.</div>
-        <div id="ob-cookies-saved" class="task-banner done" style="display:none;margin:10px 0"><div class="task-banner-body"><div class="task-banner-title">Cookies уже сохранены</div><div class="task-banner-sub" id="ob-cookies-saved-sub"></div></div></div>
+        <div id="ob-cookies-saved" class="task-banner done" style="display:none;margin:10px 0"><div class="task-banner-body"><div class="task-banner-title">Cookies уже сохранены</div><div class="task-banner-sub" id="ob-cookies-saved-sub"></div><div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-sm" onclick="obGo(4)" title="Оставить эти cookies и перейти к скачиванию">Оставить и перейти дальше</button><button class="btn btn-sm" onclick="obClearCookies()" style="color:var(--red);border-color:rgba(255,69,58,.4)" title="Стереть cookies.json">Удалить cookies</button></div></div></div>
         <ol class="ob-list">
           <li>Установите расширение Cookie-Editor: <a href="https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm" target="_blank" rel="noopener">Chrome / Яндекс.Браузер / Edge / Opera</a> или <a href="https://addons.mozilla.org/ru/firefox/addon/cookie-editor/" target="_blank" rel="noopener">Firefox</a>.</li>
           <li>Откройте <a href="https://disk.yandex.ru/client/photo" target="_blank" rel="noopener">disk.yandex.ru/client/photo</a> и убедитесь, что видите свои фото.</li>
@@ -1768,9 +1768,9 @@
         <label class="field-label">JSON из Cookie-Editor</label>
         <textarea id="ob-cookies" placeholder='[{"name":"Session_id","value":"…"}, …]' style="min-height:90px;margin:0" oninput="obCookiesInput()"></textarea>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
-          <button class="btn" onclick="obCheckCookies(this)">Проверить</button>
-          <button class="btn" id="ob-cookies-save" style="background:var(--accent);color:#fff;border-color:transparent" onclick="obSaveCookies(this)" disabled>Сохранить</button>
-          <button class="btn" onclick="obSkipCookies()">Пропустить — безлимита нет</button>
+          <button class="btn" onclick="obCheckCookies(this)" title="Проверить, что в JSON есть обязательные куки; ничего не сохраняет">Проверить cookies</button>
+          <button class="btn" id="ob-cookies-save" style="background:var(--accent);color:#fff;border-color:transparent" onclick="obSaveCookies(this)" disabled title="Записать проверенные cookies в cookies.json">Сохранить cookies</button>
+          <button class="btn" onclick="obSkipCookies()" title="Безлимит скачиваться не будет; можно вернуться к этому шагу позже">Пропустить — безлимита нет</button>
         </div>
         <div id="ob-cookies-result" style="margin-top:10px"></div>
         <details class="ob-help"><summary>Что-то пошло не так?</summary>
@@ -1787,14 +1787,14 @@
         <div id="ob-summary"></div>
         <div class="grid-2" style="margin-top:14px">
           <div class="card" style="padding:14px 16px">
-            <div class="card-title" style="font-size:16px">План восстановления</div>
-            <div class="card-sub" style="margin-bottom:10px">Рекомендуется. Выберете, что качать первым (фото, видео, документы), увидите объём и время, запустите в щадящем режиме, если Яндекс сбоит.</div>
-            <button class="btn" style="background:var(--accent);color:#fff;border-color:transparent" onclick="closeOnboarding();openWizard()">Составить план</button>
+            <div class="card-title" style="font-size:16px">Выбрать, что скачать</div>
+            <div class="card-sub" style="margin-bottom:10px">Рекомендуется. Выберете категории (фото, видео, документы), увидите объём и время, запустите в щадящем режиме, если Яндекс сбоит.</div>
+            <button class="btn" style="background:var(--accent);color:#fff;border-color:transparent" onclick="closeOnboarding();openWizard()">Выбрать категории и скачать</button>
           </div>
           <div class="card" style="padding:14px 16px">
             <div class="card-title" style="font-size:16px">Скачать всё сразу</div>
             <div class="card-sub" style="margin-bottom:10px">Сканирование → скачивание диска → сбор безлимита → воркеры. Без выбора категорий.</div>
-            <button class="btn" onclick="closeOnboarding();bigStart()">Запустить всё</button>
+            <button class="btn" onclick="closeOnboarding();bigStart()">Скачать всё</button>
           </div>
         </div>
         <div class="muted" style="font-size:12.5px;margin-top:12px">Прогресс сохраняется в базе: можно закрывать программу и продолжать позже. Уже скачанные файлы не качаются повторно.</div>
@@ -1813,8 +1813,8 @@
   <div class="wizard" role="dialog" aria-modal="true">
     <div class="wizard-head">
       <div>
-        <div style="font-size:20px;font-weight:600;letter-spacing:-.02em">План восстановления</div>
-        <div style="font-size:13px;color:var(--text-secondary)">Проверим доступ, выберем что качать первым, оценим время и запустим в безопасном режиме</div>
+        <div style="font-size:20px;font-weight:600;letter-spacing:-.02em">Выборочное скачивание</div>
+        <div style="font-size:13px;color:var(--text-secondary)">Проверим доступ, выберем категории, оценим объём и время, запустим в щадящем режиме, если Яндекс сбоит</div>
       </div>
       <button class="btn" onclick="closeWizard()" style="padding:6px 12px">Закрыть</button>
     </div>
@@ -2739,8 +2739,27 @@ const OB_STEPS = [
   {key:'token',    title:'Токен Яндекс.Диска',    sub:'1 минута · для обычных файлов и папок'},
   {key:'dir',      title:'Папка для файлов',      sub:'куда сохранять бэкап'},
   {key:'cookies',  title:'Cookies для безлимита', sub:'опционально · фото и видео с телефона'},
-  {key:'download', title:'Скачать данные',        sub:'план восстановления или всё сразу'},
+  {key:'download', title:'Скачать данные',        sub:'всё сразу или только выбранные категории'},
 ];
+
+// Кнопки шага называем по действию: «Открыть» и «Изменить» ничего не объясняют
+function obStepActions(key, done, ob){
+  const btn = (label, js, extra='') => `<button class="btn btn-sm" style="padding:4px 10px;font-size:12px;${extra}" onclick="${js}">${label}</button>`;
+  const danger = 'color:var(--red);border-color:rgba(255,69,58,.4)';
+  switch(key){
+    case 'token':
+      return done
+        ? btn('Заменить токен', 'openOnboarding(1)') + btn('Удалить токен', 'clearToken()', danger)
+        : btn('Получить и ввести токен', 'openOnboarding(1)');
+    case 'dir':
+      return btn(done ? 'Сменить папку' : 'Выбрать папку', 'openOnboarding(2)');
+    case 'cookies':
+      if(ob.cookies) return btn('Обновить cookies', 'openOnboarding(3)') + btn('Удалить cookies', 'clearCookies()', danger);
+      return btn('Добавить cookies', 'openOnboarding(3)') + (obSkipped() ? '' : btn('Пропустить', 'obSkipCookies()'));
+    default:
+      return btn('Выбрать, что скачать', 'openWizard()') + btn('Скачать всё', 'bigStart()');
+  }
+}
 
 function renderOnboardingCard(s){
   _obStatus = s;
@@ -2767,13 +2786,11 @@ function renderOnboardingCard(s){
   document.getElementById('ob-steps').innerHTML = OB_STEPS.map((st, i) => {
     const cls = done[st.key] ? 'done' : (st.key === current ? 'current' : '');
     const badge = done[st.key] ? '<span class="badge ok">готово</span>'
-      : st.key === current ? '<span class="badge run">сейчас</span>' : '<span class="badge">потом</span>';
-    const action = st.key === 'download'
-      ? `openWizard()` : `openOnboarding(${i+1})`;
+      : st.key === current ? '<span class="badge run">текущий шаг</span>' : '<span class="badge">ещё не сделано</span>';
     return `<div class="ob-row ${cls}"><span class="ob-num">${done[st.key] ? '✓' : i+1}</span>
       <div style="flex:1;min-width:0"><div class="ob-row-title">${st.title}</div><div class="ob-row-sub">${subs[st.key]}</div></div>
       ${badge}
-      <button class="btn btn-sm" style="padding:4px 10px;font-size:12px" onclick="${action}">${done[st.key] ? 'Изменить' : 'Открыть'}</button></div>`;
+      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">${obStepActions(st.key, done[st.key], ob)}</div></div>`;
   }).join('');
 
   // Самый первый запуск: ничего не настроено — открываем мастер сами, один раз за сессию
@@ -2843,6 +2860,8 @@ function obRenderDynamic(){
 }
 
 function obToggleToken(){ const i = document.getElementById('ob-token'); i.type = i.type === 'password' ? 'text' : 'password' }
+async function obClearToken(){ await clearToken(); await refresh(); obRenderDynamic() }
+async function obClearCookies(){ await clearCookies(); await refresh(); obRenderDynamic() }
 function obTokenInput(){ _obVerifiedToken = null; document.getElementById('ob-token-result').innerHTML = '' }
 function obCookiesInput(){ _obVerifiedCookies = null; document.getElementById('ob-cookies-save').disabled = true }
 
@@ -3106,7 +3125,7 @@ function renderEstimate(){
       <div class="row" style="padding:10px 0"><div class="row-body"><div class="row-title">Настройки</div><div class="row-sub">потоков ${workers} · пачка ${batch} · попытки на файл 3 · при отказе Яндекса воркер ждёт сам</div></div></div>
     </div>
     <div style="display:flex;gap:10px;margin-top:14px;align-items:center">
-      <button class="big-btn" onclick="startPlan(this)" ${(_wzSel.do_disk || _wzSel.do_unlim) ? '' : 'disabled'}><svg class="ico"><use href="#i-play"/></svg>Запустить план</button>
+      <button class="big-btn" onclick="startPlan(this)" ${(_wzSel.do_disk || _wzSel.do_unlim) ? '' : 'disabled'} title="Запустить сканирование и скачивание выбранных категорий"><svg class="ico"><use href="#i-play"/></svg>Начать скачивание</button>
       <div class="muted" style="font-size:12.5px">${p.tasks_running || p.pipeline_running ? 'Сейчас идут задачи — сначала остановите их.' : 'Можно закрыть окно: ход будет на Главной.'}</div>
     </div>`;
   document.getElementById('wz-foot-note').textContent = `Шаг ${_wzStep} из 4`;
@@ -3126,7 +3145,7 @@ async function startPlan(btn){
     const {err} = await postJSON('/api/plan/start', body);
     if(err){ toast(err,'err'); if(btn) btn.disabled = false; return }
     requestNotificationPermission();
-    toast('План запущен','ok');
+    toast('Скачивание запущено','ok');
     closeWizard();
     switchTab('home');
     refresh();
