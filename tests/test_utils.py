@@ -212,14 +212,20 @@ def test_resolve_local_path_deterministic_collision_resolution(tmp_path):
 
 
 def test_resolve_local_path_windows_case_collision(tmp_path):
-    from utils import resolve_local_path
+    from utils import IS_WINDOWS, resolve_local_path
 
     out_dir = str(tmp_path / "downloads")
     existing: set[str] = set()
     p1 = resolve_local_path(out_dir, "disk:/docs/file.txt", existing_paths=existing)
     p2 = resolve_local_path(out_dir, "disk:/docs/FILE.txt", existing_paths=existing)
 
-    assert p1.lower() != p2.lower()
+    assert p1 != p2
+    if IS_WINDOWS:
+        # NTFS не различает регистр — второй файл обязан получить хеш-суффикс
+        assert p1.lower() != p2.lower()
+    else:
+        # На case-sensitive ФС это разные файлы, суффикс не нужен
+        assert p1.lower() == p2.lower()
 
 
 def test_is_safe_download_dir(tmp_path):
