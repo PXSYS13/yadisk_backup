@@ -623,6 +623,64 @@ def test_outage_streak_stops_burning_attempts(db, quiet_worker, sleeps):
     assert sleeps[-1] == uw.OUTAGE_PAUSES_SEC[0]
 
 
+def test_rate_limit_is_not_reported_as_disabled_bulk(db, quiet_worker, sleeps, capsys):
+    """Ровно случай из лога: серия 429 — это лимит запросов, а не отключённая функция."""
+    con = sqlite3.connect(db)
+    con.executemany("INSERT INTO unlim_files (file_id, name, size) VALUES (?, ?, ?)",
+                    [(str(i), f"f{i}.jpg", 10) for i in range(3, 8)])
+    con.commit()
+    con.close()
+    err = uw.PrepareError("rate_limit", "HTTP 429 Too Many Requests", 429)
+    for _ in range(uw.OUTAGE_STREAK_THRESHOLD):
+        (item,) = uw.take_batch(1, size=1)
+        quiet_worker._on_prepare_failed([item], err)
+        assert status_of(db, item["file_id"])[1] == 0  # 429 не сжигает попытки
+
+    out = capsys.readouterr().out
+    assert "bulk_unavailable" not in out
+    assert "массовое скачивание ограничено" not in out
+    assert "rate_limit | Яндекс 5 пачек подряд" in out
+    # Пауза растёт и не меньше базовой для 429
+    assert sleeps[-1] >= uw.RATE_LIMIT_BASE_PAUSE_SEC
+    assert max(sleeps) == uw.RATE_LIMIT_MAX_PAUSE_SEC or max(sleeps) > uw.RATE_LIMIT_BASE_PAUSE_SEC
+
+
+def test_rate_limit_sets_shared_cooldown_for_all_workers(db, quiet_worker):
+    assert uw.shared_cooldown_remaining() == 0  # таблицы ещё нет — паузы нет
+    (item,) = uw.take_batch(1, size=1)
+    quiet_worker._on_prepare_failed([item], uw.PrepareError("rate_limit", "HTTP 429", 429))
+    remaining = uw.shared_cooldown_remaining()
+    assert uw.RATE_LIMIT_BASE_PAUSE_SEC - 2 < remaining <= uw.RATE_LIMIT_BASE_PAUSE_SEC
+    # Более короткая пауза не укорачивает уже назначенную
+    uw.set_shared_cooldown(5)
+    assert uw.shared_cooldown_remaining() > 30
+
+
+def test_prepare_429_keeps_body_and_retry_after():
+    class Resp:
+        status_code = 429
+        text = '{"error":{"id":"TooManyRequests","title":"Слишком много запросов"}}'
+        headers = {"Retry-After": "120", "Content-Type": "application/json"}
+
+    class S:
+        def post(self, *a, **k):
+            return Resp()
+
+    url, err = uw.prepare_zip(S(), "sk", "1", ["p"])
+    assert url is None and err.kind == "rate_limit"
+    assert err.retry_after == 120 and err.retry_delay == 120
+    assert "Слишком много запросов" in str(err)  # тело ответа попадает в лог
+    assert "t.me" not in str(err)
+
+
+def test_outage_cause_follows_the_failures(quiet_worker):
+    w = quiet_worker
+    w._streak_causes.update({"server": 3, "rate_limit": 1})
+    assert w._dominant_cause("rate_limit") == "server"
+    w._streak_causes.update({"rate_limit": 2})
+    assert w._dominant_cause("rate_limit") == "rate_limit"
+
+
 def test_outage_gives_up_after_an_hour(db, quiet_worker):
     quiet_worker._fail_streak = uw.OUTAGE_STREAK_THRESHOLD
     quiet_worker._streak_files = {"a", "b", "c"}

@@ -1905,7 +1905,7 @@ async function postJSON(url, body){
 // Коды выхода дочерних скриптов (см. unlim_worker.py / main.py)
 const EXIT_EXPLAIN = {
   2: 'куки или токен устарели — обновите их в настройках',
-  3: 'Яндекс не отдаёт ZIP-архивы (массовое скачивание ограничено) — повторите позже',
+  3: 'Яндекс больше часа не отдаёт ZIP-архивы (отказ, лимит запросов или сбой серверов) — запустите позже',
   4: 'на локальном диске нет места',
 };
 function taskStopped(task){ return !!task && (task.was_stopped || isStopped(task.exit_code)) }
@@ -3310,7 +3310,9 @@ function updateUnlimBanner(tasks){
       for(const l of tail.slice().reverse()){
         const m = /batch\s+(\d+):\s*✓\s*(\d+)(?:\/\d+)?\s*files\s*\/\s*([\d.]+)\s*GB/i.exec(l);
         if(m){last = `последний batch w${w.replace('unlim_w','')}: ${m[2]} файлов, ${m[3]} ГБ`; break}
-        if(/bulk_unavailable/.test(l)) waiting = 'Яндекс не отдаёт архивы — жду с паузами, попытки не сжигаю';
+        if(!waiting && /rate_limit \| /.test(l)) waiting = 'Яндекс просит реже обращаться (429): общая пауза для всех воркеров, продолжу сам';
+        if(!waiting && /bulk_unavailable/.test(l)) waiting = 'Яндекс не отдаёт архивы: жду с паузами, попытки не сжигаю';
+        if(!waiting && /server_50x \| Яндекс \d+ пачек/.test(l)) waiting = 'Серверы Яндекса сбоят: жду с паузами, попытки не сжигаю';
       }
       if(last) break;
     }

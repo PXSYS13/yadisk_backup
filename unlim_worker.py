@@ -24,10 +24,11 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import time
 import zipfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import NamedTuple
@@ -41,6 +42,7 @@ from unlim_common import (
     LOG_DIR,
     UNLIM_DB_FILE,
     AuthExpiredError,
+    connect_unlim_db,
     ensure_attempts_column as common_ensure_attempts,
     get_sk_uid,
     make_cid,
@@ -85,6 +87,9 @@ OUTAGE_STREAK_THRESHOLD = 5
 OUTAGE_MIN_DISTINCT_FILES = 3
 OUTAGE_PAUSES_SEC = (30, 60, 120, 300, 600, 900)
 OUTAGE_GIVE_UP_SEC = 3600
+# 429 от Яндекса: пауза растёт 45 → 90 → 180 … до 10 минут и действует на ВСЕ воркеры
+RATE_LIMIT_BASE_PAUSE_SEC = 45
+RATE_LIMIT_MAX_PAUSE_SEC = 600
 # Столько подряд проверок «нет места на диске» — выходим с кодом 4
 DISK_FULL_GIVE_UP = 10
 # Сколько подряд пустых выборок из очереди — и воркер завершает работу
@@ -275,6 +280,44 @@ def reset_failed() -> int:
     return reset_failed_files(DB_FILE)
 
 
+# ── Общая пауза по лимиту запросов (429) ────────────────────────────────────
+# Воркеры — отдельные процессы. Если пауза только у того, кто получил 429,
+# остальные продолжают долбить Яндекс и тоже получают 429. Поэтому момент
+# окончания паузы хранится в БД и его соблюдают все.
+
+
+def _ensure_meta(c) -> None:
+    c.execute("CREATE TABLE IF NOT EXISTS unlim_meta (key TEXT PRIMARY KEY, value TEXT)")
+
+
+def set_shared_cooldown(seconds: float) -> float:
+    """Продлевает общую паузу минимум на seconds. Возвращает момент её окончания (epoch)."""
+    until = time.time() + seconds
+    with _tx() as c:
+        _ensure_meta(c)
+        row = c.execute("SELECT value FROM unlim_meta WHERE key='cooldown_until'").fetchone()
+        current = float(row[0]) if row else 0.0
+        if until > current:
+            c.execute(
+                "INSERT INTO unlim_meta (key, value) VALUES ('cooldown_until', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (repr(until),),
+            )
+        return max(until, current)
+
+
+def shared_cooldown_remaining() -> float:
+    """Сколько секунд ещё действует общая пауза (0 — паузы нет)."""
+    c = connect_unlim_db(DB_FILE)
+    try:
+        row = c.execute("SELECT value FROM unlim_meta WHERE key='cooldown_until'").fetchone()
+    except sqlite3.OperationalError:  # старая БД без таблицы — паузы нет
+        return 0.0
+    finally:
+        c.close()
+    return max(0.0, float(row[0]) - time.time()) if row else 0.0
+
+
 def queue_summary() -> str:
     """Состояние очереди одной строкой — для старта воркера и логов."""
     try:
@@ -308,6 +351,7 @@ class PrepareError:
     kind: str
     text: str
     status: int | None = None
+    retry_after: float | None = None  # заголовок Retry-After, если Яндекс его прислал
 
     def __str__(self) -> str:
         return f"{self.kind} | {self.text}"
@@ -325,12 +369,22 @@ class PrepareError:
     def retry_delay(self) -> float:
         """Пауза перед следующей пачкой, сек."""
         if self.kind == "rate_limit":
-            return 45
+            return max(RATE_LIMIT_BASE_PAUSE_SEC, self.retry_after or 0)
         if self.kind == "timeout" or self.status == 504:
             return 15
         if self.kind in ("server_50x", "refused"):
             return 10
         return 5
+
+
+def _retry_after_sec(r) -> float | None:
+    """Retry-After в секундах, если Яндекс его прислал числом."""
+    headers = getattr(r, "headers", None) or {}
+    try:
+        value = float(headers.get("Retry-After"))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def _prepare_http_error(r) -> PrepareError:
@@ -345,7 +399,13 @@ def _prepare_http_error(r) -> PrepareError:
         return err
     trace = response_trace(r)
     if code == 429:
-        err = PrepareError("rate_limit", f"HTTP 429 Too Many Requests (Rate limit Яндекса). Новости: {TELEGRAM_CHANNEL}{trace}", code)
+        retry_after = _retry_after_sec(r)
+        hint = f", просит подождать {int(retry_after)} с" if retry_after else ""
+        err = PrepareError(
+            "rate_limit",
+            f"HTTP 429 Too Many Requests: Яндекс просит реже обращаться{hint}{trace}. Ответ: {r.text[:200]}",
+            code, retry_after,
+        )
     elif code == 504:
         err = PrepareError("server_50x", f"HTTP 504 Gateway Timeout (Сервер Яндекса не успел упаковать ZIP по тайм-ауту){trace}", code)
     elif code in (500, 502, 503):
@@ -731,6 +791,26 @@ def split_by_extracted(batch: list[dict], extracted: Iterable[tuple]) -> SplitRe
 # ── Цикл воркера ────────────────────────────────────────────────────────────
 
 
+# Категория сбоя → как объяснить человеку серию одинаковых отказов
+_OUTAGE_TEXT = {
+    "rate_limit": ("rate_limit",
+                   "Яндекс ограничивает частоту запросов (HTTP 429). Функция не отключена, просто нужно "
+                   "обращаться реже. Если повторяется, оставьте 1–2 воркера."),
+    "server": ("server_50x",
+               "Серверы Яндекса сбоят или перегружены (ошибки 50x, таймауты, обрывы связи)."),
+    "refused": ("bulk_unavailable",
+                "Похоже, массовое скачивание ограничено на стороне Яндекса."),
+}
+
+
+def _failure_cause(kind: str) -> str:
+    if kind == "rate_limit":
+        return "rate_limit"
+    if kind in ("server_50x", "timeout", "connection"):
+        return "server"
+    return "refused"  # not_zip, refused, prepare_failed, invalid_json, bad_zip, missing
+
+
 class Worker:
     """Один процесс-воркер: берёт пачки из очереди, пока очередь не опустеет."""
 
@@ -749,6 +829,9 @@ class Worker:
         # Подряд идущие пачки без единого файла (любая причина) — предохранитель
         self._fail_streak = 0
         self._streak_files: set[str] = set()
+        self._streak_causes: Counter[str] = Counter()
+        self._rate_limit_streak = 0
+        self._cooldown_said_at = 0.0
         self._last_success_at = time.monotonic()
         self._disk_full_streak = 0
         self._last_heartbeat = 0.0
@@ -784,6 +867,13 @@ class Worker:
     def run(self) -> int:
         empty_polls = 0
         while True:
+            wait = shared_cooldown_remaining()
+            if wait > 0:
+                if time.monotonic() - self._cooldown_said_at > 60:
+                    self._cooldown_said_at = time.monotonic()
+                    self.say(f"rate_limit | общая пауза по лимиту Яндекса (429): жду ещё {int(wait)} с")
+                time.sleep(min(wait, 30))
+                continue
             batch = take_batch(self.id, self.batch_size)
             if not batch:
                 empty_polls += 1
@@ -863,7 +953,7 @@ class Worker:
         else:
             self._refresh_auth()
 
-        self._on_batch_failed(batch, str(err), err.is_server_issue, err.retry_delay)
+        self._on_batch_failed(batch, str(err), err.is_server_issue, err.retry_delay, err.kind)
 
     def _on_downloaded(self, batch: list[dict], result: FetchResult, dur: float) -> None:
         failure = result.failure
@@ -887,11 +977,13 @@ class Worker:
         reason = str(failure) if failure else "архив пришёл без нужных файлов"
         self.say(f"batch {self.batch_idx}: ⚠️ Сбой отдачи архива узлом Яндекса ({len(batch)} файлов): {reason}")
         server_issue = failure.is_server_issue if failure else False
-        self._on_batch_failed(batch, reason, server_issue, 5)
+        self._on_batch_failed(batch, reason, server_issue, 5, failure.kind if failure else "missing")
 
     def _on_batch_success(self, batch: list[dict], res: SplitResult, dur: float) -> None:
         self._fail_streak = 0
         self._streak_files.clear()
+        self._streak_causes.clear()
+        self._rate_limit_streak = 0
         self._last_success_at = time.monotonic()
         # Пачка прошла — постепенно восстанавливаем размер к целевому
         if self.batch_size < self.target_batch:
@@ -913,29 +1005,45 @@ class Worker:
         self.say(f"batch {self.batch_idx}: ✓ {len(res.done)}/{len(batch)} files / "
                  f"{done_bytes / 1e9:.2f} GB ({mbps:.1f} MB/s, {int(dur)}s{tail})")
 
-    def _on_batch_failed(self, batch: list[dict], reason: str, server_issue: bool, delay: float) -> None:
+    def _on_batch_failed(self, batch: list[dict], reason: str, server_issue: bool,
+                         delay: float, kind: str = "other") -> None:
         """Пачка не дала ни одного файла. Решает, кто виноват, и что делать дальше."""
         self._fail_streak += 1
         ids = [it["file_id"] for it in batch]
         self._streak_files.update(str(i) for i in ids)
+        cause = _failure_cause(kind)
+        self._streak_causes[cause] += 1
+
+        if cause == "rate_limit":
+            # 429: пауза растёт с каждым ответом подряд и действует на все воркеры
+            self._rate_limit_streak += 1
+            grown = RATE_LIMIT_BASE_PAUSE_SEC * 2 ** (self._rate_limit_streak - 1)
+            delay = max(delay, min(RATE_LIMIT_MAX_PAUSE_SEC, grown))
+            set_shared_cooldown(delay)
+            self.say(f"rate_limit | Яндекс просит реже обращаться (HTTP 429). "
+                     f"Общая пауза для всех воркеров: {int(delay)} с")
 
         outage = (
             self._fail_streak >= OUTAGE_STREAK_THRESHOLD
             and len(self._streak_files) >= OUTAGE_MIN_DISTINCT_FILES
         )
         if outage:
-            # Системный отказ: Яндекс не отдаёт архивы вообще. Попытки файлов не сжигаем.
+            # Системный отказ: Яндекс не отдаёт архивы по одной причине раз за разом.
+            # Попытки файлов не сжигаем, пауза растёт, диагноз — по реальной причине.
             _release_to_pending(ids, self.id)
             self._shrink_batch()
             idx = min(self._fail_streak - OUTAGE_STREAK_THRESHOLD, len(OUTAGE_PAUSES_SEC) - 1)
-            pause = OUTAGE_PAUSES_SEC[idx]
+            pause = max(OUTAGE_PAUSES_SEC[idx], delay)
+            if cause == "rate_limit":
+                set_shared_cooldown(pause)
             without_success = time.monotonic() - self._last_success_at
-            self.say(f"bulk_unavailable | Яндекс {self._fail_streak} пачек подряд не отдал архив. Последняя причина: {reason}")
-            self.say(f"Похоже, массовое скачивание ограничено на стороне Яндекса. Попытки файлов не сжигаю, "
-                     f"пауза {pause} с (без успеха уже {int(without_success // 60)} мин).")
+            prefix, explain = _OUTAGE_TEXT[self._dominant_cause(cause)]
+            self.say(f"{prefix} | Яндекс {self._fail_streak} пачек подряд не отдал архив. Последняя причина: {reason}")
+            self.say(f"{explain} Попытки файлов не сжигаю, пауза {int(pause)} с "
+                     f"(без успеха уже {int(without_success // 60)} мин).")
             if without_success >= OUTAGE_GIVE_UP_SEC:
-                self.say(f"bulk_unavailable | Выход: Яндекс не отдаёт архивы больше часа. "
-                         f"Это ограничение на стороне Яндекса, повторите позже. Новости: {TELEGRAM_CHANNEL}")
+                self.say(f"{prefix} | Выход: Яндекс больше часа не отдаёт архивы. {explain} "
+                         f"Запустите скачивание позже. Новости: {TELEGRAM_CHANNEL}")
                 self._exit(EXIT_OUTAGE)
             time.sleep(pause)
             return
@@ -952,6 +1060,13 @@ class Worker:
         time.sleep(delay)
 
     # ── вспомогательное ──
+
+    def _dominant_cause(self, last: str) -> str:
+        """Чаще всего встречавшаяся причина в текущей серии; при равенстве — последняя."""
+        top = max(self._streak_causes.values(), default=0)
+        if self._streak_causes.get(last) == top:
+            return last
+        return self._streak_causes.most_common(1)[0][0] if self._streak_causes else last
 
     def _shrink_batch(self) -> None:
         """Адаптивно уменьшает пачку при сбоях (25 → 12 → 6 → 1), снижая нагрузку на Яндекс."""

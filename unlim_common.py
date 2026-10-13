@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS unlim_clusters (
     size INTEGER,
     fetched INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS unlim_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -260,6 +264,8 @@ def ensure_attempts_column(db_path: str | None = None) -> None:
             cols.add("attempts")
         if {"status", "attempts", "assigned_at"}.issubset(cols):
             c.execute("CREATE INDEX IF NOT EXISTS idx_unlim_pending ON unlim_files(status, attempts, assigned_at)")
+        # Общие для всех воркеров значения (например, пауза по 429)
+        c.execute("CREATE TABLE IF NOT EXISTS unlim_meta (key TEXT PRIMARY KEY, value TEXT)")
         c.commit()
     finally:
         c.close()
