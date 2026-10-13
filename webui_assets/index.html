@@ -773,6 +773,65 @@
     0%,100%{box-shadow: 0 6px 20px rgba(255,55,95,.35);}
     50%{box-shadow: 0 10px 32px rgba(255,55,95,.65);}
   }
+
+  /* ── Статус Яндекса / объяснение проблемы ── */
+  .yx-banner{display:none;border-radius:14px;padding:16px 18px;margin-bottom:18px;border:0.5px solid rgba(255,159,10,.4);background:rgba(255,159,10,.09)}
+  .yx-banner.show{display:block}
+  .yx-banner.down{border-color:rgba(255,69,58,.45);background:rgba(255,69,58,.1)}
+  .yx-banner.ok{border-color:rgba(48,209,88,.35);background:rgba(48,209,88,.08);padding:12px 18px}
+  .yx-banner-head{display:flex;align-items:flex-start;gap:12px}
+  .yx-banner-title{font-weight:600;font-size:15px;color:var(--yellow);margin-bottom:4px}
+  .yx-banner.down .yx-banner-title{color:var(--red)}
+  .yx-banner.ok .yx-banner-title{color:var(--green);margin-bottom:0}
+  .yx-banner-text{font-size:13.5px;color:var(--text-secondary);line-height:1.45}
+  .yx-affects{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0 10px}
+  .yx-affects:empty,.yx-links:empty,.yx-reco:empty{display:none}
+  .yx-affect{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:99px;background:var(--surface);border:0.5px solid var(--hairline-strong);font-size:13px}
+  .yx-affect .dot{width:8px;height:8px;border-radius:50%;background:var(--text-tertiary)}
+  .yx-affect.ok .dot{background:var(--green);box-shadow:0 0 8px rgba(48,209,88,.5)}
+  .yx-affect.wait .dot{background:var(--orange);box-shadow:0 0 8px rgba(255,159,10,.5)}
+  .yx-affect.fail .dot{background:var(--red);box-shadow:0 0 8px rgba(255,69,58,.5)}
+  .yx-reco{font-size:13.5px;color:var(--text);line-height:1.45;margin-top:4px}
+  .yx-links{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .yx-links a{font-size:12.5px;padding:6px 12px;border-radius:99px;border:0.5px solid var(--hairline-strong);color:var(--accent);text-decoration:none;background:var(--surface)}
+  .probe-grid{display:grid;gap:14px;grid-template-columns:1fr 1fr;margin-bottom:16px}
+  @media(max-width:720px){.probe-grid{grid-template-columns:1fr}}
+  .probe-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px}
+  .probe-name{font-weight:600;font-size:15px}
+  .probe-url{font-size:12px;color:var(--text-tertiary)}
+  .probe-stats{display:flex;gap:18px;margin:12px 0 10px;flex-wrap:wrap}
+  .probe-stat{min-width:70px}
+  .probe-stat .v{font-size:20px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .probe-stat .l{font-size:11.5px;color:var(--text-tertiary);margin-top:2px}
+  .timeline{display:flex;gap:1px;height:28px;align-items:stretch;margin-top:8px}
+  .tl-bar{flex:1;border-radius:1px;background:var(--surface3);min-width:0}
+  .tl-bar.ok{background:var(--green)} .tl-bar.deg{background:var(--yellow)} .tl-bar.down{background:var(--red)}
+  .tl-ticks{display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-tertiary);margin-top:4px}
+  .counter-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(110px,1fr))}
+  .counter{background:var(--surface2);border-radius:10px;padding:10px 12px}
+  .counter .v{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+  .counter .l{font-size:11.5px;color:var(--text-tertiary)}
+
+  /* ── Мастер «План восстановления» ── */
+  .wizard{background:var(--surface);border:0.5px solid var(--hairline-strong);border-radius:18px;width:min(900px,96vw);max-height:92vh;display:flex;flex-direction:column;overflow:hidden;text-align:left}
+  .wizard-head{padding:18px 22px 0;display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  .wizard-body{padding:16px 22px;overflow:auto;flex:1}
+  .wizard-foot{padding:12px 22px;border-top:0.5px solid var(--hairline);display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .stepper{display:flex;gap:6px;margin:14px 0 4px}
+  .step{flex:1;padding:8px 10px;border-radius:10px;background:var(--surface2);font-size:13px;color:var(--text-tertiary);display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+  .step .n{width:22px;height:22px;border-radius:50%;background:var(--surface3);display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:var(--text-secondary);flex-shrink:0}
+  .step.active{background:rgba(10,132,255,.14);color:var(--text)} .step.active .n{background:var(--accent);color:#fff}
+  .step.done{color:var(--text-secondary)} .step.done .n{background:var(--green);color:#000}
+  .wz-step{display:none} .wz-step.active{display:block}
+  .tile-grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin:8px 0 14px}
+  .tile{background:var(--surface2);border-radius:12px;padding:12px 14px}
+  .tile .v{font-size:21px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .tile .l{font-size:12px;color:var(--text-tertiary);margin-top:2px}
+  .check-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:0.5px solid var(--hairline);font-size:14px;flex-wrap:wrap}
+  .check-row:last-child{border-bottom:none}
+  .check-row .dot{width:9px;height:9px;border-radius:50%;background:var(--text-tertiary);flex-shrink:0}
+  .check-row.ok .dot{background:var(--green)} .check-row.warn .dot{background:var(--orange)} .check-row.err .dot{background:var(--red)}
+  .check-row .sub{color:var(--text-tertiary);font-size:12.5px;margin-left:auto}
 </style>
 
 <!-- SVG sprite -->
@@ -894,6 +953,7 @@
   <div class="tab" data-tab="setup">Настройка</div>
   <div class="tab" data-tab="disk">Диск</div>
   <div class="tab" data-tab="photos">Безлимит</div>
+  <div class="tab" data-tab="status">Статус Яндекса</div>
   <div class="tab" data-tab="organize">Сортировка</div>
   <div class="tab" data-tab="donate">❤️ Поддержать</div>
 </div>
@@ -915,7 +975,22 @@
     </a>
   </div>
 
+  <!-- Live Diagnostics Banner -->
+  <div id="diagnostics-card" class="yx-banner">
+    <div class="yx-banner-head">
+      <div style="font-size:22px;line-height:1" id="diag-icon">⚠️</div>
+      <div style="flex:1;min-width:0">
+        <div class="yx-banner-title" id="diag-title">—</div>
+        <div class="yx-banner-text" id="diag-explain">—</div>
+        <div class="yx-affects" id="diag-affects"></div>
+        <div class="yx-reco" id="diag-rec"></div>
+        <div class="yx-links" id="diag-links"></div>
+      </div>
+    </div>
+  </div>
+
   <div class="hero">
+
     <div class="hero-title">Скачать всё</div>
     <div class="hero-sub">Автоматически: сканирование, выбор файлов, скачивание</div>
     <button id="big-start" class="big-btn" onclick="bigStart()">
@@ -923,6 +998,9 @@
     </button>
     <button id="big-stop" class="big-btn danger" style="display:none" onclick="bigStop()">
       <svg class="ico"><use href="#i-stop"/></svg>Остановить
+    </button>
+    <button id="big-plan" class="big-btn" style="background:var(--surface2);color:var(--text);box-shadow:none;margin-left:10px" onclick="openWizard()">
+      <svg class="ico"><use href="#i-search"/></svg>План восстановления
     </button>
     <div class="opts">
       <label class="opt-pill"><input type="checkbox" id="opt-disk" checked> Обычный диск</label>
@@ -970,6 +1048,34 @@
 </div>
 
 <!-- ============= НАСТРОЙКА ============= -->
+<div class="panel" data-panel="status">
+  <div class="card" style="padding:14px 18px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+    <div>
+      <div style="font-weight:600;font-size:15px" id="yx-overall-title">Серверы Яндекса</div>
+      <div style="font-size:13px;color:var(--text-secondary)" id="yx-overall-sub">проверка ещё не выполнялась</div>
+    </div>
+    <span class="pill" id="yx-overall-pill"><span class="dot"></span><span id="yx-overall-pill-text">нет данных</span></span>
+  </div>
+
+  <div class="probe-grid" id="yx-probes"></div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title" style="font-size:16px">Массовое скачивание (ZIP)</div>
+      <div class="card-sub" style="margin-bottom:10px">Так работает безлимит: Яндекс собирает архив из пачки файлов.</div>
+      <div id="yx-bulk-state" class="badge">нет данных</div>
+      <div id="yx-bulk-sub" style="font-size:12.5px;color:var(--text-secondary);margin-top:10px;line-height:1.45">Станет известно после первого запуска воркеров безлимита.</div>
+    </div>
+    <div class="card">
+      <div class="card-title" style="font-size:16px">Ошибки задач</div>
+      <div class="card-sub" style="margin-bottom:10px">По последним строкам логов запущенных задач.</div>
+      <div class="counter-grid" id="yx-counters"></div>
+    </div>
+  </div>
+
+  <div class="muted" style="font-size:12.5px">Пробы выполняются с вашего компьютера раз в минуту: один GET к REST API и один к веб-версии Диска. История хранится локально в <code>logs/yandex_health.jsonl</code>.</div>
+</div>
+
 <div class="panel" data-panel="setup">
 
   <div class="card" style="background:linear-gradient(135deg,rgba(10,132,255,.08),rgba(41,182,246,.04));border-color:rgba(10,132,255,.2);margin-bottom:14px;padding:14px 18px">
@@ -1231,7 +1337,11 @@
       <button class="primary" onclick="downloadSelected('unlim', this)">
         <svg class="ico-sm"><use href="#i-arrow-down"/></svg>Скачать выбранное
       </button>
-      <span class="muted" style="font-size:13px">Воркеров: <input type="number" id="unlim-workers" value="4" min="1" max="6" style="width:50px;text-align:center;padding:4px;background:var(--surface2);color:var(--text);border:0.5px solid var(--hairline-strong);border-radius:6px"></span>
+      <button id="unlim-retry-btn" class="btn" onclick="retryUnlim(this)" style="display:none;border-color:rgba(255,159,10,.4);color:var(--yellow)">
+        <svg class="ico-sm"><use href="#i-refresh"/></svg>Повторить ошибки
+      </button>
+      <span class="muted" style="font-size:13px">Воркеров: <input type="number" id="unlim-workers" value="4" min="1" max="6" style="width:45px;text-align:center;padding:4px;background:var(--surface2);color:var(--text);border:0.5px solid var(--hairline-strong);border-radius:6px"></span>
+      <span class="muted" style="font-size:13px;margin-left:6px">Пачка: <input type="number" id="unlim-batch" value="25" min="1" max="80" style="width:45px;text-align:center;padding:4px;background:var(--surface2);color:var(--text);border:0.5px solid var(--hairline-strong);border-radius:6px" title="Количество файлов в одном архиве Яндекса. Рекомендуется 15–25 при сбоях"></span>
       <button class="danger" onclick="clearDb('unlim')" style="margin-left:auto">
         <svg class="ico-sm"><use href="#i-stop"/></svg>Очистить и заново
       </button>
@@ -1533,6 +1643,37 @@
   </div>
 </div>
 
+<!-- Мастер «План восстановления» -->
+<div id="wizard-backdrop" class="modal-backdrop" onclick="if(event.target===this) closeWizard()">
+  <div class="wizard" role="dialog" aria-modal="true">
+    <div class="wizard-head">
+      <div>
+        <div style="font-size:20px;font-weight:600;letter-spacing:-.02em">План восстановления</div>
+        <div style="font-size:13px;color:var(--text-secondary)">Проверим доступ, выберем что качать первым, оценим время и запустим в безопасном режиме</div>
+      </div>
+      <button class="btn" onclick="closeWizard()" style="padding:6px 12px">Закрыть</button>
+    </div>
+    <div class="wizard-body">
+      <div class="stepper">
+        <div class="step active" data-step="1" onclick="wizardGo(1)"><span class="n">1</span>Доступ</div>
+        <div class="step" data-step="2" onclick="wizardGo(2)"><span class="n">2</span>Что качать</div>
+        <div class="step" data-step="3" onclick="wizardGo(3)"><span class="n">3</span>Оценка</div>
+        <div class="step" data-step="4" onclick="wizardGo(4)"><span class="n">4</span>Запуск</div>
+      </div>
+      <div id="wz-loading" class="muted" style="padding:18px 0">Собираю данные…</div>
+      <div class="wz-step" data-step="1"><div id="wz-access"></div></div>
+      <div class="wz-step" data-step="2"><div id="wz-select"></div></div>
+      <div class="wz-step" data-step="3"><div id="wz-estimate"></div></div>
+      <div class="wz-step" data-step="4"><div id="wz-launch"></div></div>
+    </div>
+    <div class="wizard-foot">
+      <button class="btn" id="wz-back" onclick="wizardGo(_wzStep-1)">Назад</button>
+      <div style="font-size:12.5px;color:var(--text-tertiary)" id="wz-foot-note"></div>
+      <button class="btn" id="wz-next" onclick="wizardGo(_wzStep+1)" style="background:var(--accent);color:#fff;border-color:transparent">Далее</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ────── helpers ──────
 function human(b){
@@ -1550,12 +1691,48 @@ function dur(s){
   return `${ss}с`;
 }
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+let _toastTimer = null;
 function toast(msg, type='ok'){
   const t=document.getElementById('toast');
   t.textContent=msg; t.className=type;
   t.classList.add('show');
-  setTimeout(()=>t.classList.remove('show'), 3000);
+  if(_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(()=>t.classList.remove('show'), 3000);
 }
+
+// Лимиты совпадают с бэкендом (utils.MAX_*): атрибуты min/max у input не мешают
+// ввести 100 руками, а сервер ответит 422 — клампим до отправки
+const LIMITS = {unlimWorkers: 6, batch: 80, diskWorkers: 5};
+function clampInt(id, def, min, max){
+  const el = document.getElementById(id);
+  let v = parseInt(el ? el.value : '', 10);
+  if(!Number.isFinite(v)) v = def;
+  v = Math.min(max, Math.max(min, v));
+  if(el && String(v) !== el.value) el.value = v;
+  return v;
+}
+
+// Единая трактовка ответа: 4xx/5xx и {ok:false} — ошибка; detail pydantic (422) — текстом
+function apiError(r, d){
+  if(r && r.ok && d && d.ok !== false) return null;
+  if(d && typeof d.detail === 'string') return d.detail;
+  if(d && Array.isArray(d.detail)) return d.detail.map(x => x.msg || JSON.stringify(x)).join('; ');
+  return (d && d.msg) || (r ? `HTTP ${r.status}` : 'Ошибка');
+}
+async function postJSON(url, body){
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  let d = null;
+  try { d = await r.json() } catch(e){}
+  return {r, d, err: apiError(r, d)};
+}
+
+// Коды выхода дочерних скриптов (см. unlim_worker.py / main.py)
+const EXIT_EXPLAIN = {
+  2: 'куки или токен устарели — обновите их в настройках',
+  3: 'Яндекс не отдаёт ZIP-архивы (массовое скачивание ограничено) — повторите позже',
+  4: 'на локальном диске нет места',
+};
+function taskStopped(task){ return !!task && (task.was_stopped || isStopped(task.exit_code)) }
 
 // ────── tabs ──────
 function switchTab(name){
@@ -1818,17 +1995,18 @@ document.addEventListener('DOMContentLoaded', ()=>{
 async function testToken(){
   const tok=document.getElementById('token-input').value.trim();
   if(!tok){toast('Введи токен','err');return}
-  const r=await fetch('/api/config/token/check',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok})});
-  const d=await r.json();
-  if(d.ok){
-    _verifiedToken = tok;
-    document.getElementById('btn-save-token').disabled = false;
-    toast(`Токен валиден: ${d.login} · ${human(d.used)} занято`, 'ok');
-  } else {
-    _verifiedToken = null;
-    document.getElementById('btn-save-token').disabled = true;
-    toast('Токен невалиден: '+d.msg, 'err');
-  }
+  try {
+    const {d, err} = await postJSON('/api/config/token/check', {token:tok});
+    if(!err && d.ok){
+      _verifiedToken = tok;
+      document.getElementById('btn-save-token').disabled = false;
+      toast(`Токен валиден: ${d.login} · ${human(d.used)} занято`, 'ok');
+    } else {
+      _verifiedToken = null;
+      document.getElementById('btn-save-token').disabled = true;
+      toast('Токен невалиден: '+(err || d.msg), 'err');
+    }
+  } catch(e){ toast('Сеть: '+e.message,'err') }
 }
 
 async function saveToken(){
@@ -1837,16 +2015,17 @@ async function saveToken(){
   if(_verifiedToken !== tok){
     toast('Сначала «Проверить»','err'); return;
   }
-  const r=await fetch('/api/config/token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok})});
-  const d=await r.json();
-  if(d.check?.ok){
-    toast('Сохранено: '+d.check.login,'ok');
-    document.getElementById('token-input').value='';
-    _verifiedToken = null;
-    document.getElementById('btn-save-token').disabled = true;
-  } else {
-    toast(d.check?.msg||'Ошибка','err');
-  }
+  try {
+    const {d, err} = await postJSON('/api/config/token', {token:tok});
+    if(!err && d.check?.ok){
+      toast('Сохранено: '+d.check.login,'ok');
+      document.getElementById('token-input').value='';
+      _verifiedToken = null;
+      document.getElementById('btn-save-token').disabled = true;
+    } else {
+      toast(err || d.check?.msg || 'Ошибка','err');
+    }
+  } catch(e){ toast('Сеть: '+e.message,'err') }
   refresh();
 }
 
@@ -1863,9 +2042,10 @@ async function clearToken(){
 async function saveDir(){
   const dir=document.getElementById('dir-input').value.trim();
   if(!dir){toast('Пусто','err');return}
-  const r=await fetch('/api/config/download_dir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({download_dir:dir})});
-  const d=await r.json();
-  if(d.ok){toast('Сохранено','ok')} else {toast('Ошибка','err')}
+  try {
+    const {err} = await postJSON('/api/config/download_dir', {download_dir:dir});
+    if(err){ toast(err,'err') } else { toast('Сохранено','ok') }
+  } catch(e){ toast('Сеть: '+e.message,'err') }
   refresh();
 }
 
@@ -1907,15 +2087,14 @@ async function saveCookies(){
     toast('Сначала «Проверить»','err'); return;
   }
   try {
-    const r=await fetch('/api/cookies',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cookies:arr})});
-    const d=await r.json();
-    if(d.ok){
+    const {d, err} = await postJSON('/api/cookies', {cookies:arr});
+    if(!err && d.ok){
       toast(`Сохранено ${d.saved_count} куки`,'ok');
       document.getElementById('cookies-input').value='';
       _verifiedCookies = null;
       document.getElementById('btn-save-cookies').disabled = true;
     } else {
-      toast(d.check?.msg||'Ошибка','err');
+      toast(err || d.check?.msg || 'Ошибка','err');
     }
   } catch(e){toast('Сеть: '+e.message,'err')}
   refresh();
@@ -1935,20 +2114,24 @@ async function clearCookies(){
 async function bigStart(){
   requestNotificationPermission();
   const opts = {
-    workers: +document.getElementById('opt-workers').value || 4,
+    workers: clampInt('opt-workers', 4, 1, LIMITS.unlimWorkers),
     do_disk: document.getElementById('opt-disk').checked,
     do_unlim: document.getElementById('opt-unlim').checked,
   };
-  const r=await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(opts)});
-  const d=await r.json();
-  if(d.ok===false){toast(d.msg,'err')} else {toast('Запущено','ok')}
+  if(!opts.do_disk && !opts.do_unlim){ toast('Выбери хотя бы одно: диск или безлимит','err'); return }
+  try {
+    const {err} = await postJSON('/api/start', opts);
+    if(err){ toast(err,'err') } else { toast('Запущено','ok') }
+  } catch(e){ toast('Сеть: '+e.message,'err') }
   refresh();
 }
 async function bigStop(){
   if(!confirm('Остановить выполнение?')) return;
-  const r=await fetch('/api/start/stop',{method:'POST'});
-  const d=await r.json();
-  toast(d.msg, d.ok?'ok':'err');
+  try {
+    const r=await fetch('/api/start/stop',{method:'POST'});
+    const d=await r.json();
+    toast(d.msg, d.ok?'ok':'err');
+  } catch(e){ toast('Сеть: '+e.message,'err') }
   refresh();
 }
 
@@ -1957,11 +2140,15 @@ async function action(name, btn){
   const map={
     disk_scan:['POST','/api/disk/scan'],
     disk_stop:['POST','/api/disk/stop'],
+    disk_retry:['POST','/api/disk/retry'],
     unlim_collect:['POST','/api/unlim/collect'],
     unlim_stop:['POST','/api/unlim/stop'],
     organize_stop:['POST','/api/organize/stop'],
   };
   const [m,url] = map[name];
+  // Запоминаем, что именно запущено в слоте disk — scan и download живут в одном слоте
+  if(name === 'disk_scan') _diskTaskKind = 'scan';
+  if(name === 'disk_retry') _diskTaskKind = 'download';
 
   // Сразу показать живой отклик прежде чем ждать сервер
   if(name === 'disk_scan' || name === 'unlim_collect'){
@@ -1990,7 +2177,10 @@ async function action(name, btn){
   try{
     const r=await fetch(url,{method:m});
     const d=await r.json();
-    if(d.ok===false){toast(d.msg||'Ошибка','err')} else {toast(d.msg||'Запущено','ok')}
+    const err = apiError(r, d);
+    if(err){ toast(err,'err') }
+    else if('stopped' in d){ toast(d.stopped > 0 ? `Остановлено задач: ${d.stopped}` : 'Нет активных задач', d.stopped > 0 ? 'ok' : 'err') }
+    else { toast(d.msg||'Запущено','ok') }
   } catch(e){
     toast('Сеть: '+e.message,'err');
   }
@@ -2024,10 +2214,20 @@ async function organize(actionType, btn){
   }
 
   try {
-    const r=await fetch('/api/organize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({input:inp, action:actionType})});
-    const d=await r.json();
-    toast(d.msg, d.ok===false?'err':'ok');
+    const {d, err} = await postJSON('/api/organize', {input:inp, action:actionType});
+    if(err){
+      // Не запустилось — баннер «идёт» не должен висеть вечно
+      banner.className = 'task-banner err';
+      document.getElementById('organize-title').innerHTML = '<span style="color:var(--red)">Не запущено</span>';
+      document.getElementById('organize-sub').textContent = err;
+      toast(err,'err');
+    } else {
+      toast(d.msg || 'Запущено','ok');
+    }
   } catch(e){
+    banner.className = 'task-banner err';
+    document.getElementById('organize-title').innerHTML = '<span style="color:var(--red)">Не запущено</span>';
+    document.getElementById('organize-sub').textContent = 'Сеть: '+e.message;
     toast('Сеть: '+e.message,'err');
   }
   refresh();
@@ -2035,8 +2235,7 @@ async function organize(actionType, btn){
 
 let _organizePath = '';
 let _organizeAction = 'report-only';
-let _diskDownloadPath = '';
-let _unlimDownloadPath = '';
+let _diskTaskKind = null;   // 'scan' | 'download' — что запущено в слоте disk
 
 // ────── Preview / selective ──────
 const CAT_META = {
@@ -2055,10 +2254,14 @@ let selectedCats = {disk:{...DEFAULT_SELECTED}, unlim:{...DEFAULT_SELECTED}};
 
 async function refreshPreview(kind){
   const url = kind === 'disk' ? '/api/disk/preview' : '/api/unlim/preview';
-  const r = await fetch(url);
-  const d = await r.json();
+  let d;
+  try {
+    const r = await fetch(url);
+    d = await r.json();
+  } catch(e){ console.warn('preview', e); return }
   const card = document.getElementById(`${kind}-preview-card`);
   const list = document.getElementById(`${kind}-preview-list`);
+  if(d.error) toast(`БД ${kind === 'disk' ? 'диска' : 'безлимита'}: ${d.error}`, 'err');
   if(d.empty){
     card.style.display = 'none';
     return;
@@ -2152,9 +2355,13 @@ async function downloadSelected(kind, btn){
   const cats = Object.keys(selectedCats[kind]).filter(k => selectedCats[kind][k]);
   if(cats.length === 0){toast('Ничего не выбрано','err');return}
   const workers = kind === 'unlim'
-    ? (+document.getElementById('unlim-workers').value || 4)
+    ? clampInt('unlim-workers', 4, 1, LIMITS.unlimWorkers)
     : 4;
+  const batch = kind === 'unlim'
+    ? clampInt('unlim-batch', 25, 1, LIMITS.batch)
+    : 25;
   const url = kind === 'disk' ? '/api/disk/download_selected' : '/api/unlim/download_selected';
+  if(kind === 'disk') _diskTaskKind = 'download';
 
   // Сразу показать live-баннер
   const banner = document.getElementById(`${kind}-download-banner`);
@@ -2162,8 +2369,9 @@ async function downloadSelected(kind, btn){
   banner.className = 'task-banner';
   document.getElementById(`${kind}-download-title`).textContent =
     kind === 'disk' ? 'Скачиваю обычный диск…' : 'Скачиваю безлимит…';
+  const batchInfo = kind === 'unlim' ? ` · пачка: ${batch}` : '';
   document.getElementById(`${kind}-download-sub`).innerHTML =
-    `Категории: ${cats.map(c => CAT_META[c]?.label || c).join(', ')} · потоков: ${workers}`;
+    `Категории: ${cats.map(c => CAT_META[c]?.label || c).join(', ')} · потоков: ${workers}${batchInfo}`;
   document.getElementById(`${kind}-download-time`).textContent = '0с';
   setTimeout(()=>banner.scrollIntoView({behavior:'smooth', block:'center'}), 50);
 
@@ -2175,11 +2383,324 @@ async function downloadSelected(kind, btn){
   }
 
   try {
-    const r = await fetch(url, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({categories:cats, workers})});
-    const d = await r.json();
-    toast(d.ok===false ? (d.msg||'Ошибка') : 'Скачивание запущено', d.ok===false?'err':'ok');
+    const payload = kind === 'unlim'
+      ? {categories: cats, workers, batch}
+      : {categories: cats, workers};
+    const {d, err} = await postJSON(url, payload);
+    const msg = err || workersStartError(d);
+    if(msg){
+      toast(msg,'err');
+      banner.className = 'task-banner err';
+      document.getElementById(`${kind}-download-title`).innerHTML = '<span style="color:var(--red)">Не запущено</span>';
+      document.getElementById(`${kind}-download-sub`).textContent = msg;
+    } else {
+      toast(Array.isArray(d.started) ? `Запущено воркеров: ${d.started.length}` : 'Скачивание запущено','ok');
+    }
   } catch(e){toast('Сеть: '+e.message,'err')}
   refresh();
+}
+
+// Ответ {ok:true, started:[], failed:[...]} — формально ok, но ни один воркер не стартовал
+function workersStartError(d){
+  if(!d || !Array.isArray(d.started)) return null;
+  if(d.started.length) return null;
+  return (d.failed && d.failed[0] && d.failed[0].msg) || 'Воркеры уже запущены';
+}
+
+async function retryUnlim(btn){
+  requestNotificationPermission();
+  const workers = clampInt('unlim-workers', 4, 1, LIMITS.unlimWorkers);
+  const batch = clampInt('unlim-batch', 25, 1, LIMITS.batch);
+  if(btn){
+    if(!btn.dataset.origHtml) btn.dataset.origHtml = btn.innerHTML;
+    btn.classList.add('loading');
+    btn.innerHTML = '<div class="spinner spinner-sm" style="margin-right:6px"></div>Сброс…';
+    setTimeout(()=>{btn.classList.remove('loading'); btn.innerHTML = btn.dataset.origHtml}, 1800);
+  }
+  try {
+    const {d, err} = await postJSON('/api/unlim/retry', {workers, batch});
+    const msg = err || workersStartError(d);
+    toast(msg || `Ошибки сброшены, запущено воркеров: ${d.started.length}`, msg ? 'err' : 'ok');
+  } catch(e){toast('Сеть: '+e.message,'err')}
+  refresh();
+}
+
+// ────── Статус Яндекса: баннер причины + вкладка ──────
+const STATE_LABEL = {ok:'Работает', degraded:'Деградация', down:'Недоступен', unknown:'Нет данных'};
+const STATE_PILL = {ok:'ok', degraded:'run', down:'err', unknown:''};
+function pct(v){ return v == null ? '—' : `${v}%` }
+function agoText(sec){ if(sec == null) return 'ещё не проверялось'; if(sec < 60) return `проверено ${sec} с назад`; return `проверено ${Math.round(sec/60)} мин назад` }
+
+function renderTimeline(tl){
+  if(!tl || !tl.length) return '<div class="muted" style="font-size:12px">история появится через несколько минут</div>';
+  const bars = tl.map(b => {
+    const r = b.ok_ratio;
+    const cls = r == null ? '' : r >= 0.99 ? 'ok' : r >= 0.5 ? 'deg' : 'down';
+    const t = new Date(b.t * 1000);
+    const title = r == null ? 'нет проб' : `${t.getHours()}:${String(t.getMinutes()).padStart(2,'0')} · ${Math.round(r*100)}% успешных`;
+    return `<div class="tl-bar ${cls}" title="${title}"></div>`;
+  }).join('');
+  return `<div class="timeline">${bars}</div><div class="tl-ticks"><span>−24 ч</span><span>−12 ч</span><span>сейчас</span></div>`;
+}
+
+function renderProbes(health){
+  const box = document.getElementById('yx-probes');
+  if(!box) return;
+  if(!health || !health.probes || !health.probes.length){
+    box.innerHTML = '<div class="card muted">Монитор запускается вместе с сервером и делает первую проверку в течение минуты.</div>';
+    return;
+  }
+  box.innerHTML = health.probes.map(p => {
+    const av = p.availability || {};
+    return `<div class="card">
+      <div class="probe-head">
+        <div><div class="probe-name">${esc(p.label)}</div><div class="probe-url">${esc(p.url.replace(/^https?:\/\//,'').replace(/\/.*$/,''))}</div></div>
+        <span class="pill ${STATE_PILL[p.state]||''}"><span class="dot"></span>${STATE_LABEL[p.state]||p.state}</span>
+      </div>
+      <div class="probe-url">${agoText(p.checked_ago_sec)}${p.last && p.last.error ? ' · ' + esc(p.last.error) : ''}</div>
+      <div class="probe-stats">
+        <div class="probe-stat"><div class="v">${pct(av['10m'])}</div><div class="l">за 10 минут</div></div>
+        <div class="probe-stat"><div class="v">${pct(av['1h'])}</div><div class="l">за час</div></div>
+        <div class="probe-stat"><div class="v">${pct(av['24h'])}</div><div class="l">за сутки</div></div>
+        <div class="probe-stat"><div class="v">${p.latency_ms_p50 == null ? '—' : p.latency_ms_p50.toLocaleString('ru') + ' мс'}</div><div class="l">задержка</div></div>
+      </div>
+      ${renderTimeline(p.timeline)}
+    </div>`;
+  }).join('');
+}
+
+const COUNTER_LABELS = {bulk_disabled:'отказ архива', server_50x:'50x', rate_limit:'429', timeout:'таймауты', auth_expired:'401/403', local_disk:'локальный диск', prepare_failed:'сборка ZIP'};
+
+function updateYandexStatus(s){
+  const diag = s.diagnostics || {};
+  const health = s.yandex_health;
+  const overall = (health && health.overall) || 'unknown';
+
+  // 1. Баннер на Главной: приоритет у диагностики задач (она знает про bulk), иначе — пробы
+  const card = document.getElementById('diagnostics-card');
+  if(card){
+    const links = (diag.links || s.news || []);
+    if(diag.kind){
+      const down = diag.kind === 'auth_expired' || diag.kind === 'local_disk';
+      card.className = 'yx-banner show' + (down ? ' down' : '');
+      document.getElementById('diag-icon').textContent = down ? '⛔' : '⚠️';
+      document.getElementById('diag-title').textContent = diag.title || diag.message || '';
+      document.getElementById('diag-explain').textContent = diag.explain || diag.message || '';
+      document.getElementById('diag-affects').innerHTML = (diag.affects || []).map(a =>
+        `<span class="yx-affect ${esc(a.state)}"><span class="dot"></span>${esc(a.what)}: ${esc(a.text)}</span>`).join('');
+      document.getElementById('diag-rec').textContent = diag.recommendation ? 'Что делать: ' + diag.recommendation : '';
+      document.getElementById('diag-links').innerHTML = links.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>`).join('');
+    } else if(overall === 'down' || overall === 'degraded'){
+      card.className = 'yx-banner show' + (overall === 'down' ? ' down' : '');
+      document.getElementById('diag-icon').textContent = overall === 'down' ? '⛔' : '⚠️';
+      document.getElementById('diag-title').textContent = overall === 'down' ? 'Серверы Яндекса не отвечают' : 'Яндекс отвечает с перебоями';
+      document.getElementById('diag-explain').textContent = 'Пробы с вашего компьютера видят ошибки или медленные ответы. Скрипт не сломан: он ждёт и повторяет, данные не теряются.';
+      document.getElementById('diag-affects').innerHTML = (health.probes||[]).map(p =>
+        `<span class="yx-affect ${p.state==='ok'?'ok':p.state==='down'?'fail':'wait'}"><span class="dot"></span>${esc(p.label)}: ${STATE_LABEL[p.state]||p.state}</span>`).join('');
+      document.getElementById('diag-rec').textContent = 'Что делать: ничего, можно оставить скачивание включённым. Подробности на вкладке «Статус Яндекса».';
+      document.getElementById('diag-links').innerHTML = links.map(l => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>`).join('');
+    } else if(overall === 'ok'){
+      card.className = 'yx-banner show ok';
+      document.getElementById('diag-icon').textContent = '✅';
+      document.getElementById('diag-title').textContent = 'Серверы Яндекса отвечают нормально';
+      const p = health.probes || [];
+      document.getElementById('diag-explain').textContent = p.map(x => `${x.label}: ${pct((x.availability||{})['1h'])} за час`).join(' · ');
+      document.getElementById('diag-affects').innerHTML = '';
+      document.getElementById('diag-rec').textContent = '';
+      document.getElementById('diag-links').innerHTML = '';
+    } else {
+      card.className = 'yx-banner';
+    }
+  }
+
+  // 2. Вкладка «Статус Яндекса»
+  const pill = document.getElementById('yx-overall-pill');
+  if(pill){
+    pill.className = 'pill ' + (STATE_PILL[overall] || '');
+    document.getElementById('yx-overall-pill-text').textContent = STATE_LABEL[overall] || overall;
+    document.getElementById('yx-overall-sub').textContent = health ? (health.summary || '') : 'монитор запускается вместе с сервером';
+  }
+  renderProbes(health);
+
+  const bulk = document.getElementById('yx-bulk-state');
+  if(bulk){
+    const counts = diag.counts || {};
+    const tasks = s.tasks || {};
+    const workersAlive = Object.keys(tasks).some(k => k.startsWith('unlim_w') && tasks[k].running);
+    const lastOk = Object.keys(tasks).filter(k=>k.startsWith('unlim_w')).some(k => (tasks[k].log_tail||[]).some(l => /✓\s*\d+(?:\/\d+)?\s*files/.test(l)));
+    if(diag.kind === 'bulk_disabled' || counts.bulk_disabled){
+      bulk.className = 'badge err'; bulk.textContent = 'Отключено Яндексом';
+      document.getElementById('yx-bulk-sub').textContent = 'Яндекс не отдаёт архивы. Воркер ждёт растущими паузами и не сжигает попытки файлов; обычный диск через REST API работает.';
+    } else if(lastOk){
+      bulk.className = 'badge ok'; bulk.textContent = 'Работает';
+      document.getElementById('yx-bulk-sub').textContent = 'Архивы собираются и скачиваются.';
+    } else if(workersAlive){
+      bulk.className = 'badge run'; bulk.textContent = 'Проверяется';
+      document.getElementById('yx-bulk-sub').textContent = 'Воркеры запущены, первая пачка ещё не завершилась.';
+    } else {
+      bulk.className = 'badge'; bulk.textContent = 'Нет данных';
+      document.getElementById('yx-bulk-sub').textContent = 'Станет известно после первого запуска воркеров безлимита.';
+    }
+    const cbox = document.getElementById('yx-counters');
+    const keys = Object.keys(COUNTER_LABELS);
+    cbox.innerHTML = keys.map(k => `<div class="counter"><div class="v" style="color:${(counts[k]||0) ? 'var(--orange)' : 'var(--text)'}">${(counts[k]||0).toLocaleString('ru')}</div><div class="l">${COUNTER_LABELS[k]}</div></div>`).join('');
+  }
+}
+
+// ────── Мастер «План восстановления» ──────
+let _wzStep = 1;
+let _wzPlan = null;
+let _wzSel = {disk: {...DEFAULT_SELECTED}, unlim: {...DEFAULT_SELECTED}, do_disk: true, do_unlim: true, gentle: true};
+
+function openWizard(){
+  document.getElementById('wizard-backdrop').classList.add('show');
+  _wzStep = 1;
+  wizardGo(1);
+  loadPlan();
+}
+function closeWizard(){ document.getElementById('wizard-backdrop').classList.remove('show') }
+
+async function loadPlan(){
+  document.getElementById('wz-loading').style.display = 'block';
+  try {
+    const r = await fetch('/api/plan');
+    _wzPlan = await r.json();
+    _wzSel.gentle = !!(_wzPlan.recommended && _wzPlan.recommended.gentle);
+    _wzSel.do_disk = !!(_wzPlan.access.token && _wzPlan.access.token.ok);
+    _wzSel.do_unlim = !!(_wzPlan.access.cookies && _wzPlan.access.cookies.ok);
+    renderWizard();
+  } catch(e){
+    document.getElementById('wz-access').innerHTML = `<div class="task-banner err">Не удалось получить данные: ${esc(e.message)}</div>`;
+  } finally {
+    document.getElementById('wz-loading').style.display = 'none';
+  }
+}
+
+function wizardGo(n){
+  n = Math.max(1, Math.min(4, n));
+  _wzStep = n;
+  document.querySelectorAll('.step').forEach(el => {
+    const k = +el.dataset.step;
+    el.className = 'step' + (k === n ? ' active' : k < n ? ' done' : '');
+  });
+  document.querySelectorAll('.wz-step').forEach(el => el.classList.toggle('active', +el.dataset.step === n));
+  document.getElementById('wz-back').style.visibility = n === 1 ? 'hidden' : 'visible';
+  const next = document.getElementById('wz-next');
+  next.style.display = n === 4 ? 'none' : 'inline-flex';
+  if(_wzPlan) renderWizard();
+}
+
+function catRows(kind, preview){
+  const cats = (preview && preview.categories) || {};
+  const rows = Object.keys(CAT_META).filter(k => cats[k] && cats[k].count > 0);
+  if(!rows.length) return `<div class="muted" style="font-size:13px">Список ещё не собран — мастер запустит ${kind === 'disk' ? 'сканирование диска' : 'сбор безлимита'} автоматически; по умолчанию качаем фото и видео.</div>`;
+  return rows.map(k => {
+    const m = CAT_META[k], c = cats[k];
+    return `<div class="row">
+      <div class="row-icon ${m.cls}"><svg class="icat"><use href="#${m.icon}"/></svg></div>
+      <div class="row-body"><div class="row-title">${m.label}</div><div class="row-sub">${c.count.toLocaleString('ru')} файлов · ${human(c.bytes)}</div></div>
+      <div class="toggle ${_wzSel[kind][k] ? 'on' : ''}" onclick="_wzSel['${kind}']['${k}']=!_wzSel['${kind}']['${k}'];this.classList.toggle('on');renderEstimate()"></div>
+    </div>`;
+  }).join('');
+}
+
+function selectedBytes(kind){
+  const cats = (_wzPlan[kind].preview && _wzPlan[kind].preview.categories) || {};
+  let bytes = 0, count = 0;
+  for(const k of Object.keys(_wzSel[kind])) if(_wzSel[kind][k] && cats[k]){ bytes += cats[k].bytes; count += cats[k].count }
+  return {bytes, count};
+}
+
+function renderWizard(){
+  const p = _wzPlan;
+  const tok = p.access.token || {}, ck = p.access.cookies || {}, h = p.access.health;
+  const hstate = (h && h.overall) || 'unknown';
+  const hcls = hstate === 'ok' ? 'ok' : hstate === 'unknown' ? '' : hstate === 'down' ? 'err' : 'warn';
+  const diagLine = p.diagnostics && p.diagnostics.title ? `<div class="task-banner" style="margin-top:12px"><div class="task-banner-body"><div class="task-banner-title">${esc(p.diagnostics.title)}</div><div class="task-banner-sub">${esc(p.diagnostics.recommendation||'')}</div></div></div>` : '';
+  document.getElementById('wz-access').innerHTML = `
+    <div class="check-row ${tok.ok ? 'ok' : 'err'}"><span class="dot"></span>OAuth-токен: ${tok.ok ? 'валиден (' + esc(tok.login||'') + ')' : 'нет — обычный диск недоступен'}<span class="sub"><a href="#" onclick="closeWizard();switchTab('setup');return false" style="color:var(--accent)">настроить</a></span></div>
+    <div class="check-row ${ck.ok ? 'ok' : 'warn'}"><span class="dot"></span>Cookies: ${ck.ok ? 'загружены (' + (ck.count||0) + ' шт)' : 'нет — безлимит недоступен'}<span class="sub"><a href="#" onclick="closeWizard();switchTab('setup');return false" style="color:var(--accent)">настроить</a></span></div>
+    <div class="check-row ${hcls}"><span class="dot"></span>Серверы Яндекса: ${STATE_LABEL[hstate] || hstate}${h ? ' — ' + esc(h.summary||'') : ''}<span class="sub"><a href="#" onclick="closeWizard();switchTab('status');return false" style="color:var(--accent)">подробнее</a></span></div>
+    <div class="check-row ${p.free_space ? 'ok' : 'warn'}"><span class="dot"></span>Папка: <code style="margin-left:4px">${esc(p.download_dir||'')}</code><span class="sub">${p.free_space ? 'свободно ' + human(p.free_space.free) : 'папка недоступна'}</span></div>
+    ${diagLine}`;
+
+  document.getElementById('wz-select').innerHTML = `
+    <div class="muted" style="font-size:13px;margin-bottom:10px">Сначала самое ценное: фото и видео. Документы и архивы можно добавить позже вторым запуском.</div>
+    <div class="grid-2">
+      <div class="card" style="padding:14px 16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="card-title" style="font-size:16px;margin:0">Обычный диск</div><div class="toggle ${_wzSel.do_disk ? 'on' : ''}" onclick="_wzSel.do_disk=!_wzSel.do_disk;this.classList.toggle('on');renderEstimate()"></div></div>
+        ${catRows('disk', p.disk.preview)}
+      </div>
+      <div class="card" style="padding:14px 16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="card-title" style="font-size:16px;margin:0">Безлимит</div><div class="toggle ${_wzSel.do_unlim ? 'on' : ''}" onclick="_wzSel.do_unlim=!_wzSel.do_unlim;this.classList.toggle('on');renderEstimate()"></div></div>
+        ${catRows('unlim', p.unlim.preview)}
+      </div>
+    </div>`;
+  renderEstimate();
+}
+
+function renderEstimate(){
+  const p = _wzPlan; if(!p) return;
+  const d = _wzSel.do_disk ? selectedBytes('disk') : {bytes:0,count:0};
+  const u = _wzSel.do_unlim ? selectedBytes('unlim') : {bytes:0,count:0};
+  const doneBytes = (_wzSel.do_disk ? (p.disk.db.bytes_done||0) : 0) + (_wzSel.do_unlim ? (p.unlim.db.bytes_done||0) : 0);
+  const left = Math.max(0, d.bytes + u.bytes - doneBytes);
+  const rate = p.rate_bps || 0;
+  const eta = rate > 0 ? left / rate : null;
+  const free = p.free_space ? p.free_space.free : null;
+  const risks = [];
+  if(p.recommended && p.recommended.gentle) risks.push('Серверы Яндекса сейчас деградированы — рекомендуем щадящий режим (2 потока, пачка 10).');
+  if(p.diagnostics && p.diagnostics.kind === 'bulk_disabled') risks.push('Безлимит сейчас не отдаётся Яндексом (ZIP-архивы отключены): воркеры будут ждать с паузами и продолжат автоматически.');
+  if(free != null && left > free) risks.push(`На диске свободно ${human(free)}, а нужно ~${human(left)} — выберите меньше категорий или другую папку.`);
+  if(!d.count && !u.count) risks.push('Список файлов ещё не собран: оценка появится после сканирования, мастер запустит его сам.');
+  if(!rate) risks.push('Скорость неизвестна — покажется через 10 минут после старта.');
+  document.getElementById('wz-estimate').innerHTML = `
+    <div class="tile-grid">
+      <div class="tile"><div class="v">${human(d.bytes + u.bytes)}</div><div class="l">выбрано · ${(d.count+u.count).toLocaleString('ru')} файлов</div></div>
+      <div class="tile"><div class="v">${human(left)}</div><div class="l">осталось скачать</div></div>
+      <div class="tile"><div class="v">${rate ? human(rate) + '/с' : '—'}</div><div class="l">скорость за 10 минут</div></div>
+      <div class="tile"><div class="v">${eta == null ? '—' : '~' + dur(eta)}</div><div class="l">оценка времени</div></div>
+      <div class="tile"><div class="v">${free == null ? '—' : human(free)}</div><div class="l">свободно на диске</div></div>
+    </div>
+    ${risks.length ? '<div class="card" style="padding:12px 16px"><div style="font-weight:600;margin-bottom:6px">На что обратить внимание</div>' + risks.map(r => `<div style="font-size:13px;color:var(--text-secondary);padding:4px 0">• ${esc(r)}</div>`).join('') + '</div>' : ''}`;
+
+  const rec = p.recommended || {workers:4, batch:25};
+  const workers = _wzSel.gentle ? 2 : rec.workers, batch = _wzSel.gentle ? 10 : rec.batch;
+  document.getElementById('wz-launch').innerHTML = `
+    <div class="card" style="padding:14px 16px">
+      <div class="row" style="padding:10px 0">
+        <div class="row-body"><div class="row-title">Щадящий режим</div><div class="row-sub">2 потока, пачка 10 — рекомендуется при сбоях Яндекса; меньше 429 и таймаутов</div></div>
+        <div class="toggle ${_wzSel.gentle ? 'on' : ''}" onclick="_wzSel.gentle=!_wzSel.gentle;this.classList.toggle('on');renderEstimate()"></div>
+      </div>
+      <div class="row" style="padding:10px 0"><div class="row-body"><div class="row-title">Что запустится</div><div class="row-sub">${[_wzSel.do_disk ? 'диск: scan → выбор категорий → download' : null, _wzSel.do_unlim ? 'безлимит: collect → выбор категорий → воркеры' : null].filter(Boolean).join(' · ') || 'ничего не выбрано'}</div></div></div>
+      <div class="row" style="padding:10px 0"><div class="row-body"><div class="row-title">Настройки</div><div class="row-sub">потоков ${workers} · пачка ${batch} · попытки на файл 3 · при отказе Яндекса воркер ждёт сам</div></div></div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:14px;align-items:center">
+      <button class="big-btn" onclick="startPlan(this)" ${(_wzSel.do_disk || _wzSel.do_unlim) ? '' : 'disabled'}><svg class="ico"><use href="#i-play"/></svg>Запустить план</button>
+      <div class="muted" style="font-size:12.5px">${p.tasks_running || p.pipeline_running ? 'Сейчас идут задачи — сначала остановите их.' : 'Можно закрыть окно: ход будет на Главной.'}</div>
+    </div>`;
+  document.getElementById('wz-foot-note').textContent = `Шаг ${_wzStep} из 4`;
+}
+
+async function startPlan(btn){
+  const rec = (_wzPlan && _wzPlan.recommended) || {workers:4, batch:25};
+  const body = {
+    do_disk: _wzSel.do_disk, do_unlim: _wzSel.do_unlim,
+    disk_categories: Object.keys(_wzSel.disk).filter(k => _wzSel.disk[k]),
+    unlim_categories: Object.keys(_wzSel.unlim).filter(k => _wzSel.unlim[k]),
+    workers: _wzSel.gentle ? 2 : rec.workers,
+    batch: _wzSel.gentle ? 10 : rec.batch,
+  };
+  if(btn) btn.disabled = true;
+  try {
+    const {err} = await postJSON('/api/plan/start', body);
+    if(err){ toast(err,'err'); if(btn) btn.disabled = false; return }
+    requestNotificationPermission();
+    toast('План запущен','ok');
+    closeWizard();
+    switchTab('home');
+    refresh();
+  } catch(e){ toast('Сеть: '+e.message,'err'); if(btn) btn.disabled = false }
 }
 
 // ────── Refresh ──────
@@ -2189,9 +2710,20 @@ function setConsole(id, text){
   if(!el) return;
   if(_lastConsole[id] === text) return;
   _lastConsole[id] = text;
+  // Автоскролл только если пользователь и так был внизу — иначе старые строки не прочитать
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 8;
   el.textContent = text || '';
   if(!text) el.innerHTML = '<div class="console-empty">жду запуска…</div>';
-  el.scrollTop = el.scrollHeight;
+  if(atBottom) el.scrollTop = el.scrollHeight;
+}
+
+// Что запущено в слоте disk: scan и download делят один слот
+function diskTaskKind(task){
+  if(!task) return null;
+  const txt = (task.log_tail||[]).join(' ');
+  if(/Обхожу|Найдено/.test(txt)) return 'scan';
+  if(/Старт скачивания|Прогресс:|Итого: скачано|Сброшено failed/.test(txt)) return 'download';
+  return _diskTaskKind;
 }
 
 // Отслеживание состояний задач — для авто-refreshPreview когда scan закончится
@@ -2201,13 +2733,13 @@ function parseScanProgress(logTail){
   // Извлекаем количество найденных файлов из tqdm-логов scan
   if(!logTail || !logTail.length) return null;
   const joined = logTail.join('\n');
-  // ищем "Найдено: <N>" или последнее "<N>file" в tqdm
+  // main.py печатает "Найдено: <N> (...)" раз в 2 с; unlim_download — "<N>cluster"
   let m = /Найдено\s*[:\s]\s*(\d+)/.exec(joined.split('\n').reverse().join('\n'));
   if(m) return {count: +m[1], total: null};
   m = /(\d+)\s*кл[аоу]?\.?\s*\/\s*(\d+)/.exec(joined);  // кластеры
   if(m) return {count: +m[1], total: +m[2]};
-  m = /(\d+)file/.exec(joined.split('\n').reverse().join('\n'));
-  if(m) return {count: +m[1], total: null};
+  m = /(\d+)\s*\/\s*(\d+)\s*cluster/.exec(joined.split('\n').reverse().join('\n'));
+  if(m) return {count: +m[1], total: +m[2]};
   return null;
 }
 
@@ -2215,28 +2747,28 @@ function parseDownloadProgress(logTail){
   if(!logTail || !logTail.length) return null;
   const lines = logTail.slice().reverse();
   for(const l of lines){
-    // tqdm: "Файлы:  45%|████▌     | 1429/3157 [10:29<19:34,  1.47file/s]"
+    // main.py под Web UI: "Прогресс: 1429/3157 файлов | скачано ... | ошибок 2 | 1.2 GB"
+    const m0 = /Прогресс:\s*(\d+)\/(\d+)\s*файлов.*?ошибок\s*(\d+)/.exec(l);
+    if(m0) return {done: +m0[1], total: +m0[2], failed: +m0[3]};
+    // tqdm (если всё же терминал): "Файлы:  45%|████▌     | 1429/3157 [10:29<19:34,  1.47file/s]"
     const m = /(\d+)\/(\d+)\s*\[/.exec(l);
     if(m) return {done: +m[1], total: +m[2]};
-    // "[w1] batch 5: ✓ 250 files / 2.30 GB"
-    const m2 = /batch\s*(\d+).*?(\d+)\s*files\s*\/\s*([\d.]+)\s*GB/i.exec(l);
+    // "[w1] batch 5: ✓ 25/25 files / 2.30 GB"
+    const m2 = /batch\s*(\d+):\s*✓\s*(\d+)(?:\/\d+)?\s*files\s*\/\s*([\d.]+)\s*GB/i.exec(l);
     if(m2) return {batch: +m2[1], extra: `+${m2[2]} файлов · ${m2[3]} ГБ`};
   }
   return null;
 }
 
-function updateDownloadBanner(kind, task){
+function updateDownloadBanner(kind, task, stats){
   const banner = document.getElementById(`${kind}-download-banner`);
   const title = document.getElementById(`${kind}-download-title`);
   const sub = document.getElementById(`${kind}-download-sub`);
   const time = document.getElementById(`${kind}-download-time`);
   if(!banner) return;
   if(!task){return}
-  // Не показываем download-баннер для scan — у scan свой статус
-  // Различаем по log_tail: если есть "scan" / "Обхожу" — это scan
-  const logTxt = (task.log_tail||[]).join(' ');
-  const isScan = /Обхожу|Найдено\s*\[/.test(logTxt);
-  if(isScan){
+  // В слоте disk может идти scan — у него свой баннер
+  if(kind === 'disk' && diskTaskKind(task) !== 'download'){
     banner.style.display = 'none';
     return;
   }
@@ -2246,7 +2778,7 @@ function updateDownloadBanner(kind, task){
     title.textContent = kind === 'disk' ? 'Скачиваю обычный диск…' : 'Скачиваю безлимит…';
     const p = parseDownloadProgress(task.log_tail);
     if(p && p.total){
-      sub.innerHTML = `${p.done.toLocaleString('ru')} / ${p.total.toLocaleString('ru')} файлов`;
+      sub.textContent = `${p.done.toLocaleString('ru')} / ${p.total.toLocaleString('ru')} файлов` + (p.failed ? ` · ошибок ${p.failed}` : '');
     } else if(p && p.extra){
       sub.textContent = p.extra;
     } else {
@@ -2259,17 +2791,24 @@ function updateDownloadBanner(kind, task){
     title.innerHTML = '<span style="color:var(--green)">Скачивание завершено</span>';
     sub.textContent = 'все файлы на диске';
     time.textContent = dur(task.elapsed);
-  } else if(isStopped(task.exit_code)){
+  } else if(taskStopped(task)){
     banner.style.display = 'flex';
     banner.className = 'task-banner stopped';
     title.innerHTML = '<span style="color:var(--text-secondary)">Остановлено пользователем</span>';
     sub.textContent = 'скачивание прервано';
     time.textContent = dur(task.elapsed);
+  } else if(task.exit_code === 1 && stats && (stats.failed || 0) > 0){
+    // main.py: exit=1 — «часть файлов упала», остальное скачано
+    banner.style.display = 'flex';
+    banner.className = 'task-banner';
+    title.innerHTML = '<span style="color:var(--orange)">Завершено с ошибками</span>';
+    sub.innerHTML = `не скачано: ${(stats.failed||0).toLocaleString('ru')} · <button class="btn btn-sm" onclick="action('disk_retry', this)" style="padding:2px 8px;font-size:11px;margin-left:6px;color:var(--yellow);border-color:rgba(255,159,10,.4)">Повторить ошибки</button>`;
+    time.textContent = dur(task.elapsed);
   } else if(task.exit_code !== null){
     banner.style.display = 'flex';
     banner.className = 'task-banner err';
     title.innerHTML = '<span style="color:var(--red)">Ошибка</span>';
-    sub.textContent = `код ${task.exit_code}`;
+    sub.textContent = EXIT_EXPLAIN[task.exit_code] ? `${EXIT_EXPLAIN[task.exit_code]} (код ${task.exit_code})` : `код ${task.exit_code} · смотри консоль ниже`;
     time.textContent = dur(task.elapsed);
   }
 }
@@ -2290,21 +2829,25 @@ function updateUnlimBanner(tasks){
     title.textContent = `Скачиваю безлимит · ${aliveWorkers.length} воркеров`;
     // Найдём последнюю batch-инфу
     let last = '';
+    let waiting = '';
     for(const w of workers){
       const tail = tasks[w].log_tail || [];
       for(const l of tail.slice().reverse()){
-        const m = /batch\s+(\d+):\s*✓\s*(\d+)\s*files\s*\/\s*([\d.]+)\s*GB/i.exec(l);
+        const m = /batch\s+(\d+):\s*✓\s*(\d+)(?:\/\d+)?\s*files\s*\/\s*([\d.]+)\s*GB/i.exec(l);
         if(m){last = `последний batch w${w.replace('unlim_w','')}: ${m[2]} файлов, ${m[3]} ГБ`; break}
+        if(/bulk_unavailable/.test(l)) waiting = 'Яндекс не отдаёт архивы — жду с паузами, попытки не сжигаю';
       }
       if(last) break;
     }
-    sub.textContent = last || 'идёт скачивание архивов…';
+    sub.textContent = last || waiting || 'идёт скачивание архивов…';
     const maxElapsed = Math.max(...aliveWorkers.map(w=>tasks[w].elapsed||0));
     time.textContent = dur(maxElapsed);
   } else {
     // Все воркеры закончили
     const allOk = workers.every(w=>tasks[w].exit_code === 0);
-    const anyStopped = workers.some(w=>isStopped(tasks[w].exit_code));
+    const anyStopped = workers.some(w=>taskStopped(tasks[w]));
+    const codes = workers.map(w=>tasks[w].exit_code).filter(c=>c !== 0 && c !== null);
+    const known = codes.find(c=>EXIT_EXPLAIN[c]);
     if(allOk){
       banner.style.display = 'flex';
       banner.className = 'task-banner done';
@@ -2314,12 +2857,18 @@ function updateUnlimBanner(tasks){
       banner.style.display = 'flex';
       banner.className = 'task-banner stopped';
       title.innerHTML = '<span style="color:var(--text-secondary)">Остановлено пользователем</span>';
-      sub.textContent = `воркеры прерваны`;
+      sub.textContent = `воркеры остановлены`;
+    } else if(known === 3){
+      banner.style.display = 'flex';
+      banner.className = 'task-banner';
+      title.innerHTML = '<span style="color:var(--orange)">Пауза: Яндекс не отдаёт архивы</span>';
+      sub.innerHTML = `${esc(EXIT_EXPLAIN[3])} · <button class="btn btn-sm" onclick="retryUnlim(this)" style="padding:2px 8px;font-size:11px;margin-left:6px;color:var(--yellow);border-color:rgba(255,159,10,.4)">Запустить снова</button>`;
     } else {
       banner.style.display = 'flex';
       banner.className = 'task-banner err';
       title.innerHTML = '<span style="color:var(--red)">Ошибка воркеров</span>';
-      sub.textContent = `проверь консоль`;
+      const why = known ? esc(EXIT_EXPLAIN[known]) : 'проверь консоль';
+      sub.innerHTML = `${why} · <button class="btn btn-sm" onclick="retryUnlim(this)" style="padding:2px 8px;font-size:11px;margin-left:6px;color:var(--yellow);border-color:rgba(255,159,10,.4)">Повторить ошибки</button>`;
     }
   }
 }
@@ -2331,6 +2880,13 @@ function updateOrganizeBanner(task){
   const title = document.getElementById('organize-title');
   const sub = document.getElementById('organize-sub');
   const time = document.getElementById('organize-time');
+  // После перезагрузки страницы путь и действие восстанавливаем из лога organize.py
+  if(!_organizePath){
+    for(const l of (task.log_tail||[])){
+      const mp = /СОРТИРОВКА:\s*(.+)$/.exec(l); if(mp) _organizePath = mp[1].trim();
+      const ma = /Действие:\s*(report-only|move)/.exec(l); if(ma) _organizeAction = ma[1];
+    }
+  }
   if(task.running){
     banner.style.display = 'flex';
     banner.className = 'task-banner';
@@ -2356,7 +2912,7 @@ function updateOrganizeBanner(task){
       : '<span style="color:var(--green)">Сортировка применена</span>';
     sub.innerHTML = `Папка: <code>${esc(_organizePath)}</code>`;
     time.textContent = dur(task.elapsed);
-  } else if(isStopped(task.exit_code)){
+  } else if(taskStopped(task)){
     banner.style.display = 'flex';
     banner.className = 'task-banner stopped';
     title.innerHTML = '<span style="color:var(--text-secondary)">Остановлено пользователем</span>';
@@ -2390,8 +2946,8 @@ function updateActiveTasksHeader(tasks, pipeline){
 }
 
 function isStopped(code){
-  // Коды, означающие нормальную остановку (SIGTERM/SIGINT), не ошибку
-  return code === -15 || code === -2 || code === 143 || code === 130 || code === 15 || code === 1;
+  // Коды, означающие нормальную остановку по сигналу (SIGTERM/SIGINT), не ошибку выполнения
+  return code === -15 || code === -2 || code === 143 || code === 130 || code === 15;
 }
 
 function updateScanStatus(kind, task, lastTotal){
@@ -2419,8 +2975,8 @@ function updateScanStatus(kind, task, lastTotal){
     titleEl.innerHTML = '<span style="color:var(--green)">Готово</span>';
     if(lastTotal) subEl.textContent = `найдено: ${lastTotal.toLocaleString('ru')} файлов`;
     else subEl.textContent = 'сканирование завершено';
-  } else if(task && isStopped(task.exit_code)){
-    // Пользователь нажал «Стоп»
+  } else if(task && taskStopped(task)){
+    // Пользователь нажал «Стоп» (на Windows terminate даёт exit=1 — смотрим was_stopped)
     statusEl.style.display = 'block';
     statusEl.className = 'task-banner stopped';
     titleEl.innerHTML = '<span style="color:var(--text-secondary)">Остановлено пользователем</span>';
@@ -2436,9 +2992,28 @@ function updateScanStatus(kind, task, lastTotal){
   }
 }
 
+// Опрос раз в 1.5 с; если /api/status отвечает дольше — не наслаиваем запросы,
+// иначе ответы приходят не по порядку и UI «откатывается» к устаревшему состоянию
+let _refreshBusy = false;
 async function refresh(){
+  if(_refreshBusy) return;
+  _refreshBusy = true;
+  try { await _refreshInner() } finally { _refreshBusy = false }
+}
+let _lastDbError = {disk: null, unlim: null};
+function reportDbError(kind, db){
+  const err = db && db.error;
+  if(err && _lastDbError[kind] !== err){
+    _lastDbError[kind] = err;
+    toast(`БД ${kind === 'disk' ? 'диска' : 'безлимита'} не читается: ${err}`, 'err');
+  }
+  if(!err) _lastDbError[kind] = null;
+}
+
+async function _refreshInner(){
   try {
     const r=await fetch('/api/status');
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
     const s=await r.json();
 
     // Pills
@@ -2516,22 +3091,25 @@ async function refresh(){
 
     // Disk
     const dd=s.disk.db;
+    reportDbError('disk', dd);
     const catSkip = dd.category_skipped || 0;
     const catSkipBytes = dd.category_skipped_bytes || 0;
     const effTotal = Math.max(0, (dd.total || 0) - catSkip);
-    const effBytesTotal = Math.max(0, (dd.bytes_total || 0) - catSkipBytes);
+    const effBytesTotal = dd.bytes_selected_total || Math.max(0, (dd.bytes_total || 0) - catSkipBytes);
     const effSkipped = Math.max(0, (dd.skipped || 0) - catSkip);
+    const bytesDone = dd.bytes_done_real || dd.bytes_done || 0;
+    const bytesPending = dd.bytes_pending || 0;
 
     document.getElementById('home-disk-done').textContent =
       (dd.downloaded||0).toLocaleString('ru') + (effTotal ? ` / ${effTotal.toLocaleString('ru')}` : (dd.total ? ` / ${dd.total.toLocaleString('ru')}` : ''));
     document.getElementById('home-disk-info').textContent =
-      `${human(dd.bytes_done||0)} из ${human(effBytesTotal || dd.bytes_total || 0)}`;
+      `Скачано: ${human(bytesDone)}, в очереди: ${human(bytesPending)} (из ${human(effBytesTotal || dd.bytes_total || 0)})`;
     const hdpct = effTotal ? ((dd.downloaded + effSkipped) / effTotal * 100) : 0;
     document.getElementById('home-disk-bar').style.width = Math.min(100, hdpct) + '%';
 
-    document.getElementById('s-downloaded').textContent=(dd.downloaded||0).toLocaleString('ru');
+    document.getElementById('s-downloaded').innerHTML = (dd.downloaded||0).toLocaleString('ru') + (bytesDone ? `<div style="font-size:11px;font-weight:400;color:var(--text-tertiary)">${human(bytesDone)}</div>` : '');
     document.getElementById('s-skipped').textContent=(dd.skipped||0).toLocaleString('ru');
-    document.getElementById('s-pending').textContent=(dd.pending||0).toLocaleString('ru');
+    document.getElementById('s-pending').innerHTML = (dd.pending||0).toLocaleString('ru') + (bytesPending ? `<div style="font-size:11px;font-weight:400;color:var(--text-tertiary)">${human(bytesPending)}</div>` : '');
     document.getElementById('s-failed').textContent=(dd.failed||0).toLocaleString('ru');
 
     const dRecent=document.getElementById('disk-recent');
@@ -2544,19 +3122,27 @@ async function refresh(){
       dRecent.innerHTML='<div class="muted">пока пусто</div>';
     }
 
-    // Unlim
+    // Unlim (та же логика учёта пропущенных категорий, что и у диска)
     const ud=s.unlim.db;
+    reportDbError('unlim', ud);
+    const uCatSkip = ud.category_skipped || 0;
+    const uEffTotal = Math.max(0, (ud.total || 0) - uCatSkip);
+    const uEffBytesTotal = ud.bytes_selected_total || Math.max(0, (ud.bytes_total || 0) - (ud.category_skipped_bytes || 0));
+    const uEffSkipped = Math.max(0, (ud.skipped || 0) - uCatSkip);
+    const uBytesDone = ud.bytes_done_real || ud.bytes_done || 0;
+    const uBytesPending = ud.bytes_pending || 0;
     document.getElementById('home-unlim-done').textContent =
-      (ud.downloaded||0).toLocaleString('ru') + (ud.total ? ` / ${ud.total.toLocaleString('ru')}` : '');
+      (ud.downloaded||0).toLocaleString('ru') + (uEffTotal ? ` / ${uEffTotal.toLocaleString('ru')}` : '');
     document.getElementById('home-unlim-info').textContent =
-      `${human(ud.bytes_done||0)} из ${human(ud.bytes_total||0)}`;
-    const hupct = ud.total ? (ud.downloaded/ud.total*100) : 0;
-    document.getElementById('home-unlim-bar').style.width = hupct + '%';
+      `Скачано: ${human(uBytesDone)}, в очереди: ${human(uBytesPending)} (из ${human(uEffBytesTotal || 0)})`;
+    const hupct = uEffTotal ? (((ud.downloaded||0) + uEffSkipped)/uEffTotal*100) : 0;
+    document.getElementById('home-unlim-bar').style.width = Math.min(100, hupct) + '%';
 
-    document.getElementById('u-downloaded').textContent=(ud.downloaded||0).toLocaleString('ru');
-    document.getElementById('u-pending').textContent=(ud.pending||0).toLocaleString('ru');
+    document.getElementById('u-downloaded').innerHTML = (ud.downloaded||0).toLocaleString('ru') + (uBytesDone ? `<div style="font-size:11px;font-weight:400;color:var(--text-tertiary)">${human(uBytesDone)}</div>` : '');
+    document.getElementById('u-pending').innerHTML = (ud.pending||0).toLocaleString('ru') + (uBytesPending ? `<div style="font-size:11px;font-weight:400;color:var(--text-tertiary)">${human(uBytesPending)}</div>` : '');
     document.getElementById('u-in-progress').textContent=(ud.in_progress||0).toLocaleString('ru');
     document.getElementById('u-failed').textContent=(ud.failed||0).toLocaleString('ru');
+
 
     const uRecent=document.getElementById('unlim-recent');
     if(uRecent){
@@ -2574,31 +3160,33 @@ async function refresh(){
     const tasks = s.tasks || {};
     const diskTask = tasks.disk;
     const unlimTask = tasks.unlim_collect;
+    const diskKind = diskTaskKind(diskTask);   // 'scan' | 'download' | null
 
-    // Live-статус сканирования
-    updateScanStatus('disk', diskTask, dd.total);
+    // Live-статус сканирования (в слоте disk может идти download — тогда это не скан)
+    updateScanStatus('disk', diskKind === 'scan' ? diskTask : null, dd.total);
     updateScanStatus('unlim', unlimTask, ud.total);
 
-    // Авто-refreshPreview при завершении задач
-    function detectDone(slot, kind){
+    // Авто-refreshPreview при завершении сканирования
+    function detectDone(slot, kind, isScanTask){
       const prev = _prevTaskStates[slot];
       const cur = tasks[slot];
       if(!cur) return;
       const wasRunning = prev && prev.running;
       const isRunning = cur.running;
-      if(wasRunning && !isRunning && cur.exit_code === 0){
+      if(wasRunning && !isRunning && cur.exit_code === 0 && isScanTask){
         setTimeout(()=>refreshPreview(kind), 500);
         toast(`Сканирование завершено — обновляю список`, 'ok');
       }
       _prevTaskStates[slot] = {running: cur.running, exit_code: cur.exit_code};
     }
-    detectDone('disk', 'disk');
-    detectDone('unlim_collect', 'unlim');
+    detectDone('disk', 'disk', diskKind === 'scan');
+    detectDone('unlim_collect', 'unlim', true);
 
     // Обновление баннеров download / organize
-    updateDownloadBanner('disk', diskTask);
+    updateDownloadBanner('disk', diskTask, dd);
     updateUnlimBanner(tasks);
     updateOrganizeBanner(tasks.organize);
+    updateYandexStatus(s);
 
     // Индикатор активных задач в шапке
     updateActiveTasksHeader(tasks, pl);
@@ -2629,15 +3217,15 @@ async function refresh(){
       }
     }
 
-    // 2. Обычный диск
-    const diskIsDownload = diskTask && diskTask.running && !/Обхожу|Найдено\s*\[/.test((diskTask.log_tail||[]).join(' '));
+    // 2. Обычный диск (только настоящий download, не scan в том же слоте)
+    const diskIsDownload = diskTask && diskTask.running && diskKind === 'download';
     if(diskIsDownload){
       _activeSessions.disk = true;
       if(!_activeSessions.diskStart) _activeSessions.diskStart = Date.now();
     } else if(_activeSessions.disk){
       if(!diskTask || !diskTask.running){
         _activeSessions.disk = false;
-        const isSuccess = diskTask && (diskTask.exit_code === 0 || diskTask.exit_code === null) && !isStopped(diskTask.exit_code);
+        const isSuccess = diskTask && (diskTask.exit_code === 0 || diskTask.exit_code === null) && !taskStopped(diskTask);
         if(isSuccess && dd.pending === 0 && (dd.downloaded > 0 || dd.downloaded + dd.skipped > 0)){
           const key = `disk_${dd.downloaded}_${dd.bytes_done}`;
           if(!_celebratedKeys.has(key)){
@@ -2666,8 +3254,8 @@ async function refresh(){
       const anyStillRunning = unlimWorkers.some(w=>tasks[w].running);
       if(!anyStillRunning){
         _activeSessions.unlim = false;
-        const anyStopped = unlimWorkers.some(w=>isStopped(tasks[w].exit_code));
-        const anyErr = unlimWorkers.some(w=>tasks[w].exit_code !== 0 && tasks[w].exit_code !== null && !isStopped(tasks[w].exit_code));
+        const anyStopped = unlimWorkers.some(w=>taskStopped(tasks[w]));
+        const anyErr = unlimWorkers.some(w=>tasks[w].exit_code !== 0 && tasks[w].exit_code !== null && !taskStopped(tasks[w]));
         if(!anyStopped && !anyErr && ud.pending === 0 && ud.downloaded > 0){
           const key = `unlim_${ud.downloaded}_${ud.bytes_done}`;
           if(!_celebratedKeys.has(key)){
@@ -2687,6 +3275,12 @@ async function refresh(){
       }
     }
 
+    // Показываем кнопку повтора ошибок если есть failed файлы
+    const unlimRetryBtn = document.getElementById('unlim-retry-btn');
+    if(unlimRetryBtn){
+      unlimRetryBtn.style.display = ((ud.failed || 0) > 0) ? 'inline-flex' : 'none';
+    }
+
     setConsole('disk-console', (tasks.disk?.log_tail||[]).join('\n'));
     const unlimLog = [];
     for (const k of Object.keys(tasks)){
@@ -2694,7 +3288,12 @@ async function refresh(){
         (tasks[k].log_tail||[]).forEach(l=>unlimLog.push(`[${k}] ${l}`));
       }
     }
-    unlimLog.sort();
+    unlimLog.sort((a, b) => {
+      const ma = a.match(/\b\d{2}:\d{2}:\d{2}\b/);
+      const mb = b.match(/\b\d{2}:\d{2}:\d{2}\b/);
+      if (ma && mb) return ma[0].localeCompare(mb[0]);
+      return 0;
+    });
     setConsole('unlim-console', unlimLog.slice(-100).join('\n'));
     setConsole('organize-console', (tasks.organize?.log_tail||[]).join('\n'));
 
