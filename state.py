@@ -7,11 +7,14 @@ pending / downloaded / failed / skipped. WAL-режим позволяет пи�
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
+
+from utils import IS_WINDOWS, resolve_local_path, sqlite_tx
 
 
 def _utc_now() -> str:
@@ -74,14 +77,8 @@ class State:
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
-        conn = self._conn()
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+        with sqlite_tx(self._conn()) as conn:
             yield conn
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
 
     # ── публичное API ─────────────────────────────────────────────────
 
@@ -98,7 +95,12 @@ class State:
         self,
         items: Iterable[tuple[str, int | None, str | None]],
     ) -> None:
-        """Пакетная регистрация файлов — значительно ускоряет scan_tree и scan_media."""
+        """Пакетная регистрация файлов — значительно ускоряет scan_tree и scan_media.
+
+        Уже скачанный файл, у которого на Диске изменился MD5, возвращается в pending:
+        бэкап должен догнать новую версию. Пропущенные (skipped) не трогаем — это
+        осознанный выбор пользователя (категории) или дубликат.
+        """
         items_list = list(items)
         if not items_list:
             return
@@ -109,8 +111,15 @@ class State:
                 VALUES (?, ?, ?, 'pending')
                 ON CONFLICT(remote_path) DO UPDATE SET
                     size = excluded.size,
-                    md5 = COALESCE(excluded.md5, files.md5)
-                WHERE files.status NOT IN ('downloaded', 'skipped')
+                    md5 = COALESCE(excluded.md5, files.md5),
+                    status = CASE
+                        WHEN files.status = 'downloaded'
+                             AND excluded.md5 IS NOT NULL AND files.md5 IS NOT NULL
+                             AND excluded.md5 <> files.md5
+                        THEN 'pending'
+                        ELSE files.status
+                    END
+                WHERE files.status <> 'skipped'
                 """,
                 items_list,
             )
@@ -165,8 +174,70 @@ class State:
     def get_pending(self) -> Iterable[sqlite3.Row]:
         """Возвращает курсор с pending-файлами. Читается лениво, без загрузки всего в RAM."""
         return self._conn().execute(
-            "SELECT remote_path, size, md5 FROM files WHERE status='pending' ORDER BY size ASC"
+            "SELECT remote_path, size, md5, local_path FROM files WHERE status='pending' ORDER BY size ASC"
         )
+
+    def get_pending_stats(self) -> dict[str, int]:
+        """Быстро возвращает количество и сумму байт pending файлов."""
+        row = self._conn().execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS bytes FROM files WHERE status='pending'"
+        ).fetchone()
+        return {"count": int(row["n"] if row else 0), "bytes": int(row["bytes"] if row else 0)}
+
+    def assign_local_paths(self, download_dir: str) -> None:
+        """Детерминированно назначает и сохраняет local_path для pending/failed файлов.
+
+        Учитывает существующие пути, санитизацию и коллизии регистра на Windows.
+        Если пользователь сменил DOWNLOAD_DIR, старые назначения вне новой папки
+        пересчитываются — иначе остаток очереди молча уехал бы в прежнюю папку.
+        """
+        root = os.path.normcase(os.path.abspath(download_dir)).rstrip("\\/")
+
+        def under_root(path: str) -> bool:
+            n = os.path.normcase(os.path.abspath(path))
+            return n == root or n.startswith(root + os.sep)
+
+        def key(path: str) -> str:
+            return path.lower() if IS_WINDOWS else path
+
+        with self._tx() as conn:
+            # Занятые пути — только у файлов, которые реально лежат на диске
+            existing_paths: set[str] = {
+                key(r["local_path"])
+                for r in conn.execute(
+                    "SELECT local_path FROM files "
+                    "WHERE status IN ('downloaded', 'skipped') "
+                    "AND local_path IS NOT NULL AND local_path != ''"
+                )
+            }
+
+            rows = conn.execute(
+                "SELECT remote_path, local_path FROM files "
+                "WHERE status IN ('pending', 'failed') ORDER BY remote_path ASC"
+            ).fetchall()
+
+            # Сначала регистрируем те, чьи назначения остаются в силе,
+            # потом считаем новые — чтобы новые не столкнулись со старыми.
+            to_assign: list[str] = []
+            for r in rows:
+                lp = r["local_path"]
+                if lp and under_root(lp):
+                    existing_paths.add(key(lp))
+                else:
+                    to_assign.append(r["remote_path"])
+
+            if not to_assign:
+                return
+
+            updates = [
+                (resolve_local_path(download_dir, rp, existing_paths), rp)
+                for rp in to_assign
+            ]
+            conn.executemany(
+                "UPDATE files SET local_path = ? WHERE remote_path = ?",
+                updates,
+            )
+
 
     def get_failed(self) -> Iterable[sqlite3.Row]:
         return self._conn().execute(

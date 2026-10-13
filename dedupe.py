@@ -12,7 +12,7 @@ import sqlite3
 import sys
 from collections import Counter, defaultdict
 
-from utils import is_media
+from utils import ensure_utf8_stdio, is_media, sqlite_tx
 
 DB = os.path.join(os.path.dirname(__file__), "state.db")
 
@@ -36,11 +36,7 @@ def folder_priority(path: str) -> int:
 
 
 def main() -> int:
-    try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+    ensure_utf8_stdio()
 
     conn = sqlite3.connect(DB, timeout=30)
     conn.row_factory = sqlite3.Row
@@ -81,20 +77,11 @@ def main() -> int:
         for ext, n in ext_counter.most_common(10):
             print(f"     {ext or '<нет>'}  {n}")
 
-        # Удаляем
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+        with sqlite_tx(conn):
             conn.executemany(
                 "DELETE FROM files WHERE remote_path = ?",
                 [(r["remote_path"],) for r in non_media],
             )
-            conn.execute("COMMIT")
-        except Exception:
-            try:
-                conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            raise
         print(f"  ✓ удалено {len(non_media)} записей\n")
     else:
         print("  нечего удалять\n")
@@ -145,20 +132,12 @@ def main() -> int:
     print(f"  Сэкономлено объёма: {saved_bytes/1e9:.2f} ГБ")
 
     if duplicates_to_skip:
-        conn.execute("BEGIN IMMEDIATE")
-        try:
+        with sqlite_tx(conn):
             conn.executemany(
                 "UPDATE files SET status='skipped', error='duplicate (md5 match)' "
                 "WHERE remote_path = ?",
                 [(p,) for p in duplicates_to_skip],
             )
-            conn.execute("COMMIT")
-        except Exception:
-            try:
-                conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
-            raise
 
     # Файлы без md5 (бывает у некоторых) — могут быть дубликатами по имени+размеру
     no_md5_rows = conn.execute(

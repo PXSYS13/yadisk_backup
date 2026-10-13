@@ -86,6 +86,37 @@ def test_context_manager(tmp_path):
     assert len(s._all_conns) == 0
 
 
+def test_changed_md5_resets_downloaded_to_pending(st):
+    """Файл отредактирован на Диске — бэкап должен догнать новую версию."""
+    st.mark_pending("disk:/a.jpg", 100, "md5-old")
+    st.mark_downloaded("disk:/a.jpg", "C:/out/a.jpg")
+    st.mark_pending("disk:/a.jpg", 120, "md5-new")
+    row = next(iter(st.get_pending()))
+    assert row["remote_path"] == "disk:/a.jpg"
+    assert row["md5"] == "md5-new"
+    assert row["local_path"] == "C:/out/a.jpg"  # путь сохранён — перекачаем на то же место
+
+
+def test_category_skipped_is_not_resurrected_by_rescan(st):
+    st.mark_pending("disk:/doc.pdf", 10, "m1")
+    st._conn().execute("UPDATE files SET status='skipped', error='not in selected categories'")
+    st.mark_pending("disk:/doc.pdf", 10, "m2")
+    assert st.get_stats()["skipped"] == 1
+
+
+def test_assign_local_paths_follows_new_download_dir(st, tmp_path):
+    st.mark_pending_batch([("disk:/a.jpg", 1, None), ("disk:/b.jpg", 1, None)])
+    old_dir = str(tmp_path / "old")
+    new_dir = str(tmp_path / "new")
+    st.assign_local_paths(old_dir)
+    st.mark_downloaded("disk:/a.jpg", str(tmp_path / "old" / "a.jpg"))
+
+    st.assign_local_paths(new_dir)
+    rows = {r["remote_path"]: r["local_path"] for r in st._conn().execute("SELECT remote_path, local_path FROM files")}
+    assert rows["disk:/b.jpg"].startswith(new_dir)   # pending переназначен в новую папку
+    assert rows["disk:/a.jpg"].startswith(old_dir)   # скачанный остаётся где лежит
+
+
 def test_mark_pending_batch(st):
     items = [
         ("disk:/1.jpg", 100, "md1"),

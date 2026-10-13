@@ -1,11 +1,17 @@
-"""Утилиты: санитизация путей, MD5, работа с длинными путями Windows."""
+"""Утилиты: санитизация путей, MD5, длинные пути Windows, общие лимиты и хелперы."""
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import math
 import os
+import re
+import sqlite3
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 # Символы, запрещённые в именах файлов на Windows.
 # Слеши тоже сюда: имя файла с '\' или '/' на Яндекс.Диске легально, а локально
@@ -21,6 +27,15 @@ _WIN_RESERVED = {
 IS_WINDOWS = sys.platform.startswith("win")
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
+
+# ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
+
+# Больше 5 параллельных скачиваний через REST API — Яндекс режет по rate limit.
+MAX_DISK_WORKERS = 5
+# Воркеры безлимита качают ZIP-пачки — это тяжелее для серверов архивации.
+MAX_UNLIM_WORKERS = 6
+DEFAULT_UNLIM_BATCH = 25
+MAX_UNLIM_BATCH = 80
 
 # ── Расширения файлов по категориям ─────────────────────────────────────────
 
@@ -80,6 +95,17 @@ DIR_AUDIO = "Аудио"
 DIR_OTHER = "Прочее"
 DIR_DUP = "_duplicates"
 
+# Маппинг категория → имя DIR_*
+_CATEGORY_TO_DIR = {
+    "photos": DIR_PHOTO,
+    "videos": DIR_VIDEO,
+    "audio": DIR_AUDIO,
+    "documents": DIR_DOC,
+    "archives": DIR_ARCHIVE,
+    "programs": DIR_PROGRAM,
+    "other": DIR_OTHER,
+}
+
 
 def categorize(path: str) -> str:
     """Определяет категорию файла по расширению."""
@@ -96,21 +122,12 @@ def is_media(path: str) -> bool:
     return ext in MEDIA_EXTS
 
 
-# Маппинг категория → имя DIR_*
-_CATEGORY_TO_DIR = {
-    "photos": DIR_PHOTO,
-    "videos": DIR_VIDEO,
-    "audio": DIR_AUDIO,
-    "documents": DIR_DOC,
-    "archives": DIR_ARCHIVE,
-    "programs": DIR_PROGRAM,
-    "other": DIR_OTHER,
-}
-
-
 def classify_dir(path: str) -> str:
     """Определяет целевую директорию (Фото, Видео, ...) для файла по расширению."""
     return _CATEGORY_TO_DIR.get(categorize(path), DIR_OTHER)
+
+
+# ── Санитизация путей ────────────────────────────────────────────────────────
 
 
 def sanitize_component(name: str) -> str:
@@ -135,10 +152,7 @@ def sanitize_component(name: str) -> str:
 
 def sanitize_remote_path(remote_path: str) -> str:
     """Превращает /disk/foo:bar/file?.jpg → foo_bar/file_.jpg (относительный путь)."""
-    # Убираем префикс disk: если есть
-    p = remote_path
-    p = p.removeprefix("disk:")
-    p = p.lstrip("/")
+    p = remote_path.removeprefix("disk:").lstrip("/")
     parts = [sanitize_component(part) for part in p.split("/") if part]
     return "/".join(parts)
 
@@ -165,11 +179,155 @@ def to_long_path(path: str) -> str:
     return "\\\\?\\" + abs_path
 
 
-def resolve_local_path(download_dir: str, remote_path: str) -> str:
-    """Собирает локальный путь для удалённого файла с санитизацией и поддержкой длинных путей."""
-    rel = sanitize_remote_path(remote_path)
+def _short_hash(remote_path: str) -> str:
+    return hashlib.sha256(remote_path.encode("utf-8", errors="replace")).hexdigest()[:6]
+
+
+def resolve_local_path(
+    download_dir: str,
+    remote_path: str,
+    existing_paths: set[str] | None = None,
+) -> str:
+    """Собирает локальный путь для удалённого файла с санитизацией и поддержкой длинных путей.
+
+    Если при санитизации имя изменилось (были запрещённые символы вроде : ? * или зарезервированные имена),
+    добавляет короткий детерминированный хеш remote_path для исключения коллизий (a:b.jpg vs a?b.jpg vs a_b.jpg).
+    """
+    p = remote_path.removeprefix("disk:").lstrip("/")
+    raw_parts = [part for part in p.split("/") if part]
+    clean_parts = [sanitize_component(part) for part in raw_parts]
+
+    if clean_parts and raw_parts != clean_parts:
+        stem, ext = os.path.splitext(clean_parts[-1])
+        clean_parts[-1] = f"{stem}_{_short_hash(remote_path)}{ext}"
+
+    rel = "/".join(clean_parts)
     local = os.path.join(download_dir, rel.replace("/", os.sep))
+
+    if existing_paths is not None:
+        check_key = local.lower() if IS_WINDOWS else local
+        if check_key in existing_paths:
+            stem, ext = os.path.splitext(local)
+            local = f"{stem}_{_short_hash(remote_path)}{ext}"
+        existing_paths.add(local.lower() if IS_WINDOWS else local)
+
     return local
+
+
+def safe_int(val: object, default: int = 4, min_val: int = 1, max_val: int = 16) -> int:
+    """Безопасный парсер целых чисел с дефолтом и ограничением диапазона."""
+    try:
+        n = int(val)  # type: ignore[arg-type]
+        return max(min_val, min(max_val, n))
+    except (ValueError, TypeError):
+        return default
+
+
+# ── Проверка безопасности целевой папки ─────────────────────────────────────
+
+_WIN_SYSTEM_DIR_RE = re.compile(
+    r"^[a-z]:\\(windows|program files|program files \(x86\)|programdata"
+    r"|\$recycle\.bin|users\\all users)(\\|$)"
+)
+_WIN_SYSTEM_ENV_VARS = ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData")
+_POSIX_SYSTEM_DIRS = ("/etc", "/usr", "/bin", "/sbin", "/var", "/lib", "/system", "/library")
+
+
+def _is_drive_root(path: str) -> bool:
+    return len(path) <= 3 and path.endswith((":\\", ":/"))
+
+
+def is_safe_dir(path: str, *, must_exist: bool = False) -> tuple[bool, str]:
+    r"""Проверяет, можно ли использовать папку как цель скачивания или сортировки.
+
+    Запрещены:
+    - пустые или относительные пути
+    - корни дисков (C:\, D:\, /)
+    - домашняя папка пользователя целиком (C:\Users\username или /home/user)
+    - системные папки (Windows, Program Files, ProgramData, Recycle Bin, /etc, /usr, ...)
+
+    must_exist=False — папку можно создать: достаточно, чтобы существовал
+    ближайший существующий предок (целевая папка скачивания).
+    must_exist=True — папка обязана существовать (сортировка organize).
+    """
+    if not path or not path.strip():
+        return False, "Пустой путь"
+    p_str = path.strip()
+    # Префикс длинных путей Windows не должен обходить проверки: \\?\C:\Windows — это C:\Windows
+    if p_str.startswith("\\\\?\\UNC\\"):
+        p_str = "\\\\" + p_str[8:]
+    elif p_str.startswith("\\\\?\\"):
+        p_str = p_str[4:]
+    raw_norm = p_str.lower().replace("/", "\\")
+
+    # Текстовые проверки Windows-путей — до is_absolute(), чтобы 'C:\' и 'C:\Windows'
+    # отклонялись одинаково на любой платформе (CI гоняет тесты и на Linux)
+    if _is_drive_root(raw_norm):
+        return False, "Нельзя использовать корень диска целиком (укажите конкретную папку)"
+    if _WIN_SYSTEM_DIR_RE.match(raw_norm):
+        return False, f"Системная папка запрещена: {p_str}"
+
+    try:
+        if not Path(p_str).is_absolute():
+            return False, "Путь должен быть абсолютным"
+        abs_path = os.path.abspath(p_str)
+    except (OSError, ValueError):
+        return False, "Невалидный путь"
+
+    norm = abs_path.lower().replace("/", "\\")
+
+    # Корень диска (C:\, D:\, /, \)
+    if _is_drive_root(abs_path) or norm in ("\\", "/"):
+        return False, "Нельзя использовать корень диска целиком (укажите конкретную папку)"
+
+    # Домашняя папка пользователя целиком
+    home_dir = os.path.expanduser("~")
+    if home_dir and home_dir != "~":
+        home_norm = os.path.abspath(home_dir).lower().replace("/", "\\")
+        if norm == home_norm or raw_norm == home_norm:
+            return False, (
+                "Нельзя использовать домашнюю папку пользователя целиком "
+                "(укажите конкретную папку бэкапа)"
+            )
+
+    # Системные папки Windows по переменным окружения (учитывают нестандартный диск)
+    for var in _WIN_SYSTEM_ENV_VARS:
+        val = os.environ.get(var)
+        if val:
+            val_norm = os.path.abspath(val).lower().replace("/", "\\")
+            if norm == val_norm or norm.startswith(val_norm + "\\"):
+                return False, f"Системная папка запрещена: {val}"
+
+    # Любой диск с системными папками Windows (C:\Windows, D:\Windows, ...)
+    if _WIN_SYSTEM_DIR_RE.match(norm):
+        return False, f"Системная папка запрещена: {abs_path}"
+
+    # Unix системные пути
+    norm_posix = abs_path.replace("\\", "/").lower()
+    for bad in _POSIX_SYSTEM_DIRS:
+        if norm_posix == bad or norm_posix.startswith(bad + "/"):
+            return False, f"Системная папка запрещена: {bad}"
+
+    if must_exist:
+        if not os.path.isdir(abs_path):
+            return False, "Папка не существует"
+        return True, "OK"
+
+    # Папки ещё нет — должен существовать ближайший предок
+    parent = Path(abs_path).parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    if not parent.exists():
+        return False, "Родительская директория недоступна"
+    return True, "OK"
+
+
+def is_safe_download_dir(path: str) -> tuple[bool, str]:
+    """Проверка целевой папки скачивания (может ещё не существовать)."""
+    return is_safe_dir(path, must_exist=False)
+
+
+# ── Коллизии регистра на Windows ────────────────────────────────────────────
 
 
 def avoid_case_collision(local_path: str) -> str:
@@ -205,15 +363,39 @@ def _suffix_path(local_path: str, existing_lower: dict[str, str]) -> str:
         i += 1
 
 
+# ── SQLite ──────────────────────────────────────────────────────────────────
+
+
 def sqlite_ro_uri(db_path: str | os.PathLike) -> str:
     """URI для read-only подключения к SQLite.
 
     Экранирует спецсимволы пути: '#' в URI начинает фрагмент, и sqlite молча
     открыл бы ПУСТУЮ базу вместо нашей (проверено на Windows-пути с решёткой).
     """
-    from pathlib import Path
-
     return Path(db_path).resolve().as_uri() + "?mode=ro"
+
+
+@contextmanager
+def sqlite_tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    """Явная транзакция: BEGIN IMMEDIATE → COMMIT, при любой ошибке — ROLLBACK.
+
+    BEGIN IMMEDIATE сразу берёт блокировку на запись — в WAL-режиме это
+    спасает от `database is locked` при нескольких писателях.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+    else:
+        conn.execute("COMMIT")
+
+
+# ── Файлы и форматирование ──────────────────────────────────────────────────
 
 
 def compute_md5(local_path: str, chunk: int = 1024 * 1024) -> str:
@@ -232,6 +414,31 @@ def file_size_safe(local_path: str) -> int | None:
         return os.path.getsize(to_long_path(local_path))
     except OSError:
         return None
+
+
+def remove_quiet(path: str) -> None:
+    """Удаляет файл, если он есть. Ошибки глотает — это уборка, не бизнес-логика."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+# Ошибки локального диска: кончилось место, нет прав, путь занят файлом, диск отключён.
+# Сколько ни повторяй запрос к Яндексу — они не пройдут.
+LOCAL_DISK_ERRNOS = frozenset({
+    errno.ENOSPC, errno.EACCES, errno.EPERM, errno.EROFS, errno.EEXIST,
+    errno.EISDIR, errno.ENOTDIR, errno.ENAMETOOLONG, errno.ENOENT,
+})
+
+
+def is_local_disk_error(exc: BaseException) -> bool:
+    """OSError локальной файловой системы (не сеть): место, права, отсутствующий диск."""
+    return (
+        isinstance(exc, OSError)
+        and not isinstance(exc, (ConnectionError, TimeoutError))
+        and getattr(exc, "errno", None) in LOCAL_DISK_ERRNOS
+    )
 
 
 def human_bytes(n: float) -> str:
@@ -269,10 +476,21 @@ def human_duration_ru(seconds: float | None) -> str:
     return f"{s}с"
 
 
+def ensure_utf8_stdio() -> None:
+    """Переключает stdout/stderr в UTF-8 — кириллица в консоли Windows без крякозябр."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+
 # ── Ссылки сообщества ────────────────────────────────────────────────────────
 TELEGRAM_CHANNEL = "https://t.me/davronsv"
 TELEGRAM_HANDLE = "@davronsv"
 YOUTUBE_VIDEO_URL = "https://www.youtube.com/watch?v=XAiJxqHkEUA"
+DONATION_URL = "https://www.donationalerts.com/r/davronsvv"
 
 
 def classify_yandex_error(exc: BaseException | str | None) -> dict:
@@ -297,10 +515,21 @@ def classify_yandex_error(exc: BaseException | str | None) -> dict:
         }
 
     err_str = str(exc).lower()
-    type_name = type(exc).__name__ if isinstance(exc, BaseException) else ""
+    type_name = type(exc).__name__.lower() if isinstance(exc, BaseException) else ""
+
+    # 0. Локальный диск — проверяем ПЕРВЫМ: в тексте OSError есть путь к файлу,
+    #    а в пути бывают «500» и «notfound», которые ниже приняли бы за сбой Яндекса
+    if err_str.startswith("local_disk |") or (isinstance(exc, BaseException) and is_local_disk_error(exc)):
+        return {
+            "is_yandex_server": False,
+            "category": "local_disk",
+            "title": "Проблема с локальным диском",
+            "message": "Нет места, нет прав на запись или папка скачивания недоступна (отключён диск?).",
+            "action": "Освободите место или проверьте папку скачивания в настройках, затем повторите.",
+        }
 
     # 1. 429 Too Many Requests (Rate limit Яндекса)
-    if "429" in err_str or "toomanyrequests" in err_str or "toomanyrequests" in type_name.lower():
+    if "429" in err_str or "toomanyrequests" in err_str or "toomanyrequests" in type_name:
         return {
             "is_yandex_server": True,
             "category": "rate_limit",
@@ -314,7 +543,7 @@ def classify_yandex_error(exc: BaseException | str | None) -> dict:
     server_types = ("badgateway", "gatewaytimeout", "internalserver", "unavailableerror", "servererror")
     if (
         any(code in err_str for code in server_codes)
-        or any(st in type_name.lower() for st in server_types)
+        or any(st in type_name for st in server_types)
         or "bad gateway" in err_str
         or "service unavailable" in err_str
         or "gateway timeout" in err_str
@@ -371,5 +600,3 @@ def classify_yandex_error(exc: BaseException | str | None) -> dict:
         "message": str(exc),
         "action": f"При повторении проблемы напишите в Telegram: {TELEGRAM_CHANNEL}",
     }
-
-

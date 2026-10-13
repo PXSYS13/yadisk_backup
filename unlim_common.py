@@ -1,7 +1,7 @@
-"""Общий код для модулей безлимитного фото-хранилища (unlim_download / unlim_worker).
+"""Общий код для модулей безлимитного фото-хранилища (unlim_download / unlim_worker / webui).
 
 Вынесены повторяющиеся: константы, загрузка кук, создание сессии, получение sk/uid,
-миграция БД.
+миграция БД, соединения и транзакции над unlim_state.db.
 """
 
 from __future__ import annotations
@@ -12,11 +12,14 @@ import os
 import random
 import re
 import sqlite3
-import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import requests
 from dotenv import load_dotenv
+
+from utils import sqlite_tx
 
 log = logging.getLogger("unlim")
 
@@ -58,24 +61,50 @@ CREATE TABLE IF NOT EXISTS unlim_clusters (
 """
 
 
+class UnlimError(Exception):
+    """Базовая ошибка подсистемы безлимитного хранилища."""
+
+
+class AuthExpiredError(UnlimError):
+    """Срок действия сессии или кук истёк (401/403/passport redirect)."""
+
+
+class CookiesFormatError(SystemExit, UnlimError):
+    """Неверный формат или отсутствие файла cookies.json."""
+
+
 # ── Куки и HTTP-сессия ──────────────────────────────────────────────────────
+
+# Без этих кук web-API Диска не авторизует запрос.
+REQUIRED_COOKIES = ("Session_id", "yandexuid", "sessionid2")
+
+
+def missing_required_cookies(cookies: list) -> list[str]:
+    """Какие из обязательных кук отсутствуют в массиве формата Cookie-Editor."""
+    names = {c.get("name") for c in cookies if isinstance(c, dict)}
+    return [n for n in REQUIRED_COOKIES if n not in names]
 
 
 def load_cookies(cookies_file: str | None = None) -> dict[str, str]:
     """Загружает куки из cookies.json (формат Cookie-Editor)."""
     path = cookies_file or COOKIES_FILE
     if not os.path.exists(path):
-        sys.exit("Нет cookies.json — сначала экспортируй куки из браузера. "
-                 "См. README раздел про куки.")
+        raise CookiesFormatError(
+            "Нет cookies.json — сначала экспортируй куки из браузера. "
+            "См. README раздел про куки."
+        )
     with open(path, encoding="utf-8") as f:
         raw = json.load(f)
     if not isinstance(raw, list):
-        sys.exit("cookies.json должен быть массивом (формат Cookie-Editor)")
-    return {
-        c["name"]: c["value"]
-        for c in raw
-        if c.get("name") and c.get("value")
-    }
+        raise CookiesFormatError("cookies.json должен быть массивом (формат Cookie-Editor)")
+    res: dict[str, str] = {}
+    for c in raw:
+        if isinstance(c, dict):
+            name = c.get("name")
+            value = c.get("value")
+            if isinstance(name, str) and isinstance(value, str) and name and value:
+                res[name] = value
+    return res
 
 
 def make_session(cookies: dict[str, str] | None = None,
@@ -103,11 +132,11 @@ def get_sk_uid(s: requests.Session) -> tuple[str, str]:
     """Извлекает sk и uid из HTML-страницы диска."""
     r = s.get(f"{BASE}/client/disk", timeout=30)
     if "passport.yandex" in r.url or r.status_code != 200:
-        sys.exit("Куки невалидны — нужно обновить cookies.json")
+        raise AuthExpiredError("Куки невалидны — нужно обновить cookies.json")
     sk = re.search(r'"sk"\s*:\s*"([^"]+)"', r.text)
     uid = re.search(r'"uid"\s*:\s*"?(\d+)"?', r.text)
     if not sk or not uid:
-        sys.exit("Не нашёл sk/uid в HTML — Яндекс изменил формат")
+        raise UnlimError("Не нашёл sk/uid в HTML — Яндекс изменил формат")
     return sk.group(1), uid.group(1)
 
 
@@ -136,7 +165,8 @@ def api_call(s: requests.Session, sk: str, uid: str, method: str,
                     raise RuntimeError(f"{method}: неожиданный формат ответа: {type(data).__name__}")
                 return data
             if r.status_code in (401, 403):
-                sys.exit(f"Сессия истекла (HTTP {r.status_code})")
+                raise AuthExpiredError(f"Сессия истекла (HTTP {r.status_code})")
+            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
             if r.status_code == 429:
                 wait = 30 + att * 30
                 log.warning(f"{method} HTTP 429 (Лимит запросов Яндекса) → sleep {wait}с")
@@ -144,14 +174,61 @@ def api_call(s: requests.Session, sk: str, uid: str, method: str,
                 continue
             if r.status_code >= 500:
                 log.warning(f"{method} HTTP {r.status_code} (Сбой узлов Яндекса / дата-центра) → повтор через {2 ** att}с")
-            last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+            time.sleep(2 ** att)
+        except AuthExpiredError:
+            raise
         except Exception as e:
             last_err = str(e)
             time.sleep(2 ** att)
     raise RuntimeError(f"{method}: {last_err} (Проблема на стороне серверов Яндекса. Новости и статус: https://t.me/davronsv)")
 
 
-# ── Миграция БД ─────────────────────────────────────────────────────────────
+# ── БД безлимита: соединения, транзакции, миграция ──────────────────────────
+
+
+def connect_unlim_db(db_path: str | None = None, timeout: float = 60) -> sqlite3.Connection:
+    """Соединение с unlim_state.db в WAL-режиме, строки — sqlite3.Row."""
+    c = sqlite3.connect(db_path or UNLIM_DB_FILE, timeout=timeout)
+    c.execute("PRAGMA journal_mode=WAL")
+    c.row_factory = sqlite3.Row
+    return c
+
+
+@contextmanager
+def unlim_tx(db_path: str | None = None) -> Iterator[sqlite3.Connection]:
+    """Короткая транзакция над unlim_state.db: открыть → BEGIN IMMEDIATE → COMMIT → закрыть.
+
+    Несколько воркеров пишут в одну БД параллельно, поэтому каждая операция —
+    отдельное короткое соединение и явная транзакция с блокировкой на запись.
+    """
+    c = connect_unlim_db(db_path)
+    try:
+        with sqlite_tx(c):
+            yield c
+    finally:
+        c.close()
+
+
+RESET_FAILED_SQL = (
+    "UPDATE unlim_files SET status='pending', attempts=0, error=NULL "
+    "WHERE status='failed' OR (status='pending' AND attempts > 0)"
+)
+RELEASE_IN_PROGRESS_SQL = (
+    "UPDATE unlim_files SET status='pending', worker_id=NULL WHERE status='in_progress'"
+)
+
+
+def reset_failed_files(db_path: str | None = None, *, include_in_progress: bool = False) -> int:
+    """Возвращает упавшие файлы в очередь (attempts=0). Возвращает число затронутых строк.
+
+    include_in_progress=True — также сбрасывает зависшие in_progress (когда
+    точно известно, что воркеры не работают).
+    """
+    with unlim_tx(db_path) as c:
+        n = c.execute(RESET_FAILED_SQL).rowcount
+        if include_in_progress:
+            n += c.execute(RELEASE_IN_PROGRESS_SQL).rowcount
+        return n
 
 
 def ensure_attempts_column(db_path: str | None = None) -> None:

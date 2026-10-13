@@ -16,7 +16,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from utils import human_bytes, sqlite_ro_uri
+from utils import TELEGRAM_CHANNEL, ensure_utf8_stdio, human_bytes, sqlite_ro_uri
 from utils import human_duration_ru as human_duration
 
 REFRESH_SEC = 2.0
@@ -92,12 +92,7 @@ def fetch_state() -> dict | None:
 
 
 def main() -> int:
-    # Для корректного вывода кириллицы в Windows-консоли
-    try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+    ensure_utf8_stdio()  # кириллица в Windows-консоли
 
     history: deque[tuple[float, int, int]] = deque(maxlen=HISTORY_LEN)
     started_at = time.time()
@@ -114,7 +109,7 @@ def main() -> int:
             clear_screen()
             print("=" * 70)
             print("  ЯНДЕКС.ДИСК — ПРОГРЕСС СКАЧИВАНИЯ (by Davron)")
-            print("  Канал проекта: https://t.me/davronsv | Обновление: каждые 2 сек")
+            print(f"  Канал проекта: {TELEGRAM_CHANNEL} | Обновление: каждые {REFRESH_SEC:.0f} сек")
             print("=" * 70)
 
             if not data:
@@ -191,7 +186,7 @@ def main() -> int:
                     err = (f["error"] or "")[:45]
                     tag = "ЯНДЕКС" if any(w in err.lower() for w in ("сервер", "50", "429", "timeout", "reset")) else "FAIL"
                     print(f"     [{tag}] {name} — {err}")
-                print("     (Новости о сбоях дата-центров Яндекса: https://t.me/davronsv)")
+                print(f"     (Новости о сбоях дата-центров Яндекса: {TELEGRAM_CHANNEL})")
 
             # Если всё доделано — мигаем и выходим
             if total > 0 and s["pending"] == 0:
@@ -200,7 +195,7 @@ def main() -> int:
                 if s["failed"] > 0:
                     print(f"  ⚠️  Недокачано файлов: {s['failed']} (обычно сбои узлов Яндекса).")
                     print("     Запустите повтор:  python main.py retry-failed")
-                    print("     Статус работы серверов и помощь:  https://t.me/davronsv")
+                    print(f"     Статус работы серверов и помощь:  {TELEGRAM_CHANNEL}")
                 print("=" * 70)
                 break
 

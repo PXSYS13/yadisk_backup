@@ -17,25 +17,31 @@ import logging
 import os
 import sys
 import time
+from contextlib import closing
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-import yadisk
 from dotenv import load_dotenv
 from tqdm import tqdm
 
 from downloader import (
     check_token,
     download_all,
+    make_client,
     scan_media,
     scan_tree,
 )
 from state import State
 from utils import (
+    MAX_DISK_WORKERS,
+    TELEGRAM_CHANNEL,
+    YOUTUBE_VIDEO_URL,
     compute_md5,
+    ensure_utf8_stdio,
     file_size_safe,
     human_bytes,
     human_duration,
+    safe_int,
 )
 
 # Где лежит проект — все относительные пути считаем отсюда
@@ -43,6 +49,8 @@ PROJECT_DIR = Path(__file__).resolve().parent
 LOG_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOG_DIR / "backup.log"
 DB_FILE = PROJECT_DIR / "state.db"
+
+EMPTY_COUNTERS = {"downloaded": 0, "skipped": 0, "failed": 0, "bytes": 0}
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -62,7 +70,11 @@ def setup_logging(level: str = "INFO") -> None:
     console_h.setFormatter(fmt)
 
     root = logging.getLogger("yadisk_backup")
-    root.setLevel(level.upper())
+    numeric = getattr(logging, level.upper(), None)
+    if not isinstance(numeric, int):
+        print(f"LOG_LEVEL={level!r} не распознан, использую INFO", file=sys.stderr)
+        numeric = logging.INFO
+    root.setLevel(numeric)
     # Сбрасываем хендлеры на случай повторного вызова
     root.handlers.clear()
     root.addHandler(file_h)
@@ -88,10 +100,7 @@ def load_config(require_token: bool = True) -> dict:
 
     token = os.getenv("YA_DISK_TOKEN", "").strip()
     download_dir = os.getenv("DOWNLOAD_DIR", str(PROJECT_DIR / "downloads")).strip()
-    try:
-        max_workers = int(os.getenv("MAX_WORKERS", "4"))
-    except ValueError:
-        max_workers = 4
+    max_workers = safe_int(os.getenv("MAX_WORKERS"), default=4, min_val=1, max_val=16)
     log_level = os.getenv("LOG_LEVEL", "INFO").strip() or "INFO"
 
     return {
@@ -100,6 +109,81 @@ def load_config(require_token: bool = True) -> dict:
         "max_workers": max_workers,
         "log_level": log_level,
     }
+
+
+# ── общие шаги команд ───────────────────────────────────────────────────────
+
+
+def _require_token(cfg: dict) -> int | None:
+    """Проверяет токен и печатает результат. Возвращает код выхода при ошибке, иначе None."""
+    ok, msg = check_token(cfg["token"])
+    if not ok:
+        print(msg, file=sys.stderr)
+        return 2
+    print(msg)
+    return None
+
+
+def _run_download(cfg: dict, state: State, workers: int) -> int:
+    """Запускает download_all и печатает итог. Код выхода: 0 — всё ок, 1 — были ошибки, 130 — Ctrl+C."""
+    print(f"Старт скачивания в {workers} потоков → {cfg['download_dir']}")
+    t0 = time.time()
+    counters = dict(EMPTY_COUNTERS)
+    try:
+        counters = download_all(
+            token=cfg["token"],
+            state=state,
+            download_dir=cfg["download_dir"],
+            workers=workers,
+        )
+    except KeyboardInterrupt:
+        _print_summary(counters, time.time() - t0)
+        print("\nПрервано пользователем. Прогресс сохранён в state.db.", flush=True)
+        # Потоки пула не остановить посреди файла — они держат сокеты до конца
+        # скачивания, и обычный выход ждал бы их минуты. Состояние в БД уже
+        # согласовано (WAL), недокачанные .part уберутся при следующем запуске.
+        logging.shutdown()
+        os._exit(130)
+    _print_summary(counters, time.time() - t0)
+    return 0 if counters["failed"] == 0 else 1
+
+
+class _ScanProgress:
+    """Счётчик найденных файлов: tqdm в терминале, простая строка раз в 2 с под Web UI."""
+
+    def __init__(self, label: str):
+        self.label = label
+        self.n = 0
+        self._tty = sys.stderr.isatty()
+        self._bar = tqdm(unit="file", desc=label, leave=False) if self._tty else None
+        self._last = time.monotonic()
+
+    def on_file(self, _path: str, _size: int) -> None:
+        self.n += 1
+        if self._bar is not None:
+            self._bar.update(1)
+            return
+        now = time.monotonic()
+        if now - self._last >= 2.0:
+            self._last = now
+            print(f"Найдено: {self.n} ({self.label})", flush=True)
+
+    def close(self) -> None:
+        if self._bar is not None:
+            self._bar.close()
+        else:
+            print(f"Найдено: {self.n} ({self.label})", flush=True)
+
+
+def _print_summary(counters: dict, elapsed: float) -> None:
+    print(
+        f"\nИтого: скачано {counters['downloaded']} ({human_bytes(counters['bytes'])}) | "
+        f"пропущено {counters['skipped']} | упало {counters['failed']} | "
+        f"время {human_duration(elapsed)}"
+    )
+    if counters.get("failed", 0) > 0:
+        print("  💡 Если файлы упали из-за сбоев серверов Яндекса (50x/429) — запустите: python main.py retry-failed")
+        print(f"     Новости и статус работы серверов Яндекса: {TELEGRAM_CHANNEL}")
 
 
 # ── команды ─────────────────────────────────────────────────────────────────
@@ -112,11 +196,8 @@ def cmd_check(cfg: dict, args: argparse.Namespace) -> int:
 
 
 def cmd_scan(cfg: dict, args: argparse.Namespace) -> int:
-    ok, msg = check_token(cfg["token"])
-    if not ok:
-        print(msg, file=sys.stderr)
-        return 2
-    print(msg)
+    if (code := _require_token(cfg)) is not None:
+        return code
 
     roots = (
         [r.strip() for r in args.roots.split(",") if r.strip()]
@@ -126,28 +207,22 @@ def cmd_scan(cfg: dict, args: argparse.Namespace) -> int:
 
     total_files = 0
     total_bytes = 0
-    with State(str(DB_FILE)) as state:
-        client = yadisk.Client(token=cfg["token"], default_args={"timeout": (30.0, 120.0)})
-        try:
-            for root in roots:
-                print(f"Обхожу {root}...")
-                progress = tqdm(unit="file", desc=f"Найдено [{root}]", leave=False)
-
-                def on_file(path: str, size: int) -> None:
-                    progress.update(1)
-
+    with State(str(DB_FILE)) as state, closing(make_client(cfg["token"])) as client:
+        for root in roots:
+            print(f"Обхожу {root}...")
+            progress = _ScanProgress(f"Найдено [{root}]")
+            try:
                 files, bytes_ = scan_tree(
                     client=client,
                     state=state,
                     root=root,
-                    on_file=on_file,
+                    on_file=progress.on_file,
                 )
+            finally:
                 progress.close()
-                print(f"  → {root}: {files} файлов, {human_bytes(bytes_)}")
-                total_files += files
-                total_bytes += bytes_
-        finally:
-            client.close()
+            print(f"  → {root}: {files} файлов, {human_bytes(bytes_)}")
+            total_files += files
+            total_bytes += bytes_
 
     print(f"\nИтого: {total_files} файлов, {human_bytes(total_bytes)}")
     return 0
@@ -155,32 +230,23 @@ def cmd_scan(cfg: dict, args: argparse.Namespace) -> int:
 
 def cmd_scan_media(cfg: dict, args: argparse.Namespace) -> int:
     """Сканирует ТОЛЬКО фото и видео со всего диска (через media_type)."""
-    ok, msg = check_token(cfg["token"])
-    if not ok:
-        print(msg, file=sys.stderr)
-        return 2
-    print(msg)
+    if (code := _require_token(cfg)) is not None:
+        return code
 
     media_types = tuple(t.strip() for t in args.types.split(",") if t.strip())
     print(f"Сканирую медиа: {', '.join(media_types)}")
 
-    progress = tqdm(unit="file", desc="Найдено медиа")
-
-    def on_file(path: str, size: int) -> None:
-        progress.update(1)
-
-    with State(str(DB_FILE)) as state:
-        client = yadisk.Client(token=cfg["token"], default_args={"timeout": (30.0, 120.0)})
+    progress = _ScanProgress("Найдено медиа")
+    with State(str(DB_FILE)) as state, closing(make_client(cfg["token"])) as client:
         try:
             files, total_bytes = scan_media(
                 client=client,
                 state=state,
                 media_types=media_types,
-                on_file=on_file,
+                on_file=progress.on_file,
             )
         finally:
             progress.close()
-            client.close()
 
     print(f"Найдено медиа-файлов: {files}")
     print(f"Суммарный объём: {human_bytes(total_bytes)}")
@@ -188,79 +254,31 @@ def cmd_scan_media(cfg: dict, args: argparse.Namespace) -> int:
 
 
 def cmd_download(cfg: dict, args: argparse.Namespace) -> int:
-    ok, msg = check_token(cfg["token"])
-    if not ok:
-        print(msg, file=sys.stderr)
-        return 2
-    print(msg)
+    if (code := _require_token(cfg)) is not None:
+        return code
 
     with State(str(DB_FILE)) as state:
-        pending_count = state.get_stats().get("pending", 0)
-
-        # Если ничего pending — предложить сделать scan
-        if pending_count == 0:
+        if state.get_stats().get("pending", 0) == 0:
             print("В БД нет pending-файлов. Сначала выполни: python main.py scan")
             # Но всё-равно попробуем — может пользователь сначала запустил download
             if not args.no_scan:
                 print("Запускаю scan автоматически (--no-scan чтобы отключить)...")
-                client = yadisk.Client(token=cfg["token"], default_args={"timeout": (30.0, 120.0)})
-                try:
+                with closing(make_client(cfg["token"])) as client:
                     scan_tree(client, state, root=args.root)
-                finally:
-                    client.close()
 
-        workers = args.workers or cfg["max_workers"]
-        print(f"Старт скачивания в {workers} потоков → {cfg['download_dir']}")
-
-        t0 = time.time()
-        counters = {"downloaded": 0, "skipped": 0, "failed": 0, "bytes": 0}
-        try:
-            counters = download_all(
-                token=cfg["token"],
-                state=state,
-                download_dir=cfg["download_dir"],
-                workers=workers,
-            )
-        except KeyboardInterrupt:
-            print("\nПрервано пользователем. Прогресс сохранён в state.db.")
-            return 130
-        finally:
-            elapsed = time.time() - t0
-            _print_summary(counters, elapsed)
-
-    return 0 if counters["failed"] == 0 else 1
+        return _run_download(cfg, state, args.workers or cfg["max_workers"])
 
 
 def cmd_retry_failed(cfg: dict, args: argparse.Namespace) -> int:
-    ok, msg = check_token(cfg["token"])
-    if not ok:
-        print(msg, file=sys.stderr)
-        return 2
+    if (code := _require_token(cfg)) is not None:
+        return code
 
     with State(str(DB_FILE)) as state:
         n = state.reset_failed_to_pending()
         print(f"Сброшено failed → pending: {n}")
         if n == 0:
             return 0
-
-        workers = args.workers or cfg["max_workers"]
-        t0 = time.time()
-        counters = {"downloaded": 0, "skipped": 0, "failed": 0, "bytes": 0}
-        try:
-            counters = download_all(
-                token=cfg["token"],
-                state=state,
-                download_dir=cfg["download_dir"],
-                workers=workers,
-            )
-        except KeyboardInterrupt:
-            print("\nПрервано пользователем.")
-            return 130
-        finally:
-            elapsed = time.time() - t0
-            _print_summary(counters, elapsed)
-
-    return 0 if counters["failed"] == 0 else 1
+        return _run_download(cfg, state, args.workers or cfg["max_workers"])
 
 
 def cmd_stats(cfg: dict, args: argparse.Namespace) -> int:
@@ -290,7 +308,7 @@ def cmd_verify(cfg: dict, args: argparse.Namespace) -> int:
     missing: list[str] = []
     size_mismatch: list[str] = []
 
-    bar = tqdm(rows, desc="Проверка MD5", unit="file")
+    bar = tqdm(rows, desc="Проверка MD5", unit="file", disable=not sys.stderr.isatty())
     for row in bar:
         remote = row["remote_path"]
         local = row["local_path"]
@@ -337,17 +355,6 @@ def cmd_verify(cfg: dict, args: argparse.Namespace) -> int:
     return 0 if not (missing or size_mismatch or bad) else 1
 
 
-def _print_summary(counters: dict, elapsed: float) -> None:
-    print(
-        f"\nИтого: скачано {counters['downloaded']} ({human_bytes(counters['bytes'])}) | "
-        f"пропущено {counters['skipped']} | упало {counters['failed']} | "
-        f"время {human_duration(elapsed)}"
-    )
-    if counters.get("failed", 0) > 0:
-        print("  💡 Если файлы упали из-за сбоев серверов Яндекса (50x/429) — запустите: python main.py retry-failed")
-        print("     Новости и статус работы серверов Яндекса: https://t.me/davronsv")
-
-
 # ── argparse ────────────────────────────────────────────────────────────────
 
 
@@ -372,7 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_scan_media = sub.add_parser(
         "scan-media",
-        help="Сканировать только фото и видео (включая безлимитное фото-хранилище)",
+        help="Сканировать только фото и видео на основном диске (для безлимита используйте unlim_download.py / Web UI)",
     )
     p_scan_media.add_argument(
         "--types",
@@ -382,7 +389,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan_media.set_defaults(func=cmd_scan_media)
 
     p_dl = sub.add_parser("download", help="Скачать все pending файлы")
-    p_dl.add_argument("--workers", type=int, default=None, help="Число потоков (макс 5)")
+    p_dl.add_argument("--workers", type=int, default=None, help=f"Число потоков (макс {MAX_DISK_WORKERS})")
     p_dl.add_argument("--root", default="/", help="Корень для авто-scan если БД пуста")
     p_dl.add_argument("--no-scan", action="store_true", help="Не делать авто-scan если БД пуста")
     p_dl.set_defaults(func=cmd_download)
@@ -401,21 +408,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8")
-        if hasattr(sys.stderr, "reconfigure"):
-            sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+    ensure_utf8_stdio()
 
     parser = build_parser()
     args = parser.parse_args(argv)
 
     print("=" * 65)
     print("  Yandex.Disk Backup by Davron (PXSYS)")
-    print("  Telegram: https://t.me/davronsv (новости, помощь, статус Яндекса)")
-    print("  YouTube: https://www.youtube.com/watch?v=XAiJxqHkEUA")
+    print(f"  Telegram: {TELEGRAM_CHANNEL} (новости, помощь, статус Яндекса)")
+    print(f"  YouTube: {YOUTUBE_VIDEO_URL}")
     print("=" * 65)
 
     # stats и verify читают только локальную БД — токен не нужен

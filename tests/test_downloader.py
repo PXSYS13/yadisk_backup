@@ -72,6 +72,34 @@ def test_unknown_exception_is_not_retried():
     assert _is_retryable(ValueError("nonsense")) is False
 
 
+def test_local_disk_errors_are_not_retried():
+    """Полный диск не рассосётся от 7 повторов с паузами — это десятки часов на большой очереди."""
+    import errno
+
+    assert _is_retryable(OSError(errno.ENOSPC, "No space left on device")) is False
+    assert _is_retryable(PermissionError(errno.EACCES, "denied")) is False
+    assert _is_retryable(OSError("generic io without errno")) is True
+
+
+def test_makedirs_failure_becomes_failed_result_not_exception(tmp_path, monkeypatch):
+    """Раньше исключение из makedirs в потоке роняло весь download_all."""
+    import errno
+
+    import downloader
+
+    def boom(_path):
+        raise FileExistsError(errno.EEXIST, "file exists where a folder is expected")
+
+    monkeypatch.setattr(downloader, "_ensure_local_dirs", boom)
+    res = _download_one(
+        DownloadJob(remote_path="disk:/disk/x.jpg", size=1, md5=None),
+        FakeClient(),
+        str(tmp_path),
+    )
+    assert res.status == "failed"
+    assert (res.error or "").startswith("local_disk |")
+
+
 def test_wait_policy_sleeps_a_minute_on_429():
     """Раньше эта ветка была мёртвым кодом и не срабатывала никогда."""
     wait = _wait_policy(_RetryState(_err(yadisk.exceptions.TooManyRequestsError)))
@@ -156,3 +184,188 @@ def test_close_all_clients_clears_registry():
     downloader._close_all_clients()
     assert len(downloader._all_clients) == 0
     assert dummy.closed is True
+
+
+def test_existing_file_same_size_md5_match_is_skipped(tmp_path):
+    import hashlib
+
+    data = b"hello_yadisk"
+    target = tmp_path / "disk" / "doc.txt"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(data)
+
+    digest = hashlib.md5(data).hexdigest()
+    cli = FakeClient()
+    res = _download_one(
+        DownloadJob(remote_path="disk:/disk/doc.txt", size=len(data), md5=digest),
+        cli,
+        str(tmp_path),
+    )
+    assert res.status == "skipped"
+    assert cli.calls == []
+
+
+def test_existing_file_same_size_md5_mismatch_is_redownloaded(tmp_path):
+    import hashlib
+
+    target = tmp_path / "disk" / "doc.txt"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"corrupted123")
+
+    real_data = b"original1234"
+    real_md5 = hashlib.md5(real_data).hexdigest()
+
+    cli = FakeClient(payload=real_data)
+    res = _download_one(
+        DownloadJob(remote_path="disk:/disk/doc.txt", size=len(real_data), md5=real_md5),
+        cli,
+        str(tmp_path),
+    )
+    assert res.status == "downloaded"
+    assert len(cli.calls) == 1
+    assert target.read_bytes() == real_data
+
+
+def test_download_one_cleans_up_part_file_on_failure(tmp_path, monkeypatch):
+    import downloader
+
+    def fail_download(cli, remote, local):
+        with open(local, "wb") as f:
+            f.write(b"part_data")
+        raise ConnectionError("dropped")
+
+    monkeypatch.setattr(downloader, "_download_with_retry", fail_download)
+    cli = FakeClient()
+    res = _download_one(
+        DownloadJob(remote_path="disk:/disk/fail.txt", size=10, md5=None),
+        cli,
+        str(tmp_path),
+    )
+    assert res.status == "failed"
+    target = tmp_path / "disk" / "fail.txt"
+    part_file = tmp_path / "disk" / "fail.txt.part"
+    assert not target.exists()
+    assert not part_file.exists()
+
+
+def test_download_one_diagnostics_classification(tmp_path, monkeypatch):
+    import downloader
+
+    def make_failer(exc):
+        def _fail(cli, remote, local):
+            raise exc
+
+        return _fail
+
+    # Server 50x
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_retry",
+        make_failer(yadisk.exceptions.BadGatewayError("bad gw")),
+    )
+    r500 = _download_one(
+        DownloadJob(remote_path="disk:/disk/f1.txt", size=10, md5=None),
+        FakeClient(),
+        str(tmp_path),
+    )
+    assert "server_50x" in (r500.error or "")
+
+    # Timeout
+    monkeypatch.setattr(
+        downloader, "_download_with_retry", make_failer(TimeoutError("timed out"))
+    )
+    r_to = _download_one(
+        DownloadJob(remote_path="disk:/disk/f2.txt", size=10, md5=None),
+        FakeClient(),
+        str(tmp_path),
+    )
+    assert "download_timeout" in (r_to.error or "")
+
+    # Auth expired
+    monkeypatch.setattr(
+        downloader,
+        "_download_with_retry",
+        make_failer(yadisk.exceptions.UnauthorizedError("bad token")),
+    )
+    r_auth = _download_one(
+        DownloadJob(remote_path="disk:/disk/f3.txt", size=10, md5=None),
+        FakeClient(),
+        str(tmp_path),
+    )
+    assert "auth_expired" in (r_auth.error or "")
+
+
+
+def test_download_all_lazy_bounded_queue(tmp_path, monkeypatch):
+    import threading
+    import downloader
+
+    yielded_count = 0
+    in_flight_at_start = []
+    first_worker_started = threading.Event()
+    release_workers = threading.Event()
+
+    class FakeState:
+        def assign_local_paths(self, download_dir):
+            pass
+
+        def get_pending_stats(self):
+            return {"count": 20, "bytes": 200}
+
+        def get_pending(self):
+            nonlocal yielded_count
+            for i in range(20):
+                yielded_count += 1
+                yield {
+                    "remote_path": f"disk:/f{i}.txt",
+                    "size": 10,
+                    "md5": None,
+                    "local_path": None,
+                }
+
+        def mark_done(self, **kwargs):
+            pass
+
+        def mark_downloaded(self, remote_path, local_path):
+            pass
+
+        def mark_failed(self, **kwargs):
+            pass
+
+        def mark_skipped(self, **kwargs):
+            pass
+
+    def mock_download_one(job, client, download_dir):
+        if not first_worker_started.is_set():
+            in_flight_at_start.append(yielded_count)
+            first_worker_started.set()
+        release_workers.wait(timeout=2.0)
+        return downloader.DownloadResult(
+            job=job,
+            status="downloaded",
+            local_path=str(tmp_path / "dummy"),
+            bytes_written=10,
+            error=None,
+            duration_ms=5,
+        )
+
+    monkeypatch.setattr(downloader, "_download_one", mock_download_one)
+    monkeypatch.setattr(downloader, "_get_thread_client", lambda token: None)
+
+    # Запускаем в отдельном потоке, передавая (token, state, download_dir)
+    t = threading.Thread(
+        target=downloader.download_all,
+        args=("fake_token", FakeState(), str(tmp_path)),
+        kwargs={"workers": 2},
+    )
+    t.start()
+
+    assert first_worker_started.wait(timeout=2.0)
+    # При старте первых воркеров генератор не должен быть выкачан целиком (20 задач)
+    # max_in_flight для workers=2 равен max(2*2, 4) = 4
+    assert in_flight_at_start[0] <= 5
+    release_workers.set()
+    t.join(timeout=5.0)
+    assert not t.is_alive()
+
+

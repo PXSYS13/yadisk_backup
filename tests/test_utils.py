@@ -191,3 +191,162 @@ def test_classify_yandex_error():
     assert res_404["category"] == "not_found"
 
 
+def test_resolve_local_path_deterministic_collision_resolution(tmp_path):
+    from utils import resolve_local_path
+
+    out_dir = str(tmp_path / "downloads")
+    # Три удалённых пути, которые раньше санитизировались в одно имя a_b.jpg
+    p_colon = resolve_local_path(out_dir, "disk:/photos/a:b.jpg")
+    p_question = resolve_local_path(out_dir, "disk:/photos/a?b.jpg")
+    p_underscore = resolve_local_path(out_dir, "disk:/photos/a_b.jpg")
+
+    assert p_colon != p_question
+    assert p_colon != p_underscore
+    assert p_question != p_underscore
+
+    # Стандартный путь без спецсимволов сохраняет чистое имя без хеша (не ломает resume)
+    assert p_underscore.endswith("photos/a_b.jpg") or p_underscore.endswith("photos\\a_b.jpg")
+
+    # Повторные вызовы детерминированы
+    assert resolve_local_path(out_dir, "disk:/photos/a:b.jpg") == p_colon
+
+
+def test_resolve_local_path_windows_case_collision(tmp_path):
+    from utils import resolve_local_path
+
+    out_dir = str(tmp_path / "downloads")
+    existing: set[str] = set()
+    p1 = resolve_local_path(out_dir, "disk:/docs/file.txt", existing_paths=existing)
+    p2 = resolve_local_path(out_dir, "disk:/docs/FILE.txt", existing_paths=existing)
+
+    assert p1.lower() != p2.lower()
+
+
+def test_is_safe_download_dir(tmp_path):
+    import os
+    from utils import is_safe_download_dir
+
+    # Корни дисков
+    ok, msg = is_safe_download_dir("C:\\")
+    assert ok is False
+    assert "корень" in msg
+
+    ok, msg = is_safe_download_dir("D:\\")
+    assert ok is False
+
+    # Системная папка
+    ok, msg = is_safe_download_dir("C:\\Windows")
+    assert ok is False
+    assert "Системная папка" in msg
+
+    # Домашняя папка целиком
+    home = os.path.expanduser("~")
+    if home:
+        ok, msg = is_safe_download_dir(home)
+        assert ok is False
+        assert "домашнюю" in msg
+
+    # Пустой и относительный
+    assert is_safe_download_dir("")[0] is False
+    assert is_safe_download_dir("relative/path")[0] is False
+
+    # Нормальная папка
+    safe_dir = str(tmp_path / "my_backup")
+    ok, _ = is_safe_download_dir(safe_dir)
+    assert ok is True
+
+
+def test_is_safe_dir_long_path_prefix_does_not_bypass_checks():
+    from utils import is_safe_dir
+
+    assert is_safe_dir(r"\\?\C:\Windows\Temp\bk")[0] is False
+    assert is_safe_dir(r"\\?\C:\\")[0] is False
+
+
+def test_local_disk_errors_are_recognized():
+    import errno
+
+    from utils import classify_yandex_error, is_local_disk_error
+
+    no_space = OSError(errno.ENOSPC, "No space left on device", r"D:\backup\IMG_5003.jpg.part")
+    assert is_local_disk_error(no_space) is True
+    assert is_local_disk_error(ConnectionResetError(104, "reset")) is False
+    assert is_local_disk_error(FileNotFoundError(errno.ENOENT, "gone")) is True
+
+    # В пути «5003» и «notfound» — раньше это считалось сбоем Яндекса / 404
+    diag = classify_yandex_error(no_space)
+    assert diag["category"] == "local_disk"
+    assert diag["is_yandex_server"] is False
+    assert classify_yandex_error("local_disk | OSError: boom")["category"] == "local_disk"
+
+
+def test_is_safe_dir_must_exist(tmp_path):
+    from utils import is_safe_dir
+
+    missing = str(tmp_path / "нет-такой")
+    ok, msg = is_safe_dir(missing, must_exist=True)
+    assert ok is False
+    assert "не существует" in msg
+    # Та же папка годится как цель скачивания — её создадут
+    assert is_safe_dir(missing, must_exist=False)[0] is True
+
+    ok, msg = is_safe_dir("relative/path", must_exist=True)
+    assert ok is False
+    assert "абсолютным" in msg
+
+
+def test_safe_int():
+    from utils import safe_int
+
+    assert safe_int("4") == 4
+    assert safe_int("garbage", default=4) == 4
+    assert safe_int(None, default=5) == 5
+    assert safe_int("-1", min_val=1) == 1
+    assert safe_int("999", max_val=16) == 16
+
+
+def test_organize_get_date_filename_regex(tmp_path):
+    import organize
+
+    f1 = tmp_path / "2022-04-15_vacation.jpg"
+    f1.write_text("dummy")
+    assert organize.get_date(str(f1)) == (2022, 4)
+
+    f2 = tmp_path / "IMG_20210930_1234.png"
+    f2.write_text("dummy")
+    assert organize.get_date(str(f2)) == (2021, 9)
+
+
+def test_organize_get_date_jpeg_exif(tmp_path):
+    import organize
+
+    # Создаём валидный минимальный JPEG с сегментом APP1 Exif и датой 2017:11:05
+    exif_content = (
+        b"Exif\x00\x00II*\x00\x08\x00\x00\x00\x01\x00\x03\x90\x02\x00\x14\x00\x00\x00"
+        b"\x1a\x00\x00\x00\x00\x00\x00\x002017:11:05 15:30:00\x00"
+    )
+    app1 = b"\xff\xe1" + (len(exif_content) + 2).to_bytes(2, "big") + exif_content
+    jpeg_data = b"\xff\xd8" + app1 + b"\xff\xd9"
+
+    img_file = tmp_path / "DSC_0001.jpg"
+    img_file.write_bytes(jpeg_data)
+
+    assert organize.get_date(str(img_file)) == (2017, 11)
+
+
+def test_organize_get_date_mtime_fallback(tmp_path):
+    import os
+    import organize
+
+    unknown = tmp_path / "random_file.doc"
+    unknown.write_text("data")
+    # Устанавливаем mtime на фиксированную дату (2020-02-01)
+    import time
+    ts = time.mktime((2020, 2, 1, 12, 0, 0, 0, 0, -1))
+    os.utime(str(unknown), (ts, ts))
+
+    assert organize.get_date(str(unknown)) == (2020, 2)
+
+
+
+

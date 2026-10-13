@@ -39,35 +39,137 @@ from utils import (
     DIR_PROGRAM,
     DIR_VIDEO,
     classify_dir,
+    compute_md5,
+    ensure_utf8_stdio,
     human_bytes,
-)
-from utils import (
-    compute_md5 as compute_md5_file,
+    is_safe_dir,
 )
 
 SKIP_DIRS = {DIR_PHOTO, DIR_VIDEO, DIR_DOC, DIR_ARCHIVE, DIR_PROGRAM,
-             DIR_AUDIO, DIR_OTHER, DIR_DUP, ".sync"}
+             DIR_AUDIO, DIR_OTHER, DIR_DUP, ".sync", "_unlim_tmp_zips"}
+# Недокачанные файлы и БД состояния — не трогаем
+SKIP_SUFFIXES = (".part", ".db", ".db-wal", ".db-shm")
+
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def is_project_dir(root: str) -> bool:
+    """Папка проекта или её родитель: move-режим утащил бы state.db, .env и сами скрипты."""
+    try:
+        return os.path.commonpath([os.path.abspath(root), PROJECT_DIR]) == os.path.abspath(root)
+    except ValueError:  # разные диски на Windows
+        return False
 
 DATE_REGEXES = [
-    re.compile(r"(20\d{2})[-_.](\d{2})[-_.](\d{2})"),
-    re.compile(r"(20\d{2})(\d{2})(\d{2})"),
-    re.compile(r"IMG_(20\d{2})(\d{2})(\d{2})"),
-    re.compile(r"VID-(20\d{2})(\d{2})(\d{2})"),
+    re.compile(r"(19\d{2}|20\d{2})[-_.](\d{2})[-_.](\d{2})"),
+    re.compile(r"(19\d{2}|20\d{2})(\d{2})(\d{2})"),
+    re.compile(r"IMG_(19\d{2}|20\d{2})(\d{2})(\d{2})"),
+    re.compile(r"VID-(19\d{2}|20\d{2})(\d{2})(\d{2})"),
 ]
+
+
+def _parse_exif_date_str(val: str | bytes) -> tuple[int, int] | None:
+    if isinstance(val, bytes):
+        try:
+            val = val.decode("utf-8", "ignore")
+        except Exception:
+            return None
+    s = str(val).strip()
+    m = re.match(r"^(19\d{2}|20\d{2})[:\-\.](\d{2})", s)
+    if m:
+        try:
+            y, mo = int(m.group(1)), int(m.group(2))
+            if 1970 <= y <= 2035 and 1 <= mo <= 12:
+                return y, mo
+        except (ValueError, IndexError):
+            pass
+    return None
+
+
+def _get_exif_date_jpeg(path: str) -> tuple[int, int] | None:
+    """Извлекает дату съёмки из APP1 сегмента JPEG без внешних зависимостей."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(2)
+            if header != b"\xff\xd8":
+                return None
+            while True:
+                marker = f.read(2)
+                if len(marker) < 2 or marker[0] != 0xff or marker in (b"\xff\xd9", b"\xff\xda"):
+                    break
+                length_bytes = f.read(2)
+                if len(length_bytes) < 2:
+                    break
+                length = int.from_bytes(length_bytes, "big") - 2
+                if length <= 0:
+                    continue
+                if marker == b"\xff\xe1":  # APP1 (Exif)
+                    data = f.read(length)
+                    if data.startswith(b"Exif\x00\x00"):
+                        m = re.search(rb"(19\d{2}|20\d{2}):(\d{2}):(\d{2})", data)
+                        if m:
+                            y = int(m.group(1).decode("ascii"))
+                            mo = int(m.group(2).decode("ascii"))
+                            if 1970 <= y <= 2035 and 1 <= mo <= 12:
+                                return y, mo
+                    break
+                else:
+                    f.seek(length, os.SEEK_CUR)
+    except Exception:
+        pass
+    return None
+
+
+def _get_exif_date_pil(path: str) -> tuple[int, int] | None:
+    """Извлекает дату съёмки через Pillow для форматов HEIC, TIFF, PNG, WebP и т.д."""
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            exif = img.getexif()
+            if not exif:
+                return None
+            dt = exif.get(0x0132) or exif.get(306)
+            try:
+                exif_ifd = exif.get_ifd(0x8769)
+                if exif_ifd:
+                    dt = exif_ifd.get(0x9003) or exif_ifd.get(0x9004) or dt
+            except Exception:
+                pass
+            if dt:
+                return _parse_exif_date_str(dt)
+    except Exception:
+        pass
+    return None
+
+
+def get_exif_date(path: str) -> tuple[int, int] | None:
+    """Извлекает дату съёмки из метаданных изображения (EXIF)."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".jpg", ".jpeg"):
+        d = _get_exif_date_jpeg(path)
+        if d:
+            return d
+    return _get_exif_date_pil(path)
 
 
 def get_date(path: str) -> tuple[int, int]:
     name = os.path.basename(path)
+    # 1. Поиск даты в имени файла
     for rx in DATE_REGEXES:
         m = rx.search(name)
         if m:
             try:
                 y = int(m.group(1))
                 mo = int(m.group(2))
-                if 2000 <= y <= 2030 and 1 <= mo <= 12:
+                if 1970 <= y <= 2035 and 1 <= mo <= 12:
                     return y, mo
             except (ValueError, IndexError):
                 pass
+    # 2. Поиск даты съёмки в EXIF метаданных для изображений
+    exif_date = get_exif_date(path)
+    if exif_date:
+        return exif_date
+    # 3. Fallback на mtime файла
     try:
         t = time.localtime(os.path.getmtime(path))
         return t.tm_year, t.tm_mon
@@ -104,6 +206,8 @@ def scan(root: str) -> list[dict]:
     for dp, dirs, fns in os.walk(root):
         dirs[:] = [d for d in dirs if os.path.join(dp, d) not in skip]
         for fn in fns:
+            if fn.lower().endswith(SKIP_SUFFIXES):
+                continue
             full = os.path.join(dp, fn)
             try:
                 files.append({"path": full, "size": os.path.getsize(full)})
@@ -123,7 +227,7 @@ def compute_md5_batch(files: list[dict]):
     print(f"  Подозреваемых: {len(suspect)}")
     for i, f in enumerate(suspect):
         try:
-            f["md5"] = compute_md5_file(f["path"])
+            f["md5"] = compute_md5(f["path"])
         except OSError:
             f["md5"] = None
         if (i + 1) % 500 == 0:
@@ -145,11 +249,7 @@ def find_dup_paths(files: list[dict]) -> set[str]:
 
 
 def main():
-    try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+    ensure_utf8_stdio()
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
@@ -161,17 +261,12 @@ def main():
     if not os.path.isdir(root):
         sys.exit(f"Нет папки: {root}")
 
-    # Лёгкая проверка безопасности пути (без импорта тяжёлого webui.py)
-    import re as _re
-    _norm = root.lower().replace("/", "\\")
-    _abs_norm = os.path.abspath(root).lower().replace("/", "\\")
-    if (len(_abs_norm) <= 3 and _abs_norm.endswith(":\\")) or _norm in ("\\", "/"):
-        sys.exit("Опасный путь для сортировки: корень диска")
-    home = os.path.expanduser("~")
-    if home and os.path.abspath(root).lower() == os.path.abspath(home).lower():
-        sys.exit("Опасный путь для сортировки: домашняя папка")
-    if _re.match(r"^[a-z]:\\(windows|program files|program files \(x86\)|programdata|\$recycle\.bin)(\\|$)", _abs_norm):
-        sys.exit(f"Опасный путь для сортировки: системная папка: {root}")
+    # Та же проверка, что и в Web UI: корень диска, домашняя и системные папки — нельзя
+    ok, why = is_safe_dir(root, must_exist=True)
+    if not ok:
+        sys.exit(f"Опасный путь для сортировки: {why}")
+    if is_project_dir(root):
+        sys.exit("Опасный путь для сортировки: это папка самого инструмента (state.db, .env, скрипты)")
 
     print("=" * 60)
     print(f"  СОРТИРОВКА: {root}")
