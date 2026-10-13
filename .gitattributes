@@ -1,0 +1,3 @@
+# .bat must stay CRLF: cmd.exe misparses goto labels in LF-only files, and GitHub ZIPs ship files as stored
+*.bat -text
+*.sh text eol=lf
