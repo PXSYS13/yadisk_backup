@@ -52,3 +52,7 @@ desktop.ini
 build/
 dist/
 *.egg-info/
+
+# Посты для Telegram-канала — готовим локально, в репозиторий не кладём
+TELEGRAM_POST*.md
+posts/
