@@ -937,7 +937,7 @@ def test_guide_renders_instruction_with_working_toc():
     resp = client.get("/guide")
     assert resp.status_code == 200
     html = resp.text
-    assert "Получение OAuth-токена" in html
+    assert "Шаг 4. Получите токен" in html and "webui.command" in html
     assert "[!NOTE]" not in html and "flowchart" not in html
     assert 'class="note"' in html
     ids = set(_re.findall(r'id="([^"]+)"', html))

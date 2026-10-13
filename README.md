@@ -37,6 +37,8 @@
 
 ## Установка и запуск
 
+> **Впервые и не программист?** Откройте [пошаговую инструкцию для новичков](https://github.com/PXSYS13/yadisk_backup/blob/main/INSTRUCTION_GET_TOKEN.md): там по шагам, что скачать, куда нажать и что делать, если что-то пошло не так.
+
 Проект работает на [uv](https://docs.astral.sh/uv/) — он сам ставит нужный Python и все зависимости из `uv.lock`. Отдельно устанавливать Python и pip не нужно.
 
 ### Вариант 1 — Один клик (для всех)
@@ -44,7 +46,9 @@
 1. Скачай проект: `git clone https://github.com/PXSYS13/yadisk_backup.git` или ZIP с GitHub (зелёная кнопка `Code → Download ZIP`) и распакуй.
 2. Запусти:
    **Windows:** двойной клик по **`webui.bat`**  
-   **Linux / macOS:** `bash webui.sh`
+   **macOS:** двойной клик по **`webui.command`**  
+   **Linux:** правой кнопкой в папке → «Открыть в терминале» → `bash webui.sh`  
+   Подробно, с тем, что делать, если macOS не даёт открыть файл: [инструкция, часть 0](https://github.com/PXSYS13/yadisk_backup/blob/main/INSTRUCTION_GET_TOKEN.md#-часть-0-где-скачать-программу-и-как-её-запустить)
 
 При первом запуске лаунчер сам установит uv (официальный инсталлер, один раз), uv скачает Python и зависимости (1–2 минуты), и откроется браузер на `http://localhost:8000`.
 
@@ -123,7 +127,8 @@ uv run webui.py
 ```
 yadisk_backup/
 ├── webui.bat             ← Запуск под Windows (один клик, всё сам)
-├── webui.sh              ← Запуск под Linux/macOS
+├── webui.command         ← Запуск под macOS (двойной клик)
+├── webui.sh              ← Запуск под Linux (и основа для macOS)
 ├── webui.py              ← FastAPI сервер
 ├── webui_assets/
 │   └── index.html        ← Дашборд (HTML + CSS + JS)
