@@ -16,6 +16,13 @@ logs/
 downloads/
 *.log
 
+# Локальные заметки, планы и конфиги инструментов разработки — не для репозитория
+PLAN.md
+*.local.md
+.claude/
+support-info.json
+yadisk-logs-*.zip
+
 # Python кеш
 __pycache__/
 *.pyc

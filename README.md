@@ -144,7 +144,6 @@ yadisk_backup/
 ├── .github/workflows/    ← CI: ruff + pytest на Windows и Linux
 │
 ├── yandex_health.py      ← Монитор состояния серверов Яндекса (пробы раз в минуту)
-├── PLAN.md               ← План восстановления проекта и работы во время сбоев Яндекса
 │
 ├── .env.example          ← Шаблон конфига (создаётся при первом сохранении настроек)
 ├── .gitignore
