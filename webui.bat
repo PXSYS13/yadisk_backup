@@ -10,72 +10,36 @@ echo   Yandex.Disk Backup
 echo ============================================================
 echo.
 
-REM ==== 0) If uv is installed, use it directly (super fast) ====
+REM uv manages Python and all dependencies (pyproject.toml + uv.lock).
+REM If it is missing, install it once (official installer, ~10 seconds).
 where uv >nul 2>&1
-if not errorlevel 1 (
-    echo [*] Starting via uv...
-    uv run webui.py
-    goto :done
-)
-
-REM ==== 1) Check Python ====
-where python >nul 2>&1
 if errorlevel 1 (
-    echo [!] Python or uv is not installed.
+    echo [setup] uv not found. Installing uv - runs ONLY ONCE...
     echo.
-    echo Opening Python download page...
-    echo During install, CHECK the "Add Python to PATH" box!
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+    if errorlevel 1 goto :uvfail
+    set "PATH=%USERPROFILE%\.local\bin;%PATH%"
+    where uv >nul 2>&1
+    if errorlevel 1 goto :uvfail
     echo.
-    start "" "https://www.python.org/downloads/"
-    echo.
-    echo After installing Python, run this file again.
-    pause
-    exit /b 1
-)
-
-REM ==== 2) Check Python version (need 3.10+) ====
-python -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" >nul 2>&1
-if errorlevel 1 (
-    echo [!] Python is too old. Need 3.10 or newer.
-    python --version
-    pause
-    exit /b 1
-)
-
-REM ==== 3) Make sure pip is available ====
-python -m pip --version >nul 2>&1
-if errorlevel 1 (
-    echo [setup] Installing pip...
-    python -m ensurepip --upgrade
-    if errorlevel 1 (
-        echo [!] Could not install pip. Try reinstalling Python.
-        pause
-        exit /b 1
-    )
-)
-
-REM ==== 4) Check if all required packages are installed ====
-python -c "import fastapi, uvicorn, yadisk, tqdm, dotenv, tenacity, requests" >nul 2>&1
-if errorlevel 1 (
-    echo [setup] Installing dependencies. This runs ONLY ONCE, takes 1-2 min...
-    echo.
-    python -m pip install --upgrade pip --quiet --disable-pip-version-check >nul 2>&1
-    python -m pip install -r requirements.txt --disable-pip-version-check
-    if errorlevel 1 (
-        echo.
-        echo [!] Failed to install dependencies.
-        echo Check your internet connection.
-        echo Or run manually: pip install -r requirements.txt
-        pause
-        exit /b 1
-    )
-    echo.
-    echo [OK] All dependencies installed!
+    echo [OK] uv installed.
     echo.
 )
 
-REM ==== 5) Start the server ====
-python webui.py
+echo [*] Starting via uv (first run downloads Python and dependencies, 1-2 min)...
+echo.
+uv run webui.py
+goto :done
+
+:uvfail
+echo.
+echo [!] Could not install uv automatically.
+echo     Install it manually and run this file again:
+echo     https://docs.astral.sh/uv/getting-started/installation/
+echo.
+start "" "https://docs.astral.sh/uv/getting-started/installation/"
+pause
+exit /b 1
 
 :done
 echo.

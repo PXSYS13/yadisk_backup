@@ -37,34 +37,24 @@
 
 ## Установка и запуск
 
-### Вариант 1 — Через uv (рекомендуется)
-Если у вас установлен [uv](https://docs.astral.sh/uv/):
+Проект работает на [uv](https://docs.astral.sh/uv/) — он сам ставит нужный Python и все зависимости из `uv.lock`. Отдельно устанавливать Python и pip не нужно.
+
+### Вариант 1 — Один клик (для всех)
+
+1. Скачай проект: `git clone https://github.com/PXSYS13/yadisk_backup.git` или ZIP с GitHub (зелёная кнопка `Code → Download ZIP`) и распакуй.
+2. Запусти:
+   **Windows:** двойной клик по **`webui.bat`**  
+   **Linux / macOS:** `bash webui.sh`
+
+При первом запуске лаунчер сам установит uv (официальный инсталлер, один раз), uv скачает Python и зависимости (1–2 минуты), и откроется браузер на `http://localhost:8000`.
+
+### Вариант 2 — Если uv уже стоит
+
 ```bash
 git clone https://github.com/PXSYS13/yadisk_backup.git
 cd yadisk_backup
 uv run webui.py
 ```
-*Все зависимости установятся автоматически за доли секунды.*
-
----
-
-### Вариант 2 — Классический (без uv)
-
-#### Шаг 1 — Установи Python (если ещё не стоит)
-Скачай Python 3.10+ с [python.org/downloads](https://www.python.org/downloads/).
-**При установке отметь галочку «Add Python to PATH»** — это важно!
-
-#### Шаг 2 — Скачай проект
-```bash
-git clone https://github.com/PXSYS13/yadisk_backup.git
-```
-Или просто скачай ZIP с GitHub (зелёная кнопка `Code → Download ZIP`) и распакуй.
-
-#### Шаг 3 — Запусти
-**Windows:** двойной клик по **`webui.bat`**  
-**Linux / macOS:** `bash webui.sh`
-
-При первом запуске скрипт сам проверит Python, доставит зависимости и откроет браузер на `http://localhost:8000`.
 
 ---
 
@@ -149,10 +139,13 @@ yadisk_backup/
 ├── tests/                ← pytest: санитизация путей, zip-slip, БД, ретраи
 ├── .github/workflows/    ← CI: ruff + pytest на Windows и Linux
 │
+├── yandex_health.py      ← Монитор состояния серверов Яндекса (пробы раз в минуту)
+├── PLAN.md               ← План восстановления проекта и работы во время сбоев Яндекса
+│
 ├── .env.example          ← Шаблон конфига (создаётся при первом сохранении настроек)
 ├── .gitignore
-├── requirements.txt      ← Зависимости приложения
-├── requirements-dev.txt  ← Зависимости для тестов
+├── pyproject.toml        ← Зависимости и настройки (uv)
+├── uv.lock               ← Зафиксированные версии зависимостей
 ├── README.md
 └── logs/                 ← логи работы
 ```
@@ -187,19 +180,19 @@ python organize.py --input "D:/Backup" --action move    # применить
 
 ## Часто задаваемые вопросы
 
-### Запустил `webui.bat`, а он говорит «Python is not installed»
+### Запустил `webui.bat`, а он говорит «Could not install uv automatically»
 
-Установи Python с [python.org/downloads](https://www.python.org/downloads/) и **обязательно** отметь галочку «Add Python to PATH» при установке. После этого закрой все cmd-окна и запусти `webui.bat` снова.
+Инсталлер uv не смог скачаться (фаервол, прокси, нет PowerShell). Установи uv вручную по инструкции [docs.astral.sh/uv/getting-started/installation](https://docs.astral.sh/uv/getting-started/installation/), закрой все cmd-окна и запусти `webui.bat` снова.
 
-### Установка зависимостей зависла
+### Первый запуск долго «думает»
 
-Проверь интернет. Если медленный — `pip install -r requirements.txt` может занять до 5 минут.
+uv скачивает Python и зависимости — 1–2 минуты на обычном интернете, дальше запуск мгновенный. Если висит дольше 10 минут — проверь интернет и повтори: `uv run webui.py` в папке проекта покажет, на чём застряло.
 
-### При запуске пишет «Failed to install dependencies»
+### Установка зависимостей упала
 
-Скорее всего pip не имеет доступа в интернет (фаервол / прокси). Попробуй вручную:
+Скорее всего uv не имеет доступа в интернет (фаервол / прокси). Попробуй вручную в папке проекта:
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 Если ошибка повторится — скриншот в issue на GitHub.
 
@@ -274,12 +267,12 @@ uvicorn>=0.32.0     # ASGI runner
 ## Разработка
 
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
-pytest -q            # тесты
-ruff check --select F,E9 .   # линтер
+uv sync              # окружение с dev-зависимостями (pytest, ruff, httpx)
+uv run pytest -q     # тесты
+uv run ruff check .  # линтер
 ```
 
-Те же две команды гоняет CI на каждый push и pull request — на Windows и Linux, Python 3.10 и 3.13.
+Те же две команды гоняет CI на каждый push и pull request — на Windows и Linux, Python 3.10 и 3.13. Зависимости описаны в `pyproject.toml` и зафиксированы в `uv.lock`; `requirements.txt` больше нет.
 
 ---
 

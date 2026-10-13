@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Yandex.Disk Backup — Linux/macOS launcher with auto-setup
+# Yandex.Disk Backup — Linux/macOS launcher. uv manages Python and dependencies.
 
 set -e
 cd "$(dirname "$0")"
@@ -12,47 +12,29 @@ echo "  Yandex.Disk Backup"
 echo "============================================================"
 echo
 
-# 0) If uv is installed, run directly
-if command -v uv >/dev/null 2>&1; then
-    echo "[*] Starting via uv..."
-    exec uv run webui.py
-fi
-
-# 1) Find Python 3.10+
-PY=""
-for cand in python3.13 python3.12 python3.11 python3.10 python3 python; do
-    if command -v "$cand" >/dev/null 2>&1; then
-        if "$cand" -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>/dev/null; then
-            PY="$cand"
-            break
-        fi
+if ! command -v uv >/dev/null 2>&1; then
+    echo "[setup] uv not found. Installing uv - runs ONLY ONCE..."
+    echo
+    if command -v curl >/dev/null 2>&1; then
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- https://astral.sh/uv/install.sh | sh
+    else
+        echo "[!] Neither curl nor wget found. Install uv manually:"
+        echo "    https://docs.astral.sh/uv/getting-started/installation/"
+        exit 1
     fi
-done
-
-if [ -z "$PY" ]; then
-    echo "[!] Python 3.10+ not found."
-    echo "Install Python first:"
-    echo "  Ubuntu/Debian: sudo apt install python3 python3-pip"
-    echo "  macOS:         brew install python"
-    exit 1
-fi
-
-# 2) Make sure pip is available
-if ! "$PY" -m pip --version >/dev/null 2>&1; then
-    echo "[setup] Installing pip..."
-    "$PY" -m ensurepip --upgrade
-fi
-
-# 3) Check dependencies
-if ! "$PY" -c "import fastapi, uvicorn, yadisk, tqdm, dotenv, tenacity, requests" >/dev/null 2>&1; then
-    echo "[setup] Installing dependencies. Runs ONLY ONCE, takes 1-2 min..."
+    export PATH="$HOME/.local/bin:$PATH"
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "[!] Could not install uv automatically. Install it manually:"
+        echo "    https://docs.astral.sh/uv/getting-started/installation/"
+        exit 1
+    fi
     echo
-    "$PY" -m pip install --upgrade pip --quiet 2>/dev/null || true
-    "$PY" -m pip install -r requirements.txt
-    echo
-    echo "[OK] All dependencies installed!"
+    echo "[OK] uv installed."
     echo
 fi
 
-# 4) Start server
-"$PY" webui.py
+echo "[*] Starting via uv (first run downloads Python and dependencies, 1-2 min)..."
+echo
+exec uv run webui.py
