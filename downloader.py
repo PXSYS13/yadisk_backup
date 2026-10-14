@@ -37,7 +37,9 @@ from storage_fetch import DeadHosts, FetchFailure, fetch_preview, fetch_to_file
 from utils import (
     APP_VERSION,
     MAX_DISK_WORKERS,
+    SKIP_PATH_PREFIXES,  # noqa: F401 — реэкспорт: корзину никогда не качаем
     categorize,
+    in_trash,
     preview_path_for,
     previews_enabled,
     TELEGRAM_CHANNEL,
@@ -50,13 +52,11 @@ from utils import (
     is_local_disk_error,
     remove_quiet,
     resolve_local_path,
+    to_disk_path,
     to_long_path,
 )
 
 log = logging.getLogger("yadisk_backup")
-
-# Скип-листы для путей которые НИКОГДА не качаем (полное совпадение или как родительская папка)
-SKIP_PATH_PREFIXES = ("disk:/Корзина", "disk:/Trash")
 
 # Сколько файлов берём за один запрос get_files и кладём в БД одной пачкой
 SCAN_PAGE_SIZE = 200
@@ -105,6 +105,17 @@ DEFAULT_TIMEOUT = (30.0, 300.0)
 def make_client(token: str) -> yadisk.Client:
     """Клиент REST API с единым таймаутом. Закрывать через .close() или contextlib.closing."""
     return yadisk.Client(token=token, default_args={"timeout": DEFAULT_TIMEOUT})
+
+
+# Дерево папок в Настройках: человек ждёт ответа, долгие таймауты и повторы ему не нужны
+BROWSE_TIMEOUT = (10.0, 20.0)
+# Сколько элементов папки читаем ради подпапок: API не обещает «сначала папки»
+BROWSE_CAP = 5000
+
+
+def make_browse_client(token: str) -> yadisk.Client:
+    """Клиент для дерева папок: короткий таймаут и один повтор."""
+    return yadisk.Client(token=token, default_args={"timeout": BROWSE_TIMEOUT, "n_retries": 1})
 
 
 def account_info(client: yadisk.Client) -> dict:
@@ -204,22 +215,20 @@ _retry = retry(
 # ── обход дерева ────────────────────────────────────────────────────────────
 
 
-def _normalize_remote(path: str) -> str:
-    """Приводит путь к виду 'disk:/foo/bar' — так возвращает API."""
-    if path.startswith("disk:"):
-        return path
-    if path.startswith("/"):
-        return "disk:" + path
-    return "disk:/" + path
+_normalize_remote = to_disk_path  # прежнее имя: 'disk:/foo/bar', как возвращает API
+_is_skipped = in_trash  # прежнее имя: путь в корзине
 
 
-def _is_skipped(path: str) -> bool:
-    """Проверяет, лежит ли путь в корзине (не задевая папки вроде Корзина2)."""
-    norm = _normalize_remote(path)
-    for p in SKIP_PATH_PREFIXES:
-        if norm == p or norm.startswith(p + "/"):
-            return True
-    return False
+class RootNotFound(Exception):
+    """Выбранной папки больше нет на Диске: её переименовали, перенесли или удалили."""
+
+    def __init__(self, path: str):
+        super().__init__(path)
+        self.path = path
+
+
+# on_note(вид, имена): сбор списка сообщает о находках, которые стоит показать человеку
+OnNote = Callable[[str, list[str]], None]
 
 
 def _register_file(entry, batch: list, on_file: OnFile | None) -> int:
@@ -231,36 +240,66 @@ def _register_file(entry, batch: list, on_file: OnFile | None) -> int:
     return size or 0
 
 
+def _top_folder(path: str) -> str | None:
+    """'disk:/Фото/2020/a.jpg' → 'Фото'; файл в корне Диска → None."""
+    rest = to_disk_path(path).removeprefix("disk:/")
+    return rest.split("/", 1)[0] if "/" in rest else None
+
+
 def scan_tree(
     client: yadisk.Client,
     state: State,
     root: str = "/",
     on_file: OnFile | None = None,
     on_dir: Callable[[str], None] | None = None,
+    on_note: OnNote | None = None,
 ) -> tuple[int, int]:
     """Обходит дерево начиная с root. Регистрирует файлы как pending.
     Возвращает (количество файлов, суммарный размер).
-    Для корня диска использует быстрый плоский scan_all_files.
+
+    Для корня диска использует быстрый плоский scan_all_files, а потом обходит
+    общие папки, которые открыли этому аккаунту, если их файлов в плоском списке
+    не оказалось. Выбранной папки нет на Диске — RootNotFound.
     """
-    if _normalize_remote(root) in ("disk:/", "disk:"):
+    if to_disk_path(root) in ("disk:/", "disk:"):
+        seen_top: set[str] = set()
         try:
-            return scan_all_files(client, state, on_file=on_file)
+            files, total = scan_all_files(client, state, on_file=on_file, seen_top=seen_top)
         except Exception as e:
             log.warning("get_files недоступен (%s), переключаюсь на обход дерева папок", e)
+        else:
+            more_files, more_bytes = _scan_shared_folders(client, state, seen_top, on_file, on_dir, on_note)
+            return files + more_files, total + more_bytes
+        return _walk(client, state, root, on_file, on_dir)
+    return _walk(client, state, root, on_file, on_dir, strict_root=True)
 
+
+def _walk(
+    client: yadisk.Client,
+    state: State,
+    root: str,
+    on_file: OnFile | None,
+    on_dir: Callable[[str], None] | None,
+    strict_root: bool = False,
+) -> tuple[int, int]:
+    """Обход папок в ширину от root. strict_root — пропавший root это RootNotFound, а не пропуск."""
     files_count = 0
     bytes_total = 0
     queue: deque[str] = deque([root])  # BFS
+    first = True
 
     while queue:
         cur = queue.popleft()
+        is_root, first = first, False
         if _is_skipped(cur):
             log.info("Пропускаю корзину: %s", cur)
             continue
 
         try:
             entries = _list_dir(client, cur)
-        except yadisk.exceptions.PathNotFoundError:
+        except (yadisk.exceptions.PathNotFoundError, yadisk.exceptions.WrongResourceTypeError):
+            if is_root and strict_root:
+                raise RootNotFound(to_disk_path(root).rstrip("/")) from None
             log.warning("Путь не найден: %s", cur)
             continue
         except yadisk.exceptions.UnauthorizedError:
@@ -292,6 +331,97 @@ def _list_dir(client: yadisk.Client, path: str) -> list:
     """listdir с retry. Возвращает list ResourceObject."""
     # max_items=None → yadisk сам пагинирует
     return list(client.listdir(path, max_items=None))
+
+
+# ── общие папки и дерево папок для Настроек ─────────────────────────────────
+
+_FOLDER_FIELDS = ["name", "path", "type", "share"]
+
+
+@_retry
+def _list_root_with_share(client: yadisk.Client) -> list:
+    """Корень Диска с признаком общего доступа (share есть только у общих папок)."""
+    return list(client.listdir("disk:/", max_items=None, fields=_FOLDER_FIELDS))
+
+
+def _share_flags(entry) -> tuple[bool, bool | None]:
+    """(общая ли папка, своя ли она). У чужой общей папки is_owned == False."""
+    share = getattr(entry, "share", None)
+    if share is None:
+        return False, None
+    return True, getattr(share, "is_owned", None)
+
+
+def shared_with_me_dirs(client: yadisk.Client) -> list:
+    """Папки в корне Диска, к которым этому аккаунту дал доступ другой человек."""
+    out = []
+    for entry in _list_root_with_share(client):
+        shared, owned = _share_flags(entry)
+        # owned is None — Яндекс не сказал, чья папка: не рискуем лишним обходом
+        if entry.type == "dir" and shared and owned is False:
+            out.append(entry)
+    return out
+
+
+def _scan_shared_folders(
+    client: yadisk.Client,
+    state: State,
+    seen_top: set[str],
+    on_file: OnFile | None,
+    on_dir: Callable[[str], None] | None,
+    on_note: OnNote | None,
+) -> tuple[int, int]:
+    """Обходит общие папки, которых не оказалось в плоском списке get_files.
+
+    Документация Яндекса не говорит, попадают ли файлы чужих общих папок в плоский
+    список. Если попадают — их верхняя папка уже в seen_top и лишнего обхода нет.
+    """
+    try:
+        shared = shared_with_me_dirs(client)
+    except yadisk.exceptions.UnauthorizedError:
+        raise
+    except Exception as e:  # noqa: BLE001 — список уже собран, это только дополнение
+        log.warning("Не смог проверить общие папки в корне Диска: %s", e)
+        return 0, 0
+    # Папка лежит в корне Диска, поэтому её имя и есть верхняя папка её файлов
+    missing = [d for d in shared if d.name not in seen_top]
+    if not missing:
+        return 0, 0
+    names = [d.name for d in missing]
+    log.info("Общие папки вне плоского списка: %d", len(names))
+    if on_note:
+        on_note("shared_folders", names)
+    files_count = 0
+    bytes_total = 0
+    for d in missing:
+        n, b = _walk(client, state, d.path, on_file, on_dir)
+        files_count += n
+        bytes_total += b
+    return files_count, bytes_total
+
+
+def list_disk_folders(
+    client: yadisk.Client, path: str = "disk:/", cap: int = BROWSE_CAP,
+) -> tuple[list[dict], bool]:
+    """Подпапки path для дерева в Настройках и признак «показаны не все».
+
+    Элементы: {name, path, shared, owned}. Порядок «сначала папки» API не обещает,
+    поэтому читаем до cap элементов папки. Корзину не показываем.
+    """
+    folders: list[dict] = []
+    seen = 0
+    for entry in client.listdir(to_disk_path(path), limit=1000, max_items=cap + 1,
+                                fields=_FOLDER_FIELDS):
+        seen += 1
+        if seen > cap:
+            break
+        if entry.type != "dir" or _is_skipped(entry.path):
+            continue
+        shared, owned = _share_flags(entry)
+        folders.append({"name": entry.name, "path": entry.path,
+                        "shared": shared, "owned": bool(owned)})
+    folders.sort(key=lambda f: (f["name"].casefold(), f["name"]))
+    return folders, seen > cap
 
 
 # ── плоский обход через get_files ───────────────────────────────────────────
@@ -337,8 +467,13 @@ def _scan_flat(
     state: State,
     media_type: str | None,
     on_file: OnFile | None,
+    seen_top: set[str] | None = None,
 ) -> tuple[int, int]:
-    """Плоский обход get_files() с регистрацией в БД пачками по SCAN_PAGE_SIZE."""
+    """Плоский обход get_files() с регистрацией в БД пачками по SCAN_PAGE_SIZE.
+
+    seen_top собирает верхние папки увиденных файлов — по ним видно, каких
+    общих папок в плоском списке не оказалось.
+    """
     files_count = 0
     bytes_total = 0
     batch: list = []
@@ -346,6 +481,8 @@ def _scan_flat(
     for entry in _iter_files(client, media_type=media_type):
         if entry.type != "file" or _is_skipped(entry.path):
             continue
+        if seen_top is not None and (top := _top_folder(entry.path)):
+            seen_top.add(top)
         files_count += 1
         bytes_total += _register_file(entry, batch, on_file)
         if len(batch) >= SCAN_PAGE_SIZE:
@@ -385,9 +522,10 @@ def scan_all_files(
     client: yadisk.Client,
     state: State,
     on_file: OnFile | None = None,
+    seen_top: set[str] | None = None,
 ) -> tuple[int, int]:
     """Быстрое сканирование всего диска плоским get_files() вместо рекурсии по папкам."""
-    return _scan_flat(client, state, None, on_file)
+    return _scan_flat(client, state, None, on_file, seen_top)
 
 
 # ── скачивание ──────────────────────────────────────────────────────────────

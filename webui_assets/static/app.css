@@ -374,6 +374,41 @@ textarea{min-height:120px;font-family:var(--mono);font-size:12.5px;resize:vertic
 .check input:checked::after{content:"";width:5px;height:10px;border:solid #fff;border-width:0 2px 2px 0;transform:translateY(-1px) rotate(45deg)}
 .check input:disabled{opacity:.5;cursor:not-allowed}
 .check b{font-weight:650}
+.check input[type=radio]{border-radius:50%}
+.check input[type=radio]:checked::after{width:8px;height:8px;border:none;border-radius:50%;background:#fff;transform:none}
+.tiny.block{display:block;margin-top:2px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+fieldset.bare{border:none;min-width:0}
+fieldset.bare:disabled .tree,fieldset.bare:disabled .folders-summary{opacity:.6}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--border-strong);border-top-color:var(--accent);animation:spin .9s linear infinite;flex:none}
+/* Дерево папок Диска в Настройках */
+.folders.off{opacity:.55}
+.folders-summary{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:12px}
+.folder-chip{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:3px 4px 3px 10px;border-radius:99px;background:var(--accent-soft);color:var(--accent-text);font-size:13px;font-weight:600}
+.folder-chip .i{width:14px;height:14px;flex:none}
+.folder-chip .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.folder-chip button{padding:3px;border:none;border-radius:50%;background:none;box-shadow:none;color:inherit;flex:none}
+.folder-chip button:hover:not(:disabled){background:var(--surface)}
+.tree{margin-top:10px;padding:6px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface-2);max-height:420px;overflow:auto}
+.tree-row{display:flex;align-items:center;gap:4px;min-height:38px;padding:2px 8px 2px calc(4px + var(--depth,0) * 22px);border-radius:10px}
+.tree-row:hover{background:var(--surface-3)}
+.tree-row .twist{width:28px;height:28px;padding:0;border:none;border-radius:8px;background:none;box-shadow:none;color:var(--text-3);display:grid;place-items:center;flex:none}
+.tree-row .twist .i{width:16px;height:16px;transition:transform .15s}
+.tree-row .twist[aria-expanded="true"] .i{transform:rotate(90deg)}
+.tree-row .twist:hover:not(:disabled){background:var(--surface);color:var(--text)}
+.tree-row label{display:flex;align-items:center;gap:10px;flex:1;min-width:0;cursor:pointer;padding:4px 0}
+.tree-row .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.tree-row .fold{width:18px;height:18px;color:var(--accent);flex:none}
+.tree-row .badge{flex:none}
+.cbx{appearance:none;-webkit-appearance:none;width:20px;height:20px;border-radius:6px;border:2px solid var(--border-strong);background:var(--surface);flex:none;display:grid;place-items:center;cursor:pointer;transition:background .15s,border-color .15s}
+.cbx:checked{background:var(--grad);border-color:transparent}
+.cbx:checked::after{content:"";width:5px;height:10px;border:solid #fff;border-width:0 2px 2px 0;transform:translateY(-1px) rotate(45deg)}
+.cbx:indeterminate{border-color:var(--accent);background:var(--accent-soft)}
+.cbx:indeterminate::after{content:"";width:10px;height:2px;border-radius:2px;background:var(--accent)}
+.cbx:disabled{opacity:.55;cursor:not-allowed}
+.tree-note{display:flex;align-items:center;flex-wrap:wrap;gap:10px;min-height:38px;padding:4px 10px 4px calc(36px + var(--depth,0) * 22px);font-size:13px;color:var(--text-3)}
+.tree-note .i{width:16px;height:16px;flex:none}
+.tree-note.err{color:var(--err)}
 .switch{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 0;border-top:1px solid var(--border)}
 .switch:first-of-type{border-top:none;padding-top:6px}
 .switch b{font-weight:650}

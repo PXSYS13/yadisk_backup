@@ -59,6 +59,7 @@
         `<button data-action="go-access" data-field="folder">${icon('folder')}Выбрать другую папку</button>`,
       send_logs: `<a class="btn ${p}" href="/api/logs/bundle">${icon('download')}Скачать отчёт для поддержки</a>` +
         `<a class="btn" href="${esc((s && s.telegram_url) || 'https://t.me/davronsv')}" target="_blank" rel="noopener">${icon('send')}Написать в Telegram</a>`,
+      folders: `<button class="${p}" data-action="go-folders">${icon('folder')}Выбрать папки</button>`,
     }[action.id] || '';
   };
 
@@ -431,6 +432,10 @@
   // ── Общие действия ──
   App.action('go-access', (btn) => {
     App.pendingAccessFocus = btn.dataset.field;
+    App.go('#/settings');
+  });
+  App.action('go-folders', () => {
+    App.pendingFoldersFocus = true;
     App.go('#/settings');
   });
   App.action('go-setup', () => App.go('#/setup'));

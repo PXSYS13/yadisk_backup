@@ -42,6 +42,12 @@ CREATE INDEX IF NOT EXISTS idx_status ON files(status);
 # Маркер отложенного файла в колонке error (его же считает db_stats в webui.py)
 DEFERRED_MARKER = "storage_down | "
 
+# Маркеры в колонке error: файл снят выбором человека, и это обратимо. Ставит и
+# снимает их webui.py; сбор списка обновляет у таких строк размер и MD5, но не статус
+CATEGORY_SKIP_MARKER = "not in selected categories"
+FOLDER_SKIP_MARKER = "not in selected folders"
+SELECTION_MARKERS = (CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER)
+
 
 class State:
     """Тонкая обёртка над SQLite. Создаёт по соединению на поток (через threading.local).
@@ -115,10 +121,12 @@ class State:
         """Пакетная регистрация файлов — значительно ускоряет scan_tree и scan_media.
 
         Уже скачанный файл, у которого на Диске изменился MD5, возвращается в pending:
-        бэкап должен догнать новую версию. Пропущенные (skipped) не трогаем — это
-        осознанный выбор пользователя (категории) или дубликат.
+        бэкап должен догнать новую версию. Статус пропущенных (skipped) не трогаем —
+        это выбор пользователя (категории, папки) или дубликат. У снятых выбором
+        обновляем размер и MD5: файл мог измениться, пока его папка была не выбрана,
+        и после возврата в очередь проверка скачанного сравнит его со старыми данными.
         """
-        items_list = list(items)
+        items_list = [(*item, *SELECTION_MARKERS) for item in items]
         if not items_list:
             return
         with self._tx() as conn:
@@ -136,7 +144,7 @@ class State:
                         THEN 'pending'
                         ELSE files.status
                     END
-                WHERE files.status <> 'skipped'
+                WHERE files.status <> 'skipped' OR files.error IN (?, ?)
                 """,
                 items_list,
             )

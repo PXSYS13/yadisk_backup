@@ -28,7 +28,7 @@ def _isolate_project_files(tmp_path, monkeypatch):
     monkeypatch.setattr(webui, "HEALTH_LOG", tmp_path / "logs" / "yandex_health.jsonl")
     # Настройки, которые программа пишет прямо в os.environ: после теста — как было.
     # Пустое значение = «по умолчанию» (всё качать, превью включены, демо выключено)
-    for key in ("BACKUP_SOURCES", "BACKUP_CATEGORIES", "GENTLE_MODE", "YADISK_PREVIEWS",
-                "YADISK_DEMO", "YADISK_RETRY_EVERY_SEC", "YA_DISK_TOKEN"):
+    for key in ("BACKUP_SOURCES", "BACKUP_CATEGORIES", "BACKUP_DISK_FOLDERS", "GENTLE_MODE",
+                "YADISK_PREVIEWS", "YADISK_DEMO", "YADISK_RETRY_EVERY_SEC", "YA_DISK_TOKEN"):
         monkeypatch.setenv(key, "")
     monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path / "downloads"))

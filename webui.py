@@ -41,7 +41,8 @@ import yadisk
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from downloader import account_info, api_error_details, make_client
+from downloader import account_info, api_error_details, list_disk_folders, make_browse_client, make_client
+from state import CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER, SELECTION_MARKERS
 from unlim_common import (
     DEFERRED_MARKER,
     RELEASE_IN_PROGRESS_SQL,
@@ -61,6 +62,7 @@ from utils import (
     EXIT_INTERRUPTED,
     EXIT_OUTAGE,
     EXIT_PARTIAL,
+    MAX_DISK_FOLDERS,
     MAX_DISK_WORKERS,
     MAX_UNLIM_BATCH,
     MAX_UNLIM_WORKERS,
@@ -71,14 +73,19 @@ from utils import (
     YOUTUBE_VIDEO_URL,
     categorize,
     classify_yandex_error,
+    decode_disk_folders,
+    encode_disk_folders,
     ensure_utf8_stdio,
     is_safe_dir,
     is_safe_download_dir,
     keep_awake,
+    normalize_disk_folders,
+    path_in_folders,
     previews_enabled,
     safe_int,
     sqlite_ro_uri,
     sqlite_tx,
+    to_disk_path,
 )
 from yandex_health import HealthMonitor
 
@@ -155,8 +162,9 @@ SLOT_ORGANIZE = "organize"
 UNLIM_WORKER_SLOT_PREFIX = "unlim_w"  # unlim_w1, unlim_w2, ...
 UNLIM_SLOT_PREFIX = "unlim"  # collect + все воркеры
 
-# Маркер в колонке error: файл пропущен из-за выбора категорий (обратимо)
-CATEGORY_SKIP_MARKER = "not in selected categories"
+# Маркеры выбора в колонке error (CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER) живут
+# в state.py: сбор списка обязан их узнавать. webui.CATEGORY_SKIP_MARKER остаётся
+# доступным по прежнему имени
 
 
 def get_config() -> dict:
@@ -570,6 +578,8 @@ RESCUE_STUCK_ROUNDS = 3
 RESCUE_CRASH_RETRY_SEC = 60
 # Меньше этого свободного места — «закончилось место», больше — значит, папка недоступна
 LOW_FREE_BYTES = 1024 ** 3
+# Подготовка ветки остановилась и ждёт человека (например, выбранных папок больше нет)
+PREPARE_NEEDS_ACTION = -2
 # Временные ошибки Диска: явный старт возвращает такие файлы в очередь
 _DISK_TRANSIENT_ERRORS = ("local_disk |", "auth_expired |", "server_50x |",
                           "download_timeout |", "rate_limit |")
@@ -588,6 +598,30 @@ def _retry_every_sec() -> int:
 
 def _hhmm(ts: float | None) -> str:
     return time.strftime("%H:%M", time.localtime(ts)) if ts else ""
+
+
+def _roots_covered(new: list[str] | None, old: list[str] | None) -> bool:
+    """Покрывает ли прошлый сбор списка новые корни. None — весь Диск.
+
+    Весь Диск покрывает любые папки, папку покрывает её родитель.
+    """
+    if old is None:
+        return True
+    if new is None:
+        return False
+    return all(path_in_folders(p, old) for p in new)
+
+
+def _folder_label(path: str) -> str:
+    """'disk:/Работа/2024' → 'Работа/2024' — как папку показывает интерфейс."""
+    return path.removeprefix("disk:").strip("/") or "Диск"
+
+
+def _folders_text(folders: list[str], limit: int = 3) -> str:
+    """«Фото, Работа/2024 и ещё 2» — коротко для журнала и ленты событий."""
+    names = [_folder_label(f) for f in folders]
+    head = ", ".join(f"«{n}»" for n in names[:limit])
+    return head + (f" и ещё {len(names) - limit}" if len(names) > limit else "")
 
 
 def _db_has_rows(db_file: Path, table: str) -> bool:
@@ -703,11 +737,14 @@ class Rescue:
         self.skip_unlim = False
         self.disk_categories: list[str] | None = None
         self.unlim_categories: list[str] | None = None
+        self.disk_folders: list[str] | None = None  # None — весь Диск
         self.partial = False
         self.retry_every = _retry_every_sec()
         self._owned_slots: set[str] = set()
         # Когда список файлов собирался в этом процессе — чтобы не пересобирать на каждый старт
         self._listed_at: dict[str, float] = {}
+        # Какие папки собирал последний список (None — весь Диск): новые папки требуют пересбора
+        self._listed_roots: dict[str, list[str] | None] = {}
 
     # ── управление ──
 
@@ -717,7 +754,8 @@ class Rescue:
     def start(self, workers: int = 4, do_disk: bool = True, do_unlim: bool = True,
               batch: int = DEFAULT_UNLIM_BATCH,
               disk_categories: list[str] | None = None,
-              unlim_categories: list[str] | None = None) -> tuple[bool, str]:
+              unlim_categories: list[str] | None = None,
+              disk_folders: list[str] | None = None) -> tuple[bool, str]:
         with self._lock:
             if self.is_running():
                 # Повторный старт во время ожидания = «Попробовать сейчас»
@@ -737,6 +775,7 @@ class Rescue:
             self.skip_unlim = not do_unlim
             self.disk_categories = list(disk_categories) if disk_categories is not None else None
             self.unlim_categories = list(unlim_categories) if unlim_categories is not None else None
+            self.disk_folders = list(disk_folders) if disk_folders else None
             self.partial = False
             self.retry_every = _retry_every_sec()
             for b in self.branches.values():
@@ -878,9 +917,63 @@ class Rescue:
             b.last_exit = {"code": code, "at": time.time(), "step": activity}
         return code
 
-    def _needs_listing(self, name: str) -> bool:
+    def _needs_listing(self, name: str, roots: list[str] | None = None) -> bool:
         at = self._listed_at.get(name)
-        return at is None or time.time() - at > RESCUE_RELIST_SEC
+        if at is None or time.time() - at > RESCUE_RELIST_SEC:
+            return True
+        # Выбрали папки, которых прошлый сбор не касался, — их файлов в списке ещё нет
+        return not _roots_covered(roots, self._listed_roots.get(name))
+
+    def _task_lines(self, slot: str) -> list[str]:
+        """Журнал задачи слота — после шага из него читаются находки сбора (тесты подменяют)."""
+        task = tm.get(slot)
+        return list(task.log) if task else []
+
+    def _scan_findings(self) -> tuple[list[str], list[str]]:
+        """(пропавшие выбранные папки, найденные общие папки) — из строк `kind | {json}`."""
+        missing: list[str] = []
+        shared: list[str] = []
+        for line in self._task_lines(SLOT_DISK):
+            for kind, target in (("folder_missing | ", missing), ("shared_folders | ", shared)):
+                pos = line.find(kind)
+                if pos == -1:
+                    continue
+                try:
+                    data = json.loads(line[pos + len(kind):])
+                except ValueError:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                if kind.startswith("folder_missing") and isinstance(data.get("path"), str):
+                    target.append(data["path"])
+                elif isinstance(data.get("names"), list):
+                    target.extend(str(n) for n in data["names"])
+        return missing, shared
+
+    def _apply_disk_selection(self) -> None:
+        """Очередь Диска по выбору человека: сначала папки, потом типы файлов."""
+        returned = unskip_markers(DB_FILE, "files", SELECTION_MARKERS)
+        folders, cats = self.disk_folders, self.disk_categories
+        if not folders and cats is None:
+            if returned:
+                self._log(f"↩️ Диск: вернул в очередь {returned} файлов, снятых прошлым выбором")
+            return
+        skipped = 0
+        if folders:
+            n, _ = filter_to_folders(DB_FILE, folders)
+            skipped += n
+        if cats is not None:
+            n, _ = filter_to_categories(DB_FILE, "files", "remote_path", cats)
+            skipped += n
+        kept = int(db_stats(DB_FILE, "files", "remote_path").get("pending") or 0)
+        what = []
+        if folders:
+            what.append(f"папки {_folders_text(folders)}")
+        if cats is not None:
+            what.append(", ".join(CATEGORY_LABELS.get(c, c) for c in cats) or "ничего")
+        self._log(f"🎯 Диск: качаем {'; '.join(what)} — в очереди {kept}, пропущено {skipped}")
+        if folders:
+            self._event("disk", "info", f"Качаю только выбранные папки: {_folders_text(folders)}")
 
     def _apply_categories(self, db_file: Path, table: str, id_col: str,
                           categories: list[str], label: str) -> None:
@@ -1011,6 +1104,8 @@ class Rescue:
                 code = prepare(b)
                 if code == -1:
                     return self._branch_stopped(b)
+                if code == PREPARE_NEEDS_ACTION:
+                    return  # ветка уже ждёт человека — причина и кнопка выставлены
                 if code != 0:
                     if not self._after_exit(b, code, db):
                         return
@@ -1154,14 +1249,38 @@ class Rescue:
             if n:
                 self._log(f"↩️ Диск: {n} файлов с временными ошибками снова в очереди")
                 self._event("disk", "info", f"Снова в очереди: {_files(n)}, которые раньше не скачались")
-        if self._needs_listing("disk"):
+        folders = self.disk_folders
+        if self._needs_listing("disk", folders):
             b.state = "listing"
-            self._event("disk", "run", "Получаю у Яндекса список файлов")
-            code = self._run_step(b, SLOT_DISK, "main.py", ["scan"], "получаю список файлов")
+            if folders:
+                self._event("disk", "run", f"Получаю у Яндекса список файлов в папках {_folders_text(folders)}")
+                args = ["scan", *[f"--root={p}" for p in folders]]
+            else:
+                self._event("disk", "run", "Получаю у Яндекса список файлов")
+                args = ["scan"]
+            code = self._run_step(b, SLOT_DISK, "main.py", args, "получаю список файлов")
             if code == -1:
                 return -1
+            missing, shared = self._scan_findings() if code == 0 else ([], [])
+            if folders and missing and set(folders) <= set(missing):
+                b.state = "needs_action"
+                b.action = "folders"
+                b.reason = "Выбранных папок больше нет на Диске"
+                b.activity = ""
+                self._log("📁 Диск: выбранных папок больше нет на Диске — выберите их заново в Настройках")
+                self._event("disk", "err", "Выбранных папок больше нет на Диске — выберите папки заново в «Настройках»")
+                return PREPARE_NEEDS_ACTION
+            for path in missing:
+                self._log(f"⚠️ Диск: папки «{_folder_label(path)}» больше нет на Диске")
+                self._event("disk", "warn", f"Папки «{_folder_label(path)}» больше нет на Диске — "
+                                            f"уберите её из выбора в «Настройках»")
+            if shared:
+                names = ", ".join(f"«{n}»" for n in shared)
+                self._log(f"🤝 Диск: нашёл общие папки, к которым вам дали доступ: {names}")
+                self._event("disk", "info", f"Нашёл общие папки, к которым вам дали доступ: {names} — скачаю и их")
             if code == 0:
                 self._listed_at["disk"] = time.time()
+                self._listed_roots["disk"] = list(folders) if folders else None
                 total = int(db_stats(DB_FILE, "files", "remote_path").get("total") or 0)
                 self._event("disk", "ok", f"Список получен: {_files(total)}")
             elif _db_has_rows(DB_FILE, "files"):
@@ -1169,7 +1288,7 @@ class Rescue:
                 self._event("disk", "warn", "Список не обновился — качаю по уже собранному")
             else:
                 return code
-        self._apply_category_choice(DB_FILE, "files", "remote_path", self.disk_categories, "Диск")
+        self._apply_disk_selection()
         return 0
 
     def _disk_download(self, b: Branch) -> int:
@@ -1270,7 +1389,10 @@ def _empty_db_stats() -> dict:
     return {
         "total": 0, "pending": 0, "downloaded": 0, "skipped": 0,
         "failed": 0, "in_progress": 0,
+        # Сняты выбором человека: category_* — категории и папки вместе (так их
+        # показывает интерфейс: «не выбраны»), folder_* — только выбор папок
         "category_skipped": 0, "category_skipped_bytes": 0,
+        "folder_skipped": 0, "folder_skipped_bytes": 0,
         "bytes_total": 0, "bytes_done": 0,
         "bytes_done_real": 0, "bytes_pending": 0,
         "bytes_in_progress": 0, "bytes_failed": 0,
@@ -1306,13 +1428,13 @@ def db_stats(db_file: Path, table: str = "files",
         c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
         c.row_factory = sqlite3.Row
         for r in c.execute(
-            f"SELECT status, error, (COALESCE(error, '') LIKE ?) AS deferred, "
+            f"SELECT status, (COALESCE(error, '') LIKE ?) AS deferred, "
+            f"(COALESCE(error, '') = ?) AS cat_x, (COALESCE(error, '') = ?) AS fold_x, "
             f"COUNT(*) AS n, COALESCE(SUM(size),0) AS b "
-            f"FROM {table} GROUP BY status, (COALESCE(error,'') = ?), (COALESCE(error, '') LIKE ?)",
-            (DEFERRED_MARKER + "%", CATEGORY_SKIP_MARKER, DEFERRED_MARKER + "%"),
+            f"FROM {table} GROUP BY status, deferred, cat_x, fold_x",
+            (DEFERRED_MARKER + "%", CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER),
         ):
             st = r["status"]
-            err = r["error"] or ""
             n = r["n"]
             b = r["b"]
             out[st] = out.get(st, 0) + n
@@ -1331,9 +1453,12 @@ def db_stats(db_file: Path, table: str = "files",
                 out["bytes_done_real"] += b
                 out["bytes_done"] += b
             elif st == "skipped":
-                if err == CATEGORY_SKIP_MARKER:
+                if r["cat_x"] or r["fold_x"]:
                     out["category_skipped"] += n
                     out["category_skipped_bytes"] += b
+                    if r["fold_x"]:
+                        out["folder_skipped"] += n
+                        out["folder_skipped_bytes"] += b
                 else:
                     out["bytes_done"] += b
 
@@ -1815,6 +1940,10 @@ _RESCUE_ACTIONS = {
     "send_logs": ("Что-то пошло не так",
                   "Скачайте отчёт для поддержки и пришлите его в Telegram — в нём нет ключа и паролей.",
                   "Скачать отчёт"),
+    "folders": ("Выбранных папок больше нет на Диске",
+                "Их переименовали, перенесли или удалили. Выберите папки заново в «Настройках» — "
+                "уже скачанное не пропадёт.",
+                "Выбрать папки"),
 }
 
 # Спокойные пояснения: ничего делать не нужно
@@ -2263,6 +2392,9 @@ def get_settings() -> dict:
     return {
         "sources": sources,
         "categories": categories,          # None — всё
+        # Папки Диска: None — весь Диск. JSON в .env, см. utils.encode_disk_folders
+        "disk_folders": decode_disk_folders(os.getenv("BACKUP_DISK_FOLDERS")),
+        "max_disk_folders": MAX_DISK_FOLDERS,
         "gentle": _env_flag("GENTLE_MODE", False),
         "previews": previews_enabled(),
         "category_labels": dict(CATEGORY_LABELS),
@@ -2273,8 +2405,27 @@ class SettingsPayload(BaseModel):
     sources: list[str] | None = None
     categories: list[str] | None = None
     all_categories: bool = False
+    disk_folders: list[str] | None = None
+    all_folders: bool = False
     gentle: bool | None = None
     previews: bool | None = None
+
+
+def _env_set_verified(key: str, value: str) -> None:
+    """Пишет ключ в .env и перечитывает: то, что прочтёт программа, обязано совпасть.
+
+    python-dotenv сам экранирует \\ и ' в одинарных кавычках (с версии 1.2.3), но
+    подставляет ${…} — значение с таким куском после перечитывания изменилось бы.
+    """
+    set_key(str(ENV_FILE), key, value, quote_mode="always")
+    try:
+        saved = dotenv_values(ENV_FILE).get(key)
+    except Exception:  # noqa: BLE001 — нечитаемый .env тоже повод отказать
+        saved = None
+    if (saved or "") != value:
+        raise HTTPException(500, "Не получилось сохранить настройку: файл .env прочитался иначе. "
+                                 "Скачайте отчёт для поддержки во вкладке «Помощь»")
+    os.environ[key] = value
 
 
 @app.get("/api/settings")
@@ -2284,10 +2435,24 @@ def api_get_settings():
 
 @app.post("/api/settings")
 def api_set_settings(p: SettingsPayload):
-    changes_what = p.sources is not None or p.categories is not None or p.all_categories
+    changes_what = (p.sources is not None or p.categories is not None or p.all_categories
+                    or p.disk_folders is not None or p.all_folders)
     if changes_what and pipeline.is_running():
         raise HTTPException(409, "Сначала остановите скачивание — потом можно изменить, что качать")
     updates: dict[str, str] = {}
+    folders_note = ""
+    if p.all_folders:
+        updates["BACKUP_DISK_FOLDERS"] = ""
+        folders_note = "весь Диск"
+    elif p.disk_folders is not None:
+        try:
+            folders = normalize_disk_folders(p.disk_folders)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        if not folders:
+            raise HTTPException(400, "Отметьте хотя бы одну папку или выберите «Весь Диск»")
+        updates["BACKUP_DISK_FOLDERS"] = encode_disk_folders(folders)
+        folders_note = f"{len(folders)} папок"
     if p.sources is not None:
         sources = [s for s in _SOURCES if s in p.sources]
         if not sources:
@@ -2306,9 +2471,10 @@ def api_set_settings(p: SettingsPayload):
         updates["YADISK_PREVIEWS"] = "1" if p.previews else "0"
     _ensure_env_file()
     for key, value in updates.items():
-        set_key(str(ENV_FILE), key, value, quote_mode="always")
-        os.environ[key] = value
-    log.info("настройки сохранены: %s", ", ".join(f"{k}={v}" for k, v in updates.items()) or "без изменений")
+        _env_set_verified(key, value)
+    # Имена папок в журнал не пишем: журнал уходит в отчёт для поддержки
+    shown = [f"{k}={folders_note if k == 'BACKUP_DISK_FOLDERS' else v}" for k, v in updates.items()]
+    log.info("настройки сохранены: %s", ", ".join(shown) or "без изменений")
     return {"ok": True, "settings": get_settings()}
 
 
@@ -2329,7 +2495,8 @@ def api_rescue_start():
         return {"ok": False, "msg": src["error"]}
     workers, batch = _rescue_workers(st)
     ok, msg = pipeline.start(workers=workers, batch=batch, do_disk=do_disk, do_unlim=do_unlim,
-                             disk_categories=st["categories"], unlim_categories=st["categories"])
+                             disk_categories=st["categories"], unlim_categories=st["categories"],
+                             disk_folders=st["disk_folders"])
     return {"ok": ok, "msg": msg, "notes": src["notes"] if ok else []}
 
 
@@ -2725,12 +2892,15 @@ def api_start(payload: StartPayload):
     src = preflight_sources(payload.do_disk, payload.do_unlim)
     if src["error"]:
         return {"ok": False, "msg": src["error"]}
+    # Папки — из Настроек: у прежнего интерфейса нет своего выбора, а качать весь Диск
+    # вопреки сохранённому выбору было бы неожиданно
     ok, msg = pipeline.start(workers=payload.workers,
                              do_disk=payload.do_disk,
                              do_unlim=payload.do_unlim,
                              batch=payload.batch,
                              disk_categories=payload.disk_categories,
-                             unlim_categories=payload.unlim_categories)
+                             unlim_categories=payload.unlim_categories,
+                             disk_folders=get_settings()["disk_folders"])
     return {"ok": ok, "msg": msg, "notes": src["notes"] if ok else []}
 
 
@@ -2801,6 +2971,7 @@ def api_plan_start(payload: PlanStartPayload):
         do_disk=payload.do_disk, do_unlim=payload.do_unlim,
         disk_categories=payload.disk_categories if payload.do_disk else None,
         unlim_categories=payload.unlim_categories if payload.do_unlim else None,
+        disk_folders=get_settings()["disk_folders"],
     )
     return {"ok": ok, "msg": msg, "notes": src["notes"] if ok else []}
 
@@ -2939,9 +3110,13 @@ def preview_db(db_file: Path, table: str, id_col: str) -> dict:
             for k, label in CATEGORY_LABELS.items()
         }
         total = 0
+        # Снятое выбором папок не считаем: галочки категорий должны показывать то,
+        # что реально попадёт в очередь
         for row in c.execute(
             f"SELECT {_category_key_expr(table, id_col)}, COALESCE(size, 0) FROM {table} "
-            f"WHERE status IN ('pending','downloaded','skipped','in_progress','failed')"
+            f"WHERE status IN ('pending','downloaded','skipped','in_progress','failed') "
+            f"AND COALESCE(error, '') <> ?",
+            (FOLDER_SKIP_MARKER,),
         ):
             cat = categorize(row[0])
             summary[cat]["count"] += 1
@@ -2985,10 +3160,10 @@ def filter_to_categories(db_file: Path, table: str, id_col: str,
         c.close()
 
 
-def unskip_category_marker(db_file: Path, table: str) -> int:
-    """Сбрасывает skipped-with-marker обратно в pending — на случай повторного выбора."""
+def unskip_markers(db_file: Path, table: str, markers: tuple[str, ...]) -> int:
+    """Возвращает в pending файлы, снятые выбором (по маркерам) — на случай нового выбора."""
     table = _validate_sql_ident(table, _ALLOWED_TABLES, "table")
-    if not db_file.exists():
+    if not db_file.exists() or not markers:
         return 0
     c = sqlite3.connect(db_file, timeout=30)
     c.execute("PRAGMA journal_mode=WAL")
@@ -2996,9 +3171,43 @@ def unskip_category_marker(db_file: Path, table: str) -> int:
         with sqlite_tx(c):
             return c.execute(
                 f"UPDATE {table} SET status='pending', error=NULL "
-                f"WHERE status='skipped' AND error=?",
-                (CATEGORY_SKIP_MARKER,),
+                f"WHERE status='skipped' AND error IN ({','.join('?' * len(markers))})",
+                markers,
             ).rowcount
+    finally:
+        c.close()
+
+
+def unskip_category_marker(db_file: Path, table: str) -> int:
+    """Сбрасывает skipped-with-marker обратно в pending — на случай повторного выбора."""
+    return unskip_markers(db_file, table, (CATEGORY_SKIP_MARKER,))
+
+
+def filter_to_folders(db_file: Path, folders: list[str]) -> tuple[int, int]:
+    """Снимает с очереди Диска файлы вне выбранных папок: 'skipped' + маркер папок.
+
+    Трогает pending и failed: иначе «Повторить» скачал бы невыбранное, а Главная
+    показывала бы его как «не скачалось». Сравнение — точный префикс через substr:
+    в именах папок бывают % и _, а LIKE к тому же не различает регистр.
+    Возвращает (снято, осталось в очереди).
+    """
+    if not db_file.exists() or not folders:
+        return (0, 0)
+    inside = " OR ".join("(remote_path = ? OR substr(remote_path, 1, ?) = ?)" for _ in folders)
+    params: list = []
+    for f in folders:
+        params += [f, len(f) + 1, f + "/"]
+    c = sqlite3.connect(db_file, timeout=30)
+    c.execute("PRAGMA journal_mode=WAL")
+    try:
+        with sqlite_tx(c):
+            skipped = c.execute(
+                f"UPDATE files SET status='skipped', error=? "
+                f"WHERE status IN ('pending','failed') AND NOT ({inside})",
+                [FOLDER_SKIP_MARKER, *params],
+            ).rowcount
+        kept = c.execute("SELECT COUNT(*) FROM files WHERE status='pending'").fetchone()[0]
+        return (skipped, kept)
     finally:
         c.close()
 
@@ -3006,6 +3215,54 @@ def unskip_category_marker(db_file: Path, table: str) -> int:
 @app.get("/api/disk/preview")
 def disk_preview():
     return preview_db(DB_FILE, "files", "remote_path")
+
+
+# ── Дерево папок Диска для «Только выбранные папки» ─────────────────────────
+
+# Демо-дерево: (имя, общая, своя) — чтобы проверить экран без Яндекса
+_DEMO_FOLDERS = {
+    "disk:/": [("Документы", False, False), ("Загрузки", False, False), ("Работа", False, False),
+               ("Семейный архив", True, False), ("Фото", False, False), ("Для мамы", True, True)],
+    "disk:/Загрузки": [("Project1", False, False), ("Telegram", False, False)],
+    "disk:/Загрузки/Project1": [("Photos", False, False), ("Words", False, False)],
+    "disk:/Фото": [("2022", False, False), ("2023", False, False), ("2024", False, False)],
+    "disk:/Семейный архив": [("Свадьба", True, False), ("Дача", True, False)],
+    "disk:/Работа": [("Отчёты, 2024", False, False), ("Договоры 'старые'", False, False)],
+}
+
+
+def demo_folders(path: str) -> dict:
+    items = sorted(_DEMO_FOLDERS.get(path.rstrip("/") if path != "disk:/" else path, []),
+                   key=lambda item: (item[0].casefold(), item[0]))
+    base = "disk:/" if path == "disk:/" else path.rstrip("/") + "/"
+    return {"ok": True, "path": path, "truncated": False,
+            "folders": [{"name": n, "path": base + n, "shared": s, "owned": o} for n, s, o in items]}
+
+
+@app.get("/api/disk/folders")
+def api_disk_folders(path: str = "disk:/", demo: str | None = None):
+    """Подпапки для дерева в Настройках. Синхронная функция — опрос /api/status Яндекс не ждёт."""
+    path = to_disk_path(path.strip() or "/")
+    if path == "disk:":
+        path = "disk:/"
+    if demo and os.environ.get("YADISK_DEMO") == "1":
+        return demo_folders(path)
+    token = get_config()["token"]
+    if not token:
+        return {"ok": False, "action": "token", "msg": "Чтобы выбрать папки, добавьте ключ доступа к Диску"}
+    client = make_browse_client(token)
+    try:
+        folders, truncated = list_disk_folders(client, path)
+    except (yadisk.exceptions.UnauthorizedError, yadisk.exceptions.ForbiddenError):
+        return {"ok": False, "action": "token", "msg": "Яндекс не принял ключ доступа к Диску — получите новый"}
+    except (yadisk.exceptions.PathNotFoundError, yadisk.exceptions.WrongResourceTypeError):
+        return {"ok": False, "msg": "Этой папки больше нет на Диске — обновите список"}
+    except Exception as e:  # noqa: BLE001 — человеку нужен понятный текст, подробности в журнал
+        log.warning("дерево папок: %s%s", type(e).__name__, api_error_details(e))
+        return {"ok": False, "msg": "Яндекс сейчас не ответил — попробуйте ещё раз через минуту"}
+    finally:
+        client.close()
+    return {"ok": True, "path": path, "folders": folders, "truncated": truncated}
 
 
 @app.get("/api/unlim/preview")

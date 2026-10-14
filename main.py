@@ -2,6 +2,7 @@
 
 Команды:
     python main.py scan                 # обход дерева, заполнить state без скачивания
+    python main.py scan --root /Фото --root "/Работа/2024"   # только эти папки
     python main.py download             # скачать всё pending
     python main.py download --workers 4 # с заданным числом потоков
     python main.py retry-failed         # сбросить failed → pending и скачать
@@ -13,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import platform
@@ -26,6 +28,7 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from downloader import (
+    RootNotFound,
     download_all,
     make_client,
     scan_media,
@@ -215,13 +218,13 @@ class _ScanProgress:
         now = time.monotonic()
         if now - self._last >= 2.0:
             self._last = now
-            print(f"Найдено: {self.n} ({self.label})", flush=True)
+            print(f"{self.label}: {self.n}", flush=True)
 
     def close(self) -> None:
         if self._bar is not None:
             self._bar.close()
         else:
-            print(f"Найдено: {self.n} ({self.label})", flush=True)
+            print(f"{self.label}: {self.n}", flush=True)
 
 
 def _print_summary(counters: dict, elapsed: float) -> None:
@@ -248,35 +251,57 @@ def cmd_scan(cfg: dict, args: argparse.Namespace) -> int:
     if (code := _require_token(cfg)) is not None:
         return code
 
-    roots = (
+    roots = args.root or (
         [r.strip() for r in args.roots.split(",") if r.strip()]
         if args.roots
-        else [args.root]
+        else ["/"]
     )
 
     total_files = 0
     total_bytes = 0
-    with State(str(DB_FILE)) as state, closing(make_client(cfg["token"])) as client:
-        for root in roots:
-            print(f"Обхожу {root}...")
-            progress = _ScanProgress(f"Найдено [{root}]")
-            try:
-                files, bytes_ = scan_tree(
-                    client=client,
-                    state=state,
-                    root=root,
-                    on_file=progress.on_file,
-                )
-            finally:
-                progress.close()
-            print(f"  → {root}: {files} файлов, {human_bytes(bytes_)}")
-            log.info("scan %s: %d файлов, %s", root, files, human_bytes(bytes_))
-            total_files += files
-            total_bytes += bytes_
+    missing: list[str] = []
+    notes: dict[str, list[str]] = {}
+    # Один счётчик на все корни: Web UI показывает «Найдено: N» по последней строке
+    progress = _ScanProgress("Найдено")
+    try:
+        with State(str(DB_FILE)) as state, closing(make_client(cfg["token"])) as client:
+            for root in roots:
+                print(f"Обхожу {root}...")
+                try:
+                    files, bytes_ = scan_tree(
+                        client=client,
+                        state=state,
+                        root=root,
+                        on_file=progress.on_file,
+                        on_note=lambda kind, names: notes.setdefault(kind, []).extend(names),
+                    )
+                except RootNotFound as e:
+                    # Папку выбрали в Настройках, а на Диске её уже нет — Web UI скажет об этом
+                    missing.append(e.path)
+                    print(f"  → {root}: этой папки больше нет на Диске")
+                    log.warning("scan: выбранной папки нет на Диске")
+                    continue
+                print(f"  → {root}: {files} файлов, {human_bytes(bytes_)}")
+                log.info("scan: %d файлов, %s", files, human_bytes(bytes_))
+                total_files += files
+                total_bytes += bytes_
+    finally:
+        progress.close()
 
+    # Находки — в самом конце: Web UI читает их из хвоста журнала, когда сбор закончен,
+    # а за долгий сбор ранние строки вытеснили бы строки прогресса
+    for path in missing:
+        print(f"folder_missing | {json.dumps({'path': path}, ensure_ascii=False)}", flush=True)
+    for kind, names in notes.items():
+        _print_note(kind, names)
     print(f"\nИтого: {total_files} файлов, {human_bytes(total_bytes)}")
     log.info("scan итого: %d файлов, %s; в БД %s", total_files, human_bytes(total_bytes), _stats_line())
     return 0
+
+
+def _print_note(kind: str, names: list[str]) -> None:
+    """Находка сбора списка для Web UI: `kind | {"names": [...]}` (например, общие папки)."""
+    print(f"{kind} | {json.dumps({'names': names}, ensure_ascii=False)}", flush=True)
 
 
 def _stats_line() -> str:
@@ -431,7 +456,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.set_defaults(func=cmd_check)
 
     p_scan = sub.add_parser("scan", help="Обойти дерево и заполнить БД (без скачивания)")
-    p_scan.add_argument("--root", default="/", help="Корневой путь обхода (по умолчанию /)")
+    p_scan.add_argument(
+        "--root",
+        action="append",
+        default=None,
+        help="Папка для обхода; можно указать несколько раз. Без неё — весь Диск",
+    )
     p_scan.add_argument(
         "--roots",
         default=None,

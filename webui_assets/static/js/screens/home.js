@@ -155,10 +155,17 @@
     return `<div class="stats">${done}${wait}${queue}${fourth}</div>`;
   }
 
+  function folderNames(folders) {
+    const names = folders.map((p) => p.replace(/^disk:\/*/, ''));
+    return names.slice(0, 2).join(', ') + (names.length > 2 ? ` и ещё ${names.length - 2}` : '');
+  }
+
   function whatLine(s) {
     const st = s.settings || {};
     const labels = st.category_labels || {};
-    const sources = (st.sources || ['disk', 'unlim']).map((x) => (x === 'disk' ? 'Диск' : 'Безлимит')).join(' и ');
+    const folders = st.disk_folders && st.disk_folders.length ? st.disk_folders : null;
+    const sources = (st.sources || ['disk', 'unlim']).map((x) => (x !== 'disk' ? 'Безлимит'
+      : folders ? `Диск (папки: ${folderNames(folders)})` : 'Диск')).join(' и ');
     const cats = st.categories ? st.categories.map((c) => labels[c] || c).join(', ') : 'все файлы';
     return `Что скачиваем: ${esc(sources)} — ${esc(cats)}${st.gentle ? ' · бережный режим' : ''} · <a href="#/settings">изменить</a>`;
   }

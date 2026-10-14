@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import math
 import os
 import re
 import sqlite3
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -29,7 +30,7 @@ IS_WINDOWS = sys.platform.startswith("win")
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 
@@ -93,6 +94,93 @@ def keep_awake() -> Iterator[None]:
                 pass
         if caffeinate is not None:
             caffeinate.terminate()
+
+
+# ── Выбор папок Диска ───────────────────────────────────────────────────────
+
+# Корзину не сканируем и выбрать не даём
+SKIP_PATH_PREFIXES = ("disk:/Корзина", "disk:/Trash")
+# Все выбранные папки уходят аргументами в `main.py scan`, а командная строка
+# Windows ограничена 32 767 символами: 50 × 400 с запасом в неё помещаются
+MAX_DISK_FOLDERS = 50
+MAX_DISK_FOLDER_LEN = 400
+
+
+def to_disk_path(path: str) -> str:
+    """Приводит путь к виду 'disk:/foo/bar' — так пути возвращает API."""
+    if path.startswith("disk:"):
+        return path
+    if path.startswith("/"):
+        return "disk:" + path
+    return "disk:/" + path
+
+
+def in_trash(path: str) -> bool:
+    """Путь лежит в корзине (папки вроде «Корзина2» не задевает)."""
+    norm = to_disk_path(path)
+    return any(norm == p or norm.startswith(p + "/") for p in SKIP_PATH_PREFIXES)
+
+
+def path_in_folders(path: str, folders: Iterable[str]) -> bool:
+    """Путь совпадает с одной из папок или лежит внутри неё. «Фото2» не входит в «Фото»."""
+    return any(path == f or path.startswith(f + "/") for f in folders)
+
+
+def normalize_disk_folders(paths: Iterable[str]) -> list[str]:
+    """Чистит выбор папок: вид 'disk:/…', без хвостового '/', дублей и вложенных.
+
+    Папка внутри уже выбранной лишняя: родитель и так скачается целиком.
+    Ошибки — ValueError с текстом, который можно показать человеку.
+    """
+    clean: set[str] = set()
+    for raw in paths:
+        if not isinstance(raw, str):
+            raise ValueError("Непонятный путь к папке")
+        text = raw.strip()
+        if not text:
+            continue
+        if any(ord(ch) < 32 for ch in text):
+            raise ValueError("Непонятный путь к папке")
+        parts = [p for p in to_disk_path(text).removeprefix("disk:").split("/") if p]
+        if not parts:
+            raise ValueError("Чтобы скачать весь Диск, выберите «Весь Диск»")
+        path = "disk:/" + "/".join(parts)
+        if in_trash(path):
+            raise ValueError("Корзину скачать нельзя")
+        if len(path) > MAX_DISK_FOLDER_LEN:
+            raise ValueError(f"Слишком длинный путь к папке: {path.removeprefix('disk:')[:60]}…")
+        clean.add(path)
+    kept: list[str] = []
+    for path in sorted(clean, key=lambda p: (len(p), p)):
+        if not path_in_folders(path, kept):
+            kept.append(path)
+    if len(kept) > MAX_DISK_FOLDERS:
+        raise ValueError(f"Можно выбрать не больше {MAX_DISK_FOLDERS} папок — "
+                         f"отметьте папки уровнем выше")
+    return sorted(kept, key=lambda p: (p.casefold(), p))
+
+
+def encode_disk_folders(paths: Iterable[str]) -> str:
+    r"""Выбор папок → строка для .env.
+
+    JSON, а не запятые: в именах папок бывают запятые. '$' прячем в $ —
+    python-dotenv подставляет ${…} даже внутри одинарных кавычек.
+    """
+    return json.dumps(list(paths), ensure_ascii=False).replace("$", "\\u0024")
+
+
+def decode_disk_folders(raw: str | None) -> list[str] | None:
+    """Строка из .env → список папок. Пусто или испорчено — None: качаем весь Диск."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        if not isinstance(data, list):
+            return None
+        return normalize_disk_folders(data) or None
+    except ValueError:
+        return None
 
 
 # ── Коды выхода скриптов (их читают Rescue в webui.py и фронтенд) ──────────
