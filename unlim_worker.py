@@ -1,19 +1,24 @@
 """Параллельный воркер скачивания безлимита (photoslice).
 
-Берёт pending файлы пачками, для каждой просит Яндекс собрать ZIP,
-скачивает, распаковывает в DOWNLOAD_DIR/_unlim/, удаляет ZIP.
+Берёт pending файлы пачками и складывает их в DOWNLOAD_DIR/_unlim/. Два режима:
+  direct (по умолчанию) — каждый файл пачки по прямой ссылке на оригинал
+           (mpfs/url), как кнопка «Скачать» в веб-версии. Работает, пока Яндекс
+           держит отключённым массовое скачивание (с октября 2026).
+  zip    — Яндекс собирает ZIP из всей пачки (mpfs/bulk-download-prepare),
+           воркер скачивает и распаковывает его. Быстрее на мелких файлах,
+           но работает, только когда Яндекс отдаёт архивы.
 
 Можно запускать несколько процессов параллельно — каждый атомарно
 забирает свою пачку из БД и не мешает другим.
 
 Запуск:
   python unlim_worker.py --id 1
-  python unlim_worker.py --id 2
+  python unlim_worker.py --id 2 --mode zip
 
 Коды выхода:
   0 — очередь пуста, работа закончена
   2 — куки протухли (auth_expired), нужен новый cookies.json
-  3 — Яндекс не отдаёт архивы больше часа (bulk_unavailable), повторить позже
+  3 — Яндекс больше часа не отдаёт файлы (bulk_unavailable и др.), повторить позже
   4 — на локальном диске нет места
 """
 
@@ -35,15 +40,20 @@ from typing import NamedTuple
 
 import requests
 
+from storage_fetch import FetchFailure, fetch_to_file
+
 from unlim_common import (
     BASE,
     COOKIES_FILE,
     DOWNLOAD_DIR,
     LOG_DIR,
     UNLIM_DB_FILE,
+    DEFERRED_MARKER,
     AuthExpiredError,
+    YandexUnavailableError,
     connect_unlim_db,
-    ensure_attempts_column as common_ensure_attempts,
+    count_deferred,
+    ensure_unlim_schema,
     get_sk_uid,
     make_cid,
     make_session as common_make_session,
@@ -54,6 +64,10 @@ from unlim_common import (
 from utils import (
     APP_VERSION,
     DEFAULT_UNLIM_BATCH,
+    EXIT_AUTH,
+    EXIT_DEFERRED,
+    EXIT_DISK_FULL,
+    EXIT_OUTAGE,
     TELEGRAM_CHANNEL,
     ensure_utf8_stdio,
     human_bytes,
@@ -67,7 +81,10 @@ DB_FILE = UNLIM_DB_FILE
 LOG_FILE = os.path.join(LOG_DIR, "unlim_worker.log")
 
 EXTRACT_DIR = os.path.join(DOWNLOAD_DIR, "_unlim")
+# Временные файлы: ZIP пачек и недокачанные .part режима direct
 ZIP_TMP_DIR = os.path.join(DOWNLOAD_DIR, "_unlim_tmp_zips")
+MODES = ("direct", "zip")
+DEFAULT_MODE = "direct"
 BATCH_SIZE = DEFAULT_UNLIM_BATCH
 MAX_BATCH_BYTES = 250 * 1024 * 1024  # 250 MB (быстрая подготовка архива без зависаний CDN)
 LARGE_FILE_THRESHOLD = 150 * 1024 * 1024  # 150 MB (тяжёлые файлы качаем соло)
@@ -90,6 +107,15 @@ OUTAGE_GIVE_UP_SEC = 3600
 # 429 от Яндекса: пауза растёт 45 → 90 → 180 … до 10 минут и действует на ВСЕ воркеры
 RATE_LIMIT_BASE_PAUSE_SEC = 45
 RATE_LIMIT_MAX_PAUSE_SEC = 600
+# Сервер хранения, не ответивший за STORAGE_READ_TIMEOUT_SEC, считается недоступным
+# столько секунд (для всех воркеров); потом его файлы пробуются снова.
+# Живые серверы отвечают меньше чем за секунду, молчащие — не отвечают никогда
+STORAGE_READ_TIMEOUT_SEC = 10
+DEAD_HOST_TTL_SEC = 1800
+# Пачка, где все файлы отложены из-за недоступных серверов, — пауза растёт до этой
+DEFERRED_MAX_PAUSE_SEC = 30
+# Сбои скачивания самого файла, после которых файл откладывается, а не сжигает попытку
+_RETRY_FILE_KINDS = ("server_50x", "timeout", "connection")
 # Столько подряд проверок «нет места на диске» — выходим с кодом 4
 DISK_FULL_GIVE_UP = 10
 # Сколько подряд пустых выборок из очереди — и воркер завершает работу
@@ -99,9 +125,6 @@ EMPTY_POLLS_BEFORE_EXIT = 3
 HEARTBEAT_EVERY_SEC = 60
 STUCK_TIMEOUT_SEC = 900
 
-EXIT_AUTH = 2
-EXIT_OUTAGE = 3
-EXIT_DISK_FULL = 4
 
 log = logging.getLogger("unlim_worker")
 
@@ -121,8 +144,18 @@ def _tx():
 
 
 def ensure_attempts_column() -> None:
-    """Миграция для старых БД: колонка attempts могла отсутствовать."""
-    common_ensure_attempts(DB_FILE)
+    """Миграция для старых БД: колонки attempts и storage_host могли отсутствовать."""
+    ensure_unlim_schema(DB_FILE)
+
+
+def _columns(c) -> set[str]:
+    return {r[1] for r in c.execute("PRAGMA table_info(unlim_files)")}
+
+
+def _has_meta(c) -> bool:
+    return c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='unlim_meta'"
+    ).fetchone() is not None
 
 
 def check_disk_space(target_dir: str, min_bytes: int = MIN_FREE_BYTES) -> tuple[bool, int]:
@@ -141,11 +174,20 @@ def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATC
     забирает ровно 1 файл, изолируя проблемные файлы в индивидуальные загрузки.
     """
     with _tx() as c:
-        cols = {r[1] for r in c.execute("PRAGMA table_info(unlim_files)")}
+        cols = _columns(c)
         has_attempts = "attempts" in cols
         has_assigned = "assigned_at" in cols
 
         att_col = "COALESCE(attempts, 0) AS attempts" if has_attempts else "0 AS attempts"
+        md5_col = "md5" if "md5" in cols else "NULL AS md5"
+        # Файлы молчащих серверов хранения не берём: зря спросили бы ссылку у Яндекса
+        dead_filter = ""
+        if "storage_host" in cols and _has_meta(c):
+            dead_filter = (
+                " AND (storage_host IS NULL OR NOT EXISTS (SELECT 1 FROM unlim_meta m "
+                "WHERE m.key = 'dead_host:' || unlim_files.storage_host "
+                "AND CAST(m.value AS REAL) > CAST(strftime('%s', 'now') AS REAL)))"
+            )
         order_parts = []
         if has_attempts:
             order_parts.append("attempts ASC")
@@ -154,8 +196,8 @@ def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATC
         order_parts.append("rowid ASC")
 
         rows = list(c.execute(
-            f"SELECT file_id, name, size, {att_col} "
-            f"FROM unlim_files WHERE status='pending' "
+            f"SELECT file_id, name, size, {md5_col}, {att_col} "
+            f"FROM unlim_files WHERE status='pending'{dead_filter} "
             f"ORDER BY {', '.join(order_parts)} "
             f"LIMIT ?",
             (max(size * 2, 40),),
@@ -166,7 +208,8 @@ def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATC
         for r in rows:
             file_size = int(r["size"] or 0)
             attempts = int(r["attempts"] or 0)
-            item = {"file_id": r["file_id"], "name": r["name"], "size": file_size, "attempts": attempts}
+            item = {"file_id": r["file_id"], "name": r["name"], "size": file_size,
+                    "md5": r["md5"], "attempts": attempts}
             # Если первый же файл тяжёлый или уже имел сбои — качаем соло (1 файл)
             if not items and (file_size >= LARGE_FILE_THRESHOLD or attempts > 0):
                 items.append(item)
@@ -215,10 +258,33 @@ def mark_done(file_ids: list[str], paths: dict[str, str] | None = None) -> None:
         return
     paths = paths or {}
     with _tx() as c:
+        host_reset = ", storage_host=NULL" if "storage_host" in _columns(c) else ""
         c.executemany(
             "UPDATE unlim_files SET status='downloaded', local_path=COALESCE(?, local_path), "
-            "downloaded_at=CURRENT_TIMESTAMP, worker_id=NULL, error=NULL WHERE file_id=?",
+            f"downloaded_at=CURRENT_TIMESTAMP, worker_id=NULL, error=NULL{host_reset} WHERE file_id=?",
             [(paths.get(i), i) for i in file_ids],
+        )
+
+
+def mark_deferred(file_ids: list[str], host: str, error: str, worker_id: int | None = None) -> None:
+    """Файлы на молчащем сервере хранения: обратно в очередь без сжигания попытки.
+
+    Сервер записывается в storage_host — пока он в списке молчащих, take_batch эти
+    файлы не берёт. assigned_at обновляется, чтобы они вставали в конец очереди.
+    """
+    if not file_ids:
+        return
+    text = error if error.startswith(DEFERRED_MARKER) else DEFERRED_MARKER + error
+    clause, extra = _owner_clause(worker_id)
+    with _tx() as c:
+        has_host = "storage_host" in _columns(c)
+        host_set = ", storage_host=?" if has_host else ""
+        host_arg = (host or None,) if has_host else ()
+        c.executemany(
+            "UPDATE unlim_files SET status='pending', worker_id=NULL, error=?, "
+            f"assigned_at=CURRENT_TIMESTAMP{host_set} "
+            f"WHERE file_id=? AND status='in_progress'{clause}",
+            [(text[:500], *host_arg, i, *extra) for i in file_ids],
         )
 
 
@@ -318,6 +384,34 @@ def shared_cooldown_remaining() -> float:
     return max(0.0, float(row[0]) - time.time()) if row else 0.0
 
 
+# ── Недоступные серверы хранения ────────────────────────────────────────────
+# Файл лежит на конкретном сервере хранения (s123klg.storage.yandex.net). После атак
+# на дата-центры часть таких серверов молчит: и REST API, и веб-версия ждут ответа
+# вечно. Сервер, который однажды не ответил, на DEAD_HOST_TTL_SEC считается
+# недоступным для всех воркеров: его файлы откладываются сразу, без ожидания таймаута.
+
+
+def mark_host_dead(host: str, ttl: float = DEAD_HOST_TTL_SEC) -> None:
+    with _tx() as c:
+        _ensure_meta(c)
+        c.execute(
+            "INSERT INTO unlim_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (f"dead_host:{host}", repr(time.time() + ttl)),
+        )
+
+
+def is_host_dead(host: str) -> bool:
+    c = connect_unlim_db(DB_FILE)
+    try:
+        row = c.execute("SELECT value FROM unlim_meta WHERE key=?", (f"dead_host:{host}",)).fetchone()
+    except sqlite3.OperationalError:  # старая БД без таблицы
+        return False
+    finally:
+        c.close()
+    return bool(row) and float(row[0]) > time.time()
+
+
 def queue_summary() -> str:
     """Состояние очереди одной строкой — для старта воркера и логов."""
     try:
@@ -387,7 +481,8 @@ def _retry_after_sec(r) -> float | None:
     return value if value > 0 else None
 
 
-def _prepare_http_error(r) -> PrepareError:
+def _prepare_http_error(r, op: str = "prepare") -> PrepareError:
+    """Не-200 ответ models-v2 → PrepareError; op — что просили (для лога)."""
     code = r.status_code
     if code in (401, 403):
         err = PrepareError(
@@ -395,7 +490,7 @@ def _prepare_http_error(r) -> PrepareError:
             f"HTTP {code} Unauthorized/Forbidden: авторизация отклонена Яндексом (куки устарели)",
             code,
         )
-        log.error(str(err))
+        log.error(f"{op} {err}")
         return err
     trace = response_trace(r)
     if code == 429:
@@ -407,13 +502,71 @@ def _prepare_http_error(r) -> PrepareError:
             code, retry_after,
         )
     elif code == 504:
-        err = PrepareError("server_50x", f"HTTP 504 Gateway Timeout (Сервер Яндекса не успел упаковать ZIP по тайм-ауту){trace}", code)
+        err = PrepareError("server_50x", f"HTTP 504 Gateway Timeout (сервер Яндекса не успел ответить){trace}", code)
     elif code in (500, 502, 503):
-        err = PrepareError("server_50x", f"HTTP {code} (Сбой узлов архивации Яндекса / перегрузка): {r.text[:200]}{trace}", code)
+        err = PrepareError("server_50x", f"HTTP {code} (сбой или перегрузка серверов Яндекса): {r.text[:200]}{trace}", code)
     else:
         err = PrepareError("prepare_failed", f"HTTP {code}: {r.text[:200]}{trace}", code)
-    log.warning(f"prepare {err}")
+    log.warning(f"{op} {err}")
     return err
+
+
+def get_file_url(s, sk, uid, path: str) -> tuple[str | None, PrepareError | None]:
+    """Прямая ссылка на оригинал одного файла (mpfs/url) — так качает кнопка «Скачать»
+    в веб-версии. Массовое скачивание Яндекс отключил, одиночное — нет.
+
+    Возвращает (ссылка, None) или (None, ошибка). Ссылка живёт недолго — качать сразу.
+    """
+    body = {"sk": sk,
+            "connection_id": make_cid(uid),
+            "apiMethod": "mpfs/url",
+            "requestParams": {"path": path}}
+    try:
+        r = s.post(f"{BASE}/models-v2", params={"m": "mpfs/url"}, json=body, timeout=(30, 60))
+    except requests.exceptions.Timeout:
+        err = PrepareError("timeout", "Яндекс не выдал ссылку на файл за 60 с (ReadTimeout)")
+        log.warning(f"url exc: {err}")
+        return None, err
+    except requests.exceptions.ConnectionError:
+        err = PrepareError("connection", "Разрыв соединения со стороны серверов Яндекса (ConnectionError)")
+        log.warning(f"url exc: {err}")
+        return None, err
+    except Exception as e:
+        err = PrepareError("connection", f"Сбой связи с сервером Яндекса: {e}")
+        log.warning(f"url exc: {err}")
+        return None, err
+
+    trace = response_trace(r)
+    # На частые запросы Яндекс отвечает капчей — это лимит, а не протухшие куки
+    if "captcha" in str(getattr(r, "text", "") or "").lower()[:2000]:
+        err = PrepareError("rate_limit", f"Яндекс показал капчу: слишком частые запросы (HTTP {r.status_code}){trace}",
+                           r.status_code, _retry_after_sec(r))
+        log.warning(f"url {err}")
+        return None, err
+    if r.status_code != 200:
+        return None, _prepare_http_error(r, "url")
+
+    try:
+        data = r.json()
+    except Exception:
+        data = None
+    if data is None:
+        err = PrepareError("invalid_json", f"Ответ Яндекса не JSON ({r.text[:200]}){trace}")
+    elif not isinstance(data, dict):
+        err = PrepareError("prepare_failed", f"Неожиданный формат ответа Яндекса: {type(data).__name__}{trace}")
+    elif "error" in data:
+        e = data.get("error")
+        e_str = (e.get("title") or e.get("id") or str(e)) if isinstance(e, dict) else str(e)
+        err = PrepareError("prepare_failed", f"Яндекс не выдал ссылку на файл: {e_str} | ответ: {str(e)[:200]}{trace}")
+    elif not isinstance(data.get("file"), str) or not data["file"]:
+        err = PrepareError("prepare_failed", f"В ответе Яндекса нет ссылки на файл | ответ: {str(data)[:200]}{trace}")
+    else:
+        url = data["file"]
+        if url.startswith("//"):
+            url = "https:" + url
+        return url, None
+    log.warning(f"url {err}")
+    return None, err
 
 
 def prepare_zip(s, sk, uid, paths: list[str]) -> tuple[str | None, PrepareError | None]:
@@ -526,29 +679,6 @@ class ExtractedItem(NamedTuple):
     name: str
     size: int
     dst: str = ""
-
-
-@dataclass(frozen=True)
-class FetchFailure:
-    """Почему архив не скачался или не распаковался.
-
-    kind: local_disk | not_zip | bad_zip | server_50x | rate_limit | refused |
-          timeout | connection. str() даёт 'категория | текст' для логов и Web UI.
-    """
-
-    kind: str
-    text: str
-
-    def __str__(self) -> str:
-        return f"{self.kind} | {self.text}"
-
-    @property
-    def is_local(self) -> bool:
-        return self.kind == "local_disk"
-
-    @property
-    def is_server_issue(self) -> bool:
-        return self.kind in ("not_zip", "server_50x", "rate_limit", "refused", "timeout", "connection")
 
 
 class FetchResult(NamedTuple):
@@ -702,6 +832,62 @@ def download_and_extract(
         remove_quiet(zip_path)
 
 
+def download_file(
+    s, url: str, dst: str, expected_size: int = 0, worker_id: int = 0,
+    on_progress: Callable[[], None] | None = None,
+    expected_md5: str | None = None,
+    host_is_dead: Callable[[str], bool] | None = None,
+) -> tuple[str, FetchFailure | None]:
+    """Стримит один файл во временный .part и переносит в dst (режим direct).
+
+    Возвращает (итоговый путь, None) или ("", причина сбоя). Итоговый путь получает
+    суффикс _1, если файл с таким именем уже лежит в папке: чужой файл не затираем.
+    Редирект на сервер хранения и молчащие серверы разбирает storage_fetch.fetch_to_file.
+    """
+    os.makedirs(ZIP_TMP_DIR, exist_ok=True)
+    tmp = os.path.join(ZIP_TMP_DIR, f"w{worker_id}_file.part")
+    name = os.path.basename(dst)
+    t0 = time.monotonic()
+    last_log = time.monotonic()
+
+    def progress(written: int, total: int) -> None:
+        nonlocal last_log
+        now = time.monotonic()
+        if now - last_log >= 6.0:
+            last_log = now
+            total_str = f" / {human_bytes(total)}" if total > 0 else ""
+            print(f"[w{worker_id}] качаю {name}: {human_bytes(written)}{total_str}...", flush=True)
+            if on_progress:
+                on_progress()
+
+    try:
+        written, _host, failure = fetch_to_file(
+            s, url, tmp,
+            expected_size=expected_size or None,
+            expected_md5=expected_md5,
+            host_is_dead=host_is_dead,
+            storage_timeout=STORAGE_READ_TIMEOUT_SEC,
+            on_progress=progress,
+        )
+        if failure is None:
+            try:
+                os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+                final = _non_colliding_path(dst)
+                shutil.move(tmp, final)
+            except OSError as e:
+                kind = "local_disk" if is_local_disk_error(e) else "connection"
+                failure = FetchFailure(kind, f"ошибка записи файла: {e}")
+            else:
+                dur = max(0.001, time.monotonic() - t0)
+                log.info("w%d: %s скачан %s за %.1f с (%s/с)", worker_id, name,
+                         human_bytes(written), dur, human_bytes(written / dur))
+                return final, None
+    finally:
+        remove_quiet(tmp)  # после успешного переноса его уже нет
+    (log.info if failure.is_storage else log.error)(f"w{worker_id} {name}: {failure}")
+    return "", failure
+
+
 # ── Сопоставление «что просили» ↔ «что приехало» ────────────────────────────
 
 
@@ -799,7 +985,7 @@ _OUTAGE_TEXT = {
     "server": ("server_50x",
                "Серверы Яндекса сбоят или перегружены (ошибки 50x, таймауты, обрывы связи)."),
     "refused": ("bulk_unavailable",
-                "Похоже, массовое скачивание ограничено на стороне Яндекса."),
+                "Похоже, Яндекс ограничил скачивание на своей стороне."),
 }
 
 
@@ -814,8 +1000,11 @@ def _failure_cause(kind: str) -> str:
 class Worker:
     """Один процесс-воркер: берёт пачки из очереди, пока очередь не опустеет."""
 
-    def __init__(self, worker_id: int, batch_size: int = BATCH_SIZE):
+    def __init__(self, worker_id: int, batch_size: int = BATCH_SIZE, mode: str = DEFAULT_MODE):
+        if mode not in MODES:
+            raise ValueError(f"неизвестный режим {mode!r}, допустимы: {', '.join(MODES)}")
         self.id = worker_id
+        self.mode = mode
         self.target_batch = max(1, batch_size)
         self.batch_size = self.target_batch  # адаптивно уменьшается при сбоях
         self.session: requests.Session | None = None
@@ -834,6 +1023,7 @@ class Worker:
         self._cooldown_said_at = 0.0
         self._last_success_at = time.monotonic()
         self._disk_full_streak = 0
+        self._deferred_streak = 0  # пачки подряд, целиком отложенные (direct)
         self._last_heartbeat = 0.0
         self._current_ids: list[str] = []
 
@@ -850,6 +1040,9 @@ class Worker:
             self.say(f"auth_expired | КРИТИЧЕСКАЯ ОШИБКА: {e}")
             self.say("Куки устарели. Обновите cookies.json в Web UI или браузере.")
             sys.exit(EXIT_AUTH)
+        except YandexUnavailableError as e:
+            self.say(f"server_50x | Яндекс не отвечает, вход проверить не удалось: {e}. Повторю позже.")
+            sys.exit(EXIT_OUTAGE)
         self.say(f"авторизован uid={self.uid}")
 
     def _refresh_auth(self) -> bool:
@@ -878,7 +1071,6 @@ class Worker:
             if not batch:
                 empty_polls += 1
                 if empty_polls >= EMPTY_POLLS_BEFORE_EXIT:
-                    self.say("нет работы, выход")
                     break
                 time.sleep(5)
                 continue
@@ -888,6 +1080,13 @@ class Worker:
 
         self._cleanup()
         self.say(f"ИТОГ: {self.total_files} files / {self.total_bytes / 1e9:.2f} GB")
+        deferred = count_deferred(DB_FILE)
+        if deferred:
+            # Доступное скачано; остальное лежит на молчащих серверах — повторит Rescue
+            self.say(f"storage_down | Всё доступное скачано. Ждут, когда серверы хранения Яндекса "
+                     f"оживут: {deferred} файлов. Попытки не сожжены.")
+            return EXIT_DEFERRED
+        self.say("нет работы, выход")
         return 0
 
     def _process(self, batch: list[dict]) -> None:
@@ -911,6 +1110,13 @@ class Worker:
         log.info("w%d b%d: пачка %d файлов, %s, попыток у худшего %d", self.id, self.batch_idx,
                  len(batch), human_bytes(total), max_att)
 
+        if self.mode == "direct":
+            self._process_direct(batch)
+        else:
+            self._process_zip(batch)
+
+    def _process_zip(self, batch: list[dict]) -> None:
+        ids = [it["file_id"] for it in batch]
         t_prep = time.monotonic()
         url, err = prepare_zip(self.session, self.sk, self.uid, ids)
         if err is not None:
@@ -921,6 +1127,114 @@ class Worker:
         start = time.monotonic()
         result = download_and_extract(self.session, url, self.id, self.batch_idx, on_progress=self._heartbeat)
         self._on_downloaded(batch, result, time.monotonic() - start)
+
+    def _process_direct(self, batch: list[dict]) -> None:
+        """Качает пачку по одному файлу через прямые ссылки (mpfs/url), без ZIP.
+
+        Каждый файл помечается скачанным сразу — прерванная пачка не теряет готовое.
+        После первого сбоя остаток пачки возвращается в очередь без сжигания попыток.
+        """
+        ids = [str(it["file_id"]) for it in batch]
+        start = time.monotonic()
+        files_before, bytes_before = self.total_files, self.total_bytes
+        deferred = 0
+        failed = False
+        for idx, item in enumerate(batch):
+            if idx and shared_cooldown_remaining() > 0:
+                # Другой воркер поймал 429 — остаток вернём, общий цикл выждет паузу
+                _release_to_pending(ids[idx:], self.id)
+                break
+            outcome = self._fetch_one(item, ids[idx + 1:])
+            self._heartbeat()  # мелкие файлы качаются быстрее, чем срабатывает on_progress
+            if outcome == "failed":
+                failed = True
+                break
+            if outcome == "deferred":
+                deferred += 1
+        done = self.total_files - files_before
+        done_bytes = self.total_bytes - bytes_before
+        tail = f", отложено {deferred}: их серверы хранения не отвечают" if deferred else ""
+        if done:
+            self._deferred_streak = 0
+            dur = time.monotonic() - start
+            mbps = (done_bytes / 1e6) / max(0.1, dur)
+            self.say(f"batch {self.batch_idx}: ✓ {done}/{len(batch)} files / "
+                     f"{done_bytes / 1e9:.2f} GB ({mbps:.1f} MB/s, {int(dur)}s{tail})")
+        elif deferred and not failed:
+            self._on_all_deferred(deferred)
+
+    def _fetch_one(self, item: dict, rest: list[str]) -> str:
+        """Один файл режима direct: 'done' | 'deferred' | 'failed'.
+
+        deferred — сервер хранения файла недоступен: файл вернулся в очередь без
+        сжигания попытки, пачка продолжается. failed — сбой уже обработан, а rest
+        (не начатый остаток пачки) возвращён в очередь до обработки: она может
+        завершить процесс.
+        """
+        fid = str(item["file_id"])
+        name = sanitize_component(os.path.basename(str(item.get("name") or fid)))
+        dst = os.path.join(EXTRACT_DIR, name)
+        expected = _batch_size(item)
+        if expected > 0 and os.path.isfile(dst) and os.path.getsize(dst) == expected:
+            # Уже лежит в папке (прошлый запуск или архив) — второй раз не качаем
+            mark_done([fid], {fid: dst})
+            self._on_file_done(fid, expected)
+            return "done"
+
+        for attempt in range(2):
+            url, err = get_file_url(self.session, self.sk, self.uid, fid)
+            if err is not None:
+                _release_to_pending(rest, self.id)
+                self._on_prepare_failed([item], err, f"batch {self.batch_idx}: ⚠️ Яндекс не выдал ссылку на файл {name}")
+                return "failed"
+            path, failure = download_file(self.session, url, dst, expected, self.id, on_progress=self._heartbeat,
+                                          expected_md5=item.get("md5"), host_is_dead=is_host_dead)
+            # Обрыв или 50x на самом файле — один быстрый повтор со свежей ссылкой
+            if failure is None or failure.kind not in _RETRY_FILE_KINDS or attempt:
+                break
+            time.sleep(2)
+        if failure is not None and failure.kind in _RETRY_FILE_KINDS:
+            # Яндекс стабильно не отдаёт файл («no more reliable hosts»): это не вина
+            # файла — откладываем до следующего раунда, а не сжигаем попытки
+            failure = FetchFailure("storage_down", f"Яндекс не отдал файл после повтора: {failure}", failure.host)
+            mark_deferred([fid], failure.host, str(failure), self.id)
+            self.say(f"batch {self.batch_idx}: ⏳ Файл {name} отложен: {failure}")
+            return "deferred"
+        if failure is not None and failure.is_storage:
+            mark_deferred([fid], failure.host, str(failure), self.id)
+            if failure.kind == "storage_down":
+                mark_host_dead(failure.host)
+                self.say(f"storage_down | Сервер хранения Яндекса {failure.host} не отвечает (файл {name}). "
+                         f"Его файлы откладываю на {DEAD_HOST_TTL_SEC // 60} мин, попытки не сжигаю.")
+            return "deferred"
+        if failure is not None:
+            _release_to_pending(rest, self.id)
+            if failure.is_local:
+                self._on_local_disk_failure([fid], failure)
+            else:
+                self.say(f"batch {self.batch_idx}: ⚠️ Файл {name} не скачался: {failure}")
+                self._on_batch_failed([item], str(failure), failure.is_server_issue, 5, failure.kind)
+            return "failed"
+
+        size = os.path.getsize(path)
+        mark_done([fid], {fid: path})
+        self._on_file_done(fid, size)
+        return "done"
+
+    def _on_all_deferred(self, deferred: int) -> None:
+        """Вся пачка — файлы на недоступных серверах хранения. Скорее всего, доступные
+        файлы кончились: ждём растущими паузами, через час без успеха выходим с кодом 3."""
+        self._deferred_streak += 1
+        pause = min(DEFERRED_MAX_PAUSE_SEC, 5 * self._deferred_streak)
+        without_success = time.monotonic() - self._last_success_at
+        if without_success >= OUTAGE_GIVE_UP_SEC:
+            self.say("storage_down | Выход: больше часа доступных файлов нет — оставшиеся лежат на серверах "
+                     "хранения Яндекса, которые не отвечают (пострадавшие дата-центры). Попытки не сожжены: "
+                     f"программа повторит их позже. Новости: {TELEGRAM_CHANNEL}")
+            self._exit(EXIT_DEFERRED)
+        self.say(f"batch {self.batch_idx}: все {deferred} файлов пачки на серверах хранения, которые не отвечают. "
+                 f"Пауза {pause} с (без успеха {int(without_success // 60)} мин)")
+        time.sleep(pause)
 
     def _heartbeat(self) -> None:
         now = time.monotonic()
@@ -933,18 +1247,18 @@ class Worker:
 
     # ── обработка исходов ──
 
-    def _on_prepare_failed(self, batch: list[dict], err: PrepareError) -> None:
-        self.say(f"batch {self.batch_idx}: ⚠️ Сбой подготовки архива Яндексом ({len(batch)} файлов)")
-        print(f"             Причина: {err}")
-        print(f"             (Статус серверов Яндекса: {TELEGRAM_CHANNEL})")
+    def _on_prepare_failed(self, batch: list[dict], err: PrepareError, headline: str = "") -> None:
+        """Яндекс не собрал архив (zip) или не выдал ссылку на файл (direct)."""
+        self.say(headline or f"batch {self.batch_idx}: ⚠️ Сбой подготовки архива Яндексом ({len(batch)} файлов)")
 
         if err.is_auth:
-            # 401/403 на bulk-prepare бывает и при живых куках — когда Яндекс
-            # отключил массовое скачивание. Проверяем сессию отдельно.
+            # 401/403 бывает и при живых куках — когда Яндекс отключил функцию
+            # (так было с массовым скачиванием). Проверяем сессию отдельно и только
+            # потом печатаем причину: строку «auth_expired |» Web UI показывает как
+            # «доступ устарел», и при живых куках она людей обманывает.
             if self._refresh_auth():
-                err = PrepareError("refused", f"Яндекс отклонил сборку архива (HTTP {err.status}), "
-                                              f"хотя сессия жива: функция ограничена на стороне Яндекса", err.status)
-                self.say(f"             Уточнение: {err}")
+                err = PrepareError("refused", f"Яндекс отклонил запрос (HTTP {err.status}), "
+                                              f"хотя сессия жива: скачивание ограничено на стороне Яндекса", err.status)
             else:
                 _release_to_pending([it["file_id"] for it in batch], self.id)
                 self.say("auth_expired | КРИТИЧЕСКАЯ ОШИБКА: Авторизация отклонена Яндексом (401/403).")
@@ -952,20 +1266,15 @@ class Worker:
                 self._exit(EXIT_AUTH)
         else:
             self._refresh_auth()
+        print(f"             Причина: {err}")
+        print(f"             (Статус серверов Яндекса: {TELEGRAM_CHANNEL})")
 
         self._on_batch_failed(batch, str(err), err.is_server_issue, err.retry_delay, err.kind)
 
     def _on_downloaded(self, batch: list[dict], result: FetchResult, dur: float) -> None:
         failure = result.failure
         if failure is not None and failure.is_local:
-            # Локальный диск (место/права) — Яндекс и файлы ни при чём
-            self.say(f"batch {self.batch_idx}: ⚠️ {failure}")
-            _release_to_pending([it["file_id"] for it in batch], self.id)
-            self._disk_full_streak += 1
-            if self._disk_full_streak >= DISK_FULL_GIVE_UP:
-                self.say(f"local_disk | Выход: локальный диск не принимает файлы ({DISK_FULL_GIVE_UP} раз подряд).")
-                self._exit(EXIT_DISK_FULL)
-            time.sleep(30)
+            self._on_local_disk_failure([it["file_id"] for it in batch], failure)
             return
 
         res = split_by_extracted(batch, result.extracted)
@@ -979,12 +1288,32 @@ class Worker:
         server_issue = failure.is_server_issue if failure else False
         self._on_batch_failed(batch, reason, server_issue, 5, failure.kind if failure else "missing")
 
-    def _on_batch_success(self, batch: list[dict], res: SplitResult, dur: float) -> None:
+    def _on_local_disk_failure(self, ids: list[str], failure: FetchFailure) -> None:
+        """Локальный диск (место/права) — Яндекс и файлы ни при чём."""
+        self.say(f"batch {self.batch_idx}: ⚠️ {failure}")
+        _release_to_pending(ids, self.id)
+        self._disk_full_streak += 1
+        if self._disk_full_streak >= DISK_FULL_GIVE_UP:
+            self.say(f"local_disk | Выход: локальный диск не принимает файлы ({DISK_FULL_GIVE_UP} раз подряд).")
+            self._exit(EXIT_DISK_FULL)
+        time.sleep(30)
+
+    def _note_success(self) -> None:
+        """Яндекс отдал хоть что-то — серия сбоев прервана."""
         self._fail_streak = 0
         self._streak_files.clear()
         self._streak_causes.clear()
         self._rate_limit_streak = 0
         self._last_success_at = time.monotonic()
+
+    def _on_file_done(self, fid: str, size: int) -> None:
+        self._note_success()
+        self._solo_streak.pop(fid, None)
+        self.total_files += 1
+        self.total_bytes += size
+
+    def _on_batch_success(self, batch: list[dict], res: SplitResult, dur: float) -> None:
+        self._note_success()
         # Пачка прошла — постепенно восстанавливаем размер к целевому
         if self.batch_size < self.target_batch:
             self.batch_size = min(self.target_batch, self.batch_size + 5)
@@ -1038,11 +1367,13 @@ class Worker:
                 set_shared_cooldown(pause)
             without_success = time.monotonic() - self._last_success_at
             prefix, explain = _OUTAGE_TEXT[self._dominant_cause(cause)]
-            self.say(f"{prefix} | Яндекс {self._fail_streak} пачек подряд не отдал архив. Последняя причина: {reason}")
+            streak, what = ("раз подряд не отдал файл", "файлы") if self.mode == "direct" \
+                else ("пачек подряд не отдал архив", "архивы")
+            self.say(f"{prefix} | Яндекс {self._fail_streak} {streak}. Последняя причина: {reason}")
             self.say(f"{explain} Попытки файлов не сжигаю, пауза {int(pause)} с "
                      f"(без успеха уже {int(without_success // 60)} мин).")
             if without_success >= OUTAGE_GIVE_UP_SEC:
-                self.say(f"{prefix} | Выход: Яндекс больше часа не отдаёт архивы. {explain} "
+                self.say(f"{prefix} | Выход: Яндекс больше часа не отдаёт {what}. {explain} "
                          f"Запустите скачивание позже. Новости: {TELEGRAM_CHANNEL}")
                 self._exit(EXIT_OUTAGE)
             time.sleep(pause)
@@ -1070,6 +1401,8 @@ class Worker:
 
     def _shrink_batch(self) -> None:
         """Адаптивно уменьшает пачку при сбоях (25 → 12 → 6 → 1), снижая нагрузку на Яндекс."""
+        if self.mode != "zip":
+            return  # в direct файлы и так идут по одному: размер пачки нагрузку не меняет
         old = self.batch_size
         self.batch_size = max(1, old // 2)
         if self.batch_size < old:
@@ -1094,7 +1427,8 @@ class Worker:
 
     def _has_disk_space(self, batch: list[dict]) -> bool:
         total = sum(_batch_size(it) for it in batch)
-        need = max(MIN_FREE_BYTES, int(total * 2.5))  # ZIP + распакованное + запас
+        # zip: архив + распакованное + запас; direct: файлы + запас
+        need = max(MIN_FREE_BYTES, int(total * (2.5 if self.mode == "zip" else 1.2)))
         ok, free = check_disk_space(DOWNLOAD_DIR, need)
         if ok:
             return True
@@ -1127,18 +1461,22 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--id", type=int, required=True, help="ID воркера (1, 2, ...)")
     ap.add_argument("--batch", type=int, default=BATCH_SIZE)
+    ap.add_argument("--mode", choices=MODES, default=DEFAULT_MODE,
+                    help="direct — по одному файлу (работает при отключённых архивах), "
+                         "zip — архивами пачек")
     ap.add_argument("--retry-failed", action="store_true", help="Сбросить failed-файлы обратно в pending")
     args = ap.parse_args()
 
     _setup_logging()
-    worker = Worker(args.id, args.batch)
+    worker = Worker(args.id, args.batch, args.mode)
+    mode_text = "по одному файлу" if worker.mode == "direct" else "ZIP-архивами"
     print("=" * 65)
     print(f"  Yandex.Disk Unlim Worker #{worker.id} — by Davron (PXSYS) · v{APP_VERSION}")
     print(f"  Telegram: {TELEGRAM_CHANNEL} (новости о статусе серверов)")
-    print(f"  batch={worker.target_batch} · папка: {EXTRACT_DIR}")
+    print(f"  batch={worker.target_batch} · режим: {mode_text} · папка: {EXTRACT_DIR}")
     print("=" * 65)
-    log.info("worker %d старт: v%s, batch=%d, БД=%s, папка=%s", worker.id, APP_VERSION,
-             worker.target_batch, DB_FILE, EXTRACT_DIR)
+    log.info("worker %d старт: v%s, batch=%d, режим=%s, БД=%s, папка=%s", worker.id, APP_VERSION,
+             worker.target_batch, worker.mode, DB_FILE, EXTRACT_DIR)
 
     if not os.path.exists(DB_FILE):
         sys.exit("Нет unlim_state.db — сначала запусти unlim_download.py --collect")

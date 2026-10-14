@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
+import requests
 import yadisk
 from tenacity import (
     retry,
@@ -31,8 +32,10 @@ from tenacity import (
 )
 from tqdm import tqdm
 
-from state import State
+from state import DEFERRED_MARKER, State
+from storage_fetch import DeadHosts, FetchFailure, fetch_to_file
 from utils import (
+    APP_VERSION,
     MAX_DISK_WORKERS,
     TELEGRAM_CHANNEL,
     avoid_case_collision,
@@ -56,6 +59,15 @@ SKIP_PATH_PREFIXES = ("disk:/Корзина", "disk:/Trash")
 SCAN_PAGE_SIZE = 200
 # Как часто печатать строку прогресса, когда вывод не терминал (Web UI)
 PLAIN_PROGRESS_EVERY_SEC = 5.0
+# Сколько раз берём свежую ссылку, если сервер хранения оборвал файл или ответил 50x
+FRESH_LINK_RETRIES = 2
+# Столько ошибок локального диска подряд — дальше качать бессмысленно (код 4)
+LOCAL_DISK_GIVE_UP = 10
+# Столько ответов 401/403 подряд — перепроверяем сам токен (код 2, только если он мёртв)
+AUTH_FAILS_BEFORE_RECHECK = 5
+
+# Молчащие серверы хранения: все потоки download_all живут в одном процессе
+DEAD_HOSTS = DeadHosts()
 
 OnFile = Callable[[str, int], None]
 
@@ -384,16 +396,35 @@ class DownloadJob:
     size: int | None
     md5: str | None
     local_path: str | None = None
+    error: str | None = None          # последняя ошибка из БД (для отложенных — маркер)
+    storage_host: str | None = None   # сервер хранения, на котором файл был отложен
 
 
 @dataclass
 class DownloadResult:
     job: DownloadJob
-    status: str  # downloaded | skipped | failed
+    status: str  # downloaded | skipped | failed | deferred
     local_path: str | None
     bytes_written: int
     error: str | None
     duration_ms: int
+    storage_host: str = ""
+
+
+class StorageUnavailable(Exception):
+    """Сервер хранения файла молчит — файл откладывается, а не считается ошибкой."""
+
+    def __init__(self, failure: FetchFailure):
+        super().__init__(str(failure))
+        self.failure = failure
+
+
+class FetchError(Exception):
+    """Файл не скачался после повторов; failure.kind — категория для текста ошибки."""
+
+    def __init__(self, failure: FetchFailure):
+        super().__init__(failure.text)
+        self.failure = failure
 
 
 def _ensure_local_dirs(local_path: str) -> None:
@@ -403,9 +434,82 @@ def _ensure_local_dirs(local_path: str) -> None:
 
 
 @_retry
-def _download_with_retry(client: yadisk.Client, remote: str, local: str) -> None:
-    """Низкоуровневый вызов download с retry (таймаут берётся из default_args клиента)."""
-    client.download(remote, to_long_path(local))
+def _download_link(client: yadisk.Client, remote: str) -> str:
+    """Ссылка на скачивание с повторами API (429, 50x, таймауты)."""
+    return client.get_download_link(remote)
+
+
+def _thread_http() -> requests.Session:
+    """HTTP-сессия потока для самих файлов (ссылки подписаны, токен не нужен)."""
+    http = getattr(_thread_local, "http", None)
+    if http is None:
+        http = requests.Session()
+        http.headers["User-Agent"] = f"yadisk-backup/{APP_VERSION}"
+        _thread_local.http = http
+        with _all_clients_lock:
+            _all_clients.append(http)
+    return http
+
+
+def _download_with_retry(client: yadisk.Client, remote: str, local: str,
+                         job: DownloadJob | None = None) -> None:
+    """Скачивает файл с Диска в local через ссылку и сервер хранения.
+
+    Сервер хранения, который молчит, даёт StorageUnavailable сразу (без 7 повторов по
+    5 минут, как было с client.download). Обрыв, 50x и испорченный файл повторяются со
+    свежей ссылкой; остальное — FetchError.
+    """
+    size = job.size if job else None
+    md5 = job.md5 if job else None
+    # Уже отложенный файл в новом раунде пробуем один раз: не ожил — ждёт следующего
+    was_deferred = bool(job and (job.error or "").startswith(DEFERRED_MARKER))
+    tries = 1 if was_deferred else FRESH_LINK_RETRIES + 1
+    failure: FetchFailure | None = None
+    for attempt in range(tries):
+        link = _download_link(client, remote)
+        _written, _host, failure = fetch_to_file(
+            _thread_http(), link, to_long_path(local),
+            expected_size=size, expected_md5=md5,
+            host_is_dead=DEAD_HOSTS.is_dead, reject_pages=False,
+        )
+        if failure is None:
+            return
+        if failure.is_storage:
+            if failure.kind == "storage_down":
+                DEAD_HOSTS.mark(failure.host)
+            raise StorageUnavailable(failure)
+        if failure.is_local:
+            break
+        if attempt + 1 >= tries:
+            break
+        if failure.kind == "rate_limit":
+            time.sleep(RATE_LIMIT_WAIT_SEC)
+        elif failure.kind in ("server_50x", "timeout", "connection", "refused", "bad_file"):
+            time.sleep(2 * (attempt + 1))
+        else:
+            break
+    if failure is not None and failure.kind in _DEFER_AFTER_RETRIES:
+        # Яндекс стабильно не отдаёт файл («no more reliable hosts», обрывы) — это не
+        # вина файла: откладываем до следующего раунда, а не пишем «ошибка»
+        raise StorageUnavailable(FetchFailure(
+            "storage_down", f"Яндекс не отдал файл после {tries} попыток: {failure}", failure.host))
+    raise FetchError(failure)
+
+
+# Эти сбои после всех повторов откладывают файл, остальные — ошибка файла
+_DEFER_AFTER_RETRIES = ("server_50x", "timeout", "connection", "rate_limit")
+
+
+# Категория сбоя скачивания → префикс ошибки, который читает диагностика Web UI
+_FETCH_ERROR_PREFIX = {
+    "rate_limit": "rate_limit",
+    "server_50x": "server_50x",
+    "timeout": "download_timeout",
+    "connection": "download_timeout",
+    "local_disk": "local_disk",
+    "bad_file": "bad_file",
+    "refused": "http_error",
+}
 
 
 def _describe_download_error(e: BaseException) -> str:
@@ -415,6 +519,9 @@ def _describe_download_error(e: BaseException) -> str:
     if is_local_disk_error(e):
         # Проверяем ПЕРВЫМ: текст OSError содержит путь, а в пути бывает «500» или «notfound»
         return f"local_disk | {name}: {e} [ПРОБЛЕМА ЛОКАЛЬНОГО ДИСКА: место, права или отключённый диск]"
+    if isinstance(e, FetchError):
+        prefix = _FETCH_ERROR_PREFIX.get(e.failure.kind, e.failure.kind)
+        return f"{prefix} | {e.failure.text}"
     if isinstance(e, yadisk.exceptions.TooManyRequestsError):
         return f"rate_limit | 429 TooManyRequests (лимит Яндекса): {e}{api}"
     if isinstance(e, yadisk.exceptions.PathNotFoundError):
@@ -457,9 +564,9 @@ def _download_one(
     start = time.monotonic()
 
     def finish(status: str, local: str | None = None, bytes_written: int = 0,
-               error: str | None = None) -> DownloadResult:
+               error: str | None = None, storage_host: str = "") -> DownloadResult:
         return DownloadResult(job, status, local, bytes_written, error,
-                              int((time.monotonic() - start) * 1000))
+                              int((time.monotonic() - start) * 1000), storage_host)
 
     part_path: str | None = None
     try:
@@ -474,8 +581,12 @@ def _download_one(
         # никогда не выглядит как готовый.
         part_path = to_long_path(local_path + ".part")
         remove_quiet(part_path)
-        _download_with_retry(client, job.remote_path, part_path)
+        _download_with_retry(client, job.remote_path, part_path, job)
         os.replace(part_path, to_long_path(local_path))
+    except StorageUnavailable as e:
+        if part_path:
+            remove_quiet(part_path)
+        return finish("deferred", error=str(e.failure), storage_host=e.failure.host)
     except Exception as e:
         # Любая ошибка (сеть, Яндекс, локальный диск, makedirs) — это failed-результат,
         # а не исключение: один битый файл не должен ронять весь download_all.
@@ -519,11 +630,14 @@ def _close_all_clients() -> None:
 
 def _jobs_from_state(state: State) -> Iterator[DownloadJob]:
     for row in state.get_pending():
+        keys = row.keys()
         yield DownloadJob(
             remote_path=row["remote_path"],
             size=row["size"],
             md5=row["md5"],
-            local_path=row["local_path"] if "local_path" in row.keys() else None,
+            local_path=row["local_path"] if "local_path" in keys else None,
+            error=row["error"] if "error" in keys else None,
+            storage_host=row["storage_host"] if "storage_host" in keys else None,
         )
 
 
@@ -547,7 +661,11 @@ def download_all(
     jobs: Iterable[DownloadJob] | None = None,
 ) -> dict[str, int]:
     """Скачивает pending файлы из state в пул потоков с ограниченной очередью в памяти.
-    Возвращает счётчики: {downloaded, skipped, failed, bytes}.
+
+    Возвращает счётчики: {downloaded, skipped, failed, deferred, bytes} и, если пришлось
+    остановиться раньше, aborted = 'local_disk' (диск не принимает файлы) или 'auth'
+    (токен действительно мёртв). Файлы на молчащих серверах хранения откладываются:
+    остаются в очереди до следующего раунда.
     """
     workers = max(workers, 1)
     if workers > MAX_DISK_WORKERS:
@@ -562,7 +680,7 @@ def download_all(
     # Детерминированно сохраняем local_path в state, чтобы исключить коллизии между потоками
     state.assign_local_paths(download_dir)
 
-    counters = {"downloaded": 0, "skipped": 0, "failed": 0, "bytes": 0}
+    counters = {"downloaded": 0, "skipped": 0, "failed": 0, "deferred": 0, "bytes": 0}
     jobs_iter, total_files, total_bytes = _job_source(state, jobs)
     if total_files == 0:
         log.info("Нет файлов для скачивания.")
@@ -598,12 +716,14 @@ def download_all(
         if not force and now - last_plain_report < PLAIN_PROGRESS_EVERY_SEC:
             return
         last_plain_report = now
-        done_n = counters["downloaded"] + counters["skipped"] + counters["failed"]
+        done_n = (counters["downloaded"] + counters["skipped"] + counters["failed"]
+                  + counters["deferred"])
         total_str = f"/{total_files}" if total_files is not None else ""
+        # «ошибок k» должно идти раньше «отложено» — по этому порядку строку читает Web UI
         print(
             f"Прогресс: {done_n}{total_str} файлов | скачано {counters['downloaded']} "
             f"| пропущено {counters['skipped']} | ошибок {counters['failed']} "
-            f"| {human_bytes(counters['bytes'])}",
+            f"| отложено {counters['deferred']} | {human_bytes(counters['bytes'])}",
             flush=True,
         )
 
@@ -615,12 +735,44 @@ def download_all(
     # Не более max_in_flight задач в памяти — генератор из БД читается лениво
     max_in_flight = max(workers * 2, 4)
     futures: dict = {}
+    streaks = {"local_disk": 0, "auth": 0}
+
+    def submit_next() -> bool:
+        # Файлы уже известного молчащего сервера откладываем сразу, без запроса к Яндексу
+        for job in jobs_iter:
+            if job.storage_host and DEAD_HOSTS.is_dead(job.storage_host):
+                _apply_result(state, DownloadResult(
+                    job, "deferred", None, 0,
+                    f"{DEFERRED_MARKER}сервер хранения {job.storage_host} недавно не отвечал",
+                    0, job.storage_host,
+                ), counters, file_bar, byte_bar)
+                continue
+            futures[pool.submit(worker, job)] = job
+            return True
+        return False
+
+    def should_abort(res: DownloadResult) -> str | None:
+        error = res.error or ""
+        if res.status != "failed":
+            streaks["local_disk"] = streaks["auth"] = 0
+            return None
+        streaks["local_disk"] = streaks["local_disk"] + 1 if error.startswith("local_disk |") else 0
+        streaks["auth"] = streaks["auth"] + 1 if error.startswith("auth_expired |") else 0
+        if streaks["local_disk"] >= LOCAL_DISK_GIVE_UP:
+            log.error("Локальный диск %d раз подряд не принял файл — останавливаюсь", LOCAL_DISK_GIVE_UP)
+            return "local_disk"
+        if streaks["auth"] >= AUTH_FAILS_BEFORE_RECHECK:
+            streaks["auth"] = 0
+            # 403 на отдельные файлы бывает и с живым токеном — проверяем сам токен
+            state_now, msg = token_state(token)
+            if state_now == "invalid":
+                log.error("Токен перестал действовать: %s", msg)
+                return "auth"
+        return None
 
     try:
-        for job in jobs_iter:
-            futures[pool.submit(worker, job)] = job
-            if len(futures) >= max_in_flight:
-                break
+        while len(futures) < max_in_flight and submit_next():
+            pass
 
         if not futures:
             log.info("Нет файлов для скачивания.")
@@ -639,10 +791,16 @@ def download_all(
                     except Exception as e:  # защитный барьер — _download_one сам ловит всё
                         res = DownloadResult(job, "failed", None, 0, _describe_download_error(e), 0)
                     _apply_result(state, res, counters, file_bar, byte_bar)
+                    abort = should_abort(res)
+                    if abort:
+                        counters["aborted"] = abort
+                        break
                     # Подкладываем следующую задачу из стрима
-                    next_job = next(jobs_iter, None)
-                    if next_job is not None:
-                        futures[pool.submit(worker, next_job)] = next_job
+                    submit_next()
+                if counters.get("aborted"):
+                    pool.shutdown(wait=True, cancel_futures=True)
+                    futures.clear()
+                    break
                 plain_report()
             plain_report(force=True)
         except KeyboardInterrupt:
@@ -661,9 +819,11 @@ def download_all(
         byte_bar.close()
         elapsed = max(0.001, time.monotonic() - started)
         log.info(
-            "Итог download: скачано %d (%s), пропущено %d, ошибок %d за %.0f с, средняя %s/с",
+            "Итог download: скачано %d (%s), пропущено %d, ошибок %d, отложено %d "
+            "(молчащих серверов %d) за %.0f с, средняя %s/с",
             counters["downloaded"], human_bytes(counters["bytes"]), counters["skipped"],
-            counters["failed"], elapsed, human_bytes(counters["bytes"] / elapsed),
+            counters["failed"], counters["deferred"], DEAD_HOSTS.count(), elapsed,
+            human_bytes(counters["bytes"] / elapsed),
         )
 
     return counters
@@ -695,6 +855,13 @@ def _apply_result(
         if res.job.size:
             byte_bar.update(res.job.size)
         log.info("SKIP | already exists | %s", res.job.remote_path)
+    elif res.status == "deferred":
+        already = (res.job.storage_host == res.storage_host
+                   and (res.job.error or "").startswith(DEFERRED_MARKER))
+        if not already:  # тот же сервер уже записан — базу лишний раз не трогаем
+            state.mark_deferred(res.job.remote_path, res.storage_host, res.error or "")
+        counters["deferred"] += 1
+        log.info("DEFER | %s | %s", res.storage_host or "?", res.job.remote_path)
     else:
         state.mark_failed(res.job.remote_path, res.error or "unknown")
         counters["failed"] += 1
@@ -718,8 +885,18 @@ def _apply_result(
 
 def check_token(token: str) -> tuple[bool, str]:
     """Проверяет, валиден ли токен. Возвращает (ok, message)."""
+    state, msg = token_state(token)
+    return state == "ok", msg
+
+
+def token_state(token: str) -> tuple[str, str]:
+    """Состояние токена: ('ok' | 'invalid' | 'unreachable', сообщение).
+
+    unreachable — Яндекс не ответил на проверку (сеть, 50x, таймаут). Это не повод
+    просить у человека новый токен: во время сбоев Яндекса старый токен жив.
+    """
     if not token or token.strip() == "" or token.startswith("AQAAA_paste"):
-        return False, (
+        return "invalid", (
             "Токен не задан. Открой https://yandex.ru/dev/disk/poligon/, "
             "получи OAuth-токен по кнопке справа вверху и положи его в .env "
             "как YA_DISK_TOKEN=..."
@@ -728,20 +905,23 @@ def check_token(token: str) -> tuple[bool, str]:
     try:
         cli = make_client(token)
         if not cli.check_token():
-            return False, (
+            return "invalid", (
                 "Токен невалиден (Яндекс ответил, что он не работает). "
                 "Получи новый на https://yandex.ru/dev/disk/poligon/"
             )
         acc = account_info(cli)
         log.info("Токен OK. %s", describe_account(acc))
-        return True, f"Токен OK. {describe_account(acc)}."
-    except yadisk.exceptions.UnauthorizedError as e:
-        return False, (
-            "Токен не принят (401 Unauthorized). Получи новый на "
+        return "ok", f"Токен OK. {describe_account(acc)}."
+    except (yadisk.exceptions.UnauthorizedError, yadisk.exceptions.ForbiddenError) as e:
+        return "invalid", (
+            f"Токен не принят ({type(e).__name__}). Получи новый на "
             f"https://yandex.ru/dev/disk/poligon/{api_error_details(e)}"
         )
     except Exception as e:
-        return False, f"Не удалось проверить токен: {type(e).__name__}: {e}{api_error_details(e)}"
+        return "unreachable", (
+            f"server_50x | Яндекс не ответил на проверку токена: {type(e).__name__}: {e}"
+            f"{api_error_details(e)}. Токен, скорее всего, в порядке — повторите позже."
+        )
     finally:
         if cli is not None:
             try:

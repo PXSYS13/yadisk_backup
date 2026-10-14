@@ -450,7 +450,6 @@
     color:#fff;
     box-shadow:0 0 12px rgba(41,182,246,.25);
   }
-  }
   .pill.pill-donate:hover{
     background:rgba(255,55,95,.18);
     border-color:rgba(255,55,95,.6);
@@ -1059,6 +1058,10 @@
       <span class="badge" id="pipeline-state">—</span>
     </div>
     <div class="muted" id="pipeline-step" style="margin-bottom:6px">—</div>
+    <div id="pipeline-retry" style="display:none;margin:4px 0 10px;align-items:center;gap:10px;flex-wrap:wrap">
+      <span class="muted" id="pipeline-retry-text" style="font-size:12.5px">—</span>
+      <button class="btn btn-sm" onclick="retryNow(this)" style="padding:2px 8px;font-size:11px;margin-left:6px;color:var(--yellow);border-color:rgba(255,159,10,.4)">Попробовать сейчас</button>
+    </div>
     <div class="muted" style="font-size:12px;color:var(--text-tertiary)">Время: <span id="pipeline-time">—</span></div>
     <div class="console" id="pipeline-console"><div class="console-empty">жду запуска…</div></div>
     <div style="margin-top:8px;font-size:12px;color:var(--text-tertiary);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
@@ -1105,8 +1108,8 @@
 
   <div class="grid-2">
     <div class="card">
-      <div class="card-title" style="font-size:16px">Массовое скачивание (ZIP)</div>
-      <div class="card-sub" style="margin-bottom:10px">Так работает безлимит: Яндекс собирает архив из пачки файлов.</div>
+      <div class="card-title" style="font-size:16px">Скачивание безлимита</div>
+      <div class="card-sub" style="margin-bottom:10px">Безлимит качается через веб-версию Диска по одному файлу, как кнопка «Скачать».</div>
       <div id="yx-bulk-state" class="badge">нет данных</div>
       <div id="yx-bulk-sub" style="font-size:12.5px;color:var(--text-secondary);margin-top:10px;line-height:1.45">Станет известно после первого запуска воркеров безлимита.</div>
     </div>
@@ -1397,7 +1400,7 @@
         <svg class="ico-sm"><use href="#i-refresh"/></svg>Повторить ошибки
       </button>
       <span class="muted" style="font-size:13px">Воркеров: <input type="number" id="unlim-workers" value="4" min="1" max="6" style="width:45px;text-align:center;padding:4px;background:var(--surface2);color:var(--text);border:0.5px solid var(--hairline-strong);border-radius:6px"></span>
-      <span class="muted" style="font-size:13px;margin-left:6px">Пачка: <input type="number" id="unlim-batch" value="25" min="1" max="80" style="width:45px;text-align:center;padding:4px;background:var(--surface2);color:var(--text);border:0.5px solid var(--hairline-strong);border-radius:6px" title="Количество файлов в одном архиве Яндекса. Рекомендуется 15–25 при сбоях"></span>
+      <span class="muted" style="font-size:13px;margin-left:6px">Пачка: <input type="number" id="unlim-batch" value="25" min="1" max="80" style="width:45px;text-align:center;padding:4px;background:var(--surface2);color:var(--text);border:0.5px solid var(--hairline-strong);border-radius:6px" title="Сколько файлов воркер берёт из очереди за раз. Рекомендуется 10–25"></span>
       <button class="danger" onclick="clearDb('unlim')" style="margin-left:auto">
         <svg class="ico-sm"><use href="#i-stop"/></svg>Очистить и заново
       </button>
@@ -1439,7 +1442,7 @@
       </div>
       <div class="console" id="unlim-console"><div class="console-empty">жду запуска…</div></div>
       <div style="margin-top:6px;font-size:11px;color:var(--text-tertiary);display:flex;justify-content:space-between;align-items:center">
-        <span>Перегрузка архивации — на стороне серверов Яндекса. Инфо:</span>
+        <span>Ошибки 50x и отказы — на стороне серверов Яндекса. Инфо:</span>
         <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:var(--link);text-decoration:none">t.me/davronsv</a>
       </div>
     </div>
@@ -1561,12 +1564,6 @@
         <svg class="ico" style="width:14px;height:14px"><use href="#i-external"/></svg>
         <span>Открыть DonationAlerts</span>
       </a>
-    </div>
-    <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <button onclick="testCelebrationModal()" class="btn" style="font-size:12.5px;padding:7px 14px;color:var(--text-secondary)">
-        <span>🎉 Проверить уведомление и окно завершения</span>
-      </button>
-      <span class="muted" style="font-size:12px">Проиграет звук завершения, вызовет desktop-уведомление и покажет поздравление с донатом.</span>
     </div>
   </div>
 
@@ -1902,12 +1899,26 @@ async function postJSON(url, body){
   return {r, d, err: apiError(r, d)};
 }
 
-// Коды выхода дочерних скриптов (см. unlim_worker.py / main.py)
+// Коды выхода дочерних скриптов (см. utils.py). Тексты присылает сервер в
+// /api/status.exit_codes — здесь только запасные на случай старого сервера
 const EXIT_EXPLAIN = {
-  2: 'куки или токен устарели — обновите их в настройках',
-  3: 'Яндекс больше часа не отдаёт ZIP-архивы (отказ, лимит запросов или сбой серверов) — запустите позже',
+  2: 'ключ доступа к Диску или доступ к Безлимиту устарел — обновите его в настройках',
+  3: 'Яндекс временно не отвечает или отказывает — программа повторит позже',
   4: 'на локальном диске нет места',
+  5: 'всё доступное скачано, остальные файлы ждут, когда серверы Яндекса оживут',
 };
+// Коды «ждём Яндекса»: не ошибка, программа сама повторит
+const EXIT_WAITING = new Set([3, 5]);
+
+async function retryNow(btn){
+  if(btn) btn.disabled = true;
+  try {
+    const {d, err} = await postJSON('/api/rescue/retry_now', {});
+    toast(err || d.msg || 'Готово', (err || !d.ok) ? 'err' : 'ok');
+  } catch(e){ toast('Сеть: '+e.message,'err') }
+  if(btn) btn.disabled = false;
+  refresh();
+}
 function taskStopped(task){ return !!task && (task.was_stopped || isStopped(task.exit_code)) }
 
 // ────── tabs ──────
@@ -2162,7 +2173,11 @@ document.addEventListener('DOMContentLoaded', ()=>{
   }
   const ckIn = document.getElementById('cookies-input');
   if(ckIn){
-    ckIn.addEventListener('input', ()=>{ _verifiedCookies = null });
+    // Сохранение само проверяет куки на сервере — после правки кнопка снова доступна
+    ckIn.addEventListener('input', ()=>{
+      _verifiedCookies = null;
+      document.getElementById('btn-save-cookies').disabled = false;
+    });
   }
 });
 
@@ -2650,7 +2665,7 @@ function renderProbes(health){
   }).join('');
 }
 
-const COUNTER_LABELS = {bulk_disabled:'отказ архива', server_50x:'50x', rate_limit:'429', timeout:'таймауты', auth_expired:'401/403', local_disk:'локальный диск', prepare_failed:'сборка ZIP'};
+const COUNTER_LABELS = {bulk_disabled:'отказ Яндекса', storage_down:'серверы хранения',server_50x:'50x', rate_limit:'429', timeout:'таймауты', auth_expired:'401/403', local_disk:'локальный диск', prepare_failed:'ошибка ссылки'};
 
 function updateYandexStatus(s){
   const diag = s.diagnostics || {};
@@ -2711,10 +2726,12 @@ function updateYandexStatus(s){
     const lastOk = Object.keys(tasks).filter(k=>k.startsWith('unlim_w')).some(k => (tasks[k].log_tail||[]).some(l => /✓\s*\d+(?:\/\d+)?\s*files/.test(l)));
     if(diag.kind === 'bulk_disabled' || counts.bulk_disabled){
       bulk.className = 'badge err'; bulk.textContent = 'Отключено Яндексом';
-      document.getElementById('yx-bulk-sub').textContent = 'Яндекс не отдаёт архивы. Воркер ждёт растущими паузами и не сжигает попытки файлов; обычный диск через REST API работает.';
+      document.getElementById('yx-bulk-sub').textContent = 'Яндекс отказывает в скачивании безлимита. Воркер ждёт растущими паузами и не сжигает попытки файлов; обычный диск через REST API работает.';
     } else if(lastOk){
       bulk.className = 'badge ok'; bulk.textContent = 'Работает';
-      document.getElementById('yx-bulk-sub').textContent = 'Архивы собираются и скачиваются.';
+      document.getElementById('yx-bulk-sub').textContent = counts.storage_down
+        ? 'Файлы безлимита скачиваются. Часть лежит на серверах Яндекса, которые не отвечают: они отложены и будут повторены.'
+        : 'Файлы безлимита скачиваются.';
     } else if(workersAlive){
       bulk.className = 'badge run'; bulk.textContent = 'Проверяется';
       document.getElementById('yx-bulk-sub').textContent = 'Воркеры запущены, первая пачка ещё не завершилась.';
@@ -3125,7 +3142,7 @@ function renderEstimate(){
   const free = p.free_space ? p.free_space.free : null;
   const risks = [];
   if(p.recommended && p.recommended.gentle) risks.push('Серверы Яндекса сейчас деградированы — рекомендуем щадящий режим (2 потока, пачка 10).');
-  if(p.diagnostics && p.diagnostics.kind === 'bulk_disabled') risks.push('Безлимит сейчас не отдаётся Яндексом (ZIP-архивы отключены): воркеры будут ждать с паузами и продолжат автоматически.');
+  if(p.diagnostics && p.diagnostics.kind === 'bulk_disabled') risks.push('Яндекс сейчас отказывает в скачивании безлимита: воркеры будут ждать с паузами и продолжат автоматически.');
   if(free != null && left > free) risks.push(`На диске свободно ${human(free)}, а нужно ~${human(left)} — выберите меньше категорий или другую папку.`);
   if(!d.count && !u.count) risks.push('Список файлов ещё не собран: оценка появится после сканирования, мастер запустит его сам.');
   if(!rate) risks.push('Скорость неизвестна — покажется через 10 минут после старта.');
@@ -3157,12 +3174,18 @@ function renderEstimate(){
   document.getElementById('wz-foot-note').textContent = `Шаг ${_wzStep} из 4`;
 }
 
+function _wzEmpty(src){
+  const pv = _wzPlan && _wzPlan[src] && _wzPlan[src].preview;
+  return !pv || pv.empty;
+}
+
 async function startPlan(btn){
   const rec = (_wzPlan && _wzPlan.recommended) || {workers:4, batch:25};
   const body = {
     do_disk: _wzSel.do_disk, do_unlim: _wzSel.do_unlim,
-    disk_categories: Object.keys(_wzSel.disk).filter(k => _wzSel.disk[k]),
-    unlim_categories: Object.keys(_wzSel.unlim).filter(k => _wzSel.unlim[k]),
+    // Список ещё не собран — выбирать не из чего: качаем всё, а не молча только фото и видео
+    disk_categories: _wzEmpty('disk') ? null : Object.keys(_wzSel.disk).filter(k => _wzSel.disk[k]),
+    unlim_categories: _wzEmpty('unlim') ? null : Object.keys(_wzSel.unlim).filter(k => _wzSel.unlim[k]),
     workers: _wzSel.gentle ? 2 : rec.workers,
     batch: _wzSel.gentle ? 10 : rec.batch,
   };
@@ -3195,6 +3218,8 @@ function setConsole(id, text){
 // Что запущено в слоте disk: scan и download делят один слот
 function diskTaskKind(task){
   if(!task) return null;
+  if(task.kind === 'disk_scan') return 'scan';
+  if(task.kind === 'disk_download') return 'download';
   const txt = (task.log_tail||[]).join(' ');
   if(/Обхожу|Найдено/.test(txt)) return 'scan';
   if(/Старт скачивания|Прогресс:|Итого: скачано|Сброшено failed/.test(txt)) return 'download';
@@ -3279,6 +3304,13 @@ function updateDownloadBanner(kind, task, stats){
     title.innerHTML = '<span style="color:var(--orange)">Завершено с ошибками</span>';
     sub.innerHTML = `не скачано: ${(stats.failed||0).toLocaleString('ru')} · <button class="btn btn-sm" onclick="action('disk_retry', this)" style="padding:2px 8px;font-size:11px;margin-left:6px;color:var(--yellow);border-color:rgba(255,159,10,.4)">Повторить ошибки</button>`;
     time.textContent = dur(task.elapsed);
+  } else if(EXIT_WAITING.has(task.exit_code)){
+    banner.style.display = 'flex';
+    banner.className = 'task-banner';
+    title.innerHTML = '<span style="color:var(--orange)">Ждём Яндекса</span>';
+    const left = stats && stats.deferred ? `ждут Яндекса: ${(stats.deferred||0).toLocaleString('ru')} · ` : '';
+    sub.innerHTML = `${left}${esc(EXIT_EXPLAIN[task.exit_code] || '')} · <button class="btn btn-sm" onclick="retryNow(this)" style="padding:2px 8px;font-size:11px;margin-left:6px;color:var(--yellow);border-color:rgba(255,159,10,.4)">Попробовать сейчас</button>`;
+    time.textContent = dur(task.elapsed);
   } else if(task.exit_code !== null){
     banner.style.display = 'flex';
     banner.className = 'task-banner err';
@@ -3311,12 +3343,13 @@ function updateUnlimBanner(tasks){
         const m = /batch\s+(\d+):\s*✓\s*(\d+)(?:\/\d+)?\s*files\s*\/\s*([\d.]+)\s*GB/i.exec(l);
         if(m){last = `последний batch w${w.replace('unlim_w','')}: ${m[2]} файлов, ${m[3]} ГБ`; break}
         if(!waiting && /rate_limit \| /.test(l)) waiting = 'Яндекс просит реже обращаться (429): общая пауза для всех воркеров, продолжу сам';
-        if(!waiting && /bulk_unavailable/.test(l)) waiting = 'Яндекс не отдаёт архивы: жду с паузами, попытки не сжигаю';
-        if(!waiting && /server_50x \| Яндекс \d+ пачек/.test(l)) waiting = 'Серверы Яндекса сбоят: жду с паузами, попытки не сжигаю';
+        if(!waiting && /bulk_unavailable/.test(l)) waiting = 'Яндекс отказывает в скачивании: жду с паузами, попытки не сжигаю';
+        if(!waiting && /storage_down \| /.test(l)) waiting = 'Часть файлов на серверах Яндекса, которые не отвечают: откладываю их и качаю остальные';
+        if(!waiting && /server_50x \| Яндекс \d+ (пачек|раз) подряд/.test(l)) waiting = 'Серверы Яндекса сбоят: жду с паузами, попытки не сжигаю';
       }
       if(last) break;
     }
-    sub.textContent = last || waiting || 'идёт скачивание архивов…';
+    sub.textContent = last || waiting || 'идёт скачивание…';
     const maxElapsed = Math.max(...aliveWorkers.map(w=>tasks[w].elapsed||0));
     time.textContent = dur(maxElapsed);
   } else {
@@ -3335,11 +3368,11 @@ function updateUnlimBanner(tasks){
       banner.className = 'task-banner stopped';
       title.innerHTML = '<span style="color:var(--text-secondary)">Остановлено пользователем</span>';
       sub.textContent = `воркеры остановлены`;
-    } else if(known === 3){
+    } else if(EXIT_WAITING.has(known)){
       banner.style.display = 'flex';
       banner.className = 'task-banner';
-      title.innerHTML = '<span style="color:var(--orange)">Пауза: Яндекс не отдаёт архивы</span>';
-      sub.innerHTML = `${esc(EXIT_EXPLAIN[3])} · <button class="btn btn-sm" onclick="retryUnlim(this)" style="padding:2px 8px;font-size:11px;margin-left:6px;color:var(--yellow);border-color:rgba(255,159,10,.4)">Запустить снова</button>`;
+      title.innerHTML = '<span style="color:var(--orange)">Ждём Яндекса</span>';
+      sub.innerHTML = `${esc(EXIT_EXPLAIN[known])} · <button class="btn btn-sm" onclick="retryNow(this)" style="padding:2px 8px;font-size:11px;margin-left:6px;color:var(--yellow);border-color:rgba(255,159,10,.4)">Попробовать сейчас</button>`;
     } else {
       banner.style.display = 'flex';
       banner.className = 'task-banner err';
@@ -3552,11 +3585,30 @@ async function _refreshInner(){
     const startBtn = document.getElementById('big-start');
     const stopBtn = document.getElementById('big-stop');
     const ps = document.getElementById('pipeline-state');
+    const branches = Object.values(pl.branches || {});
+    const active = branches.filter(b => b.state !== 'off');
+    const waitingAll = active.length && active.every(b => b.state === 'waiting' || b.state === 'done');
+    const needAction = active.some(b => b.state === 'needs_action');
+    const retryBox = document.getElementById('pipeline-retry');
+    if(retryBox){
+      retryBox.style.display = (pl.running && pl.next_retry_at) ? 'flex' : 'none';
+      if(pl.next_retry_at){
+        const at = new Date(pl.next_retry_at * 1000).toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
+        const left = (s.disk.db.deferred || 0) + (s.unlim.db.deferred || 0);
+        document.getElementById('pipeline-retry-text').textContent =
+          (left ? `Ждут Яндекса: ${left.toLocaleString('ru')} файлов. ` : '') + `Следующая попытка в ${at}.`;
+      }
+    }
+    if(s.exit_codes){
+      for(const [k, v] of Object.entries(s.exit_codes)) EXIT_EXPLAIN[+k] = v;
+    }
     if(pl.running){
       card.style.display='block';
       startBtn.style.display='none';
       stopBtn.style.display='inline-flex';
-      ps.textContent = 'идёт'; ps.className = 'badge run';
+      if(needAction){ ps.textContent = 'нужно ваше действие'; ps.className = 'badge err' }
+      else if(waitingAll){ ps.textContent = 'ждём Яндекса'; ps.className = 'badge' }
+      else { ps.textContent = 'идёт'; ps.className = 'badge run' }
     } else {
       startBtn.style.display='inline-flex';
       stopBtn.style.display='none';
@@ -3565,7 +3617,7 @@ async function _refreshInner(){
         ps.textContent='готово'; ps.className='badge ok';
       } else if(pl.state === 'failed'){
         card.style.display='block';
-        ps.textContent='ошибка'; ps.className='badge err';
+        ps.textContent = needAction ? 'нужно ваше действие' : 'ошибка'; ps.className='badge err';
       } else if(pl.state === 'stopped'){
         card.style.display='block';
         ps.textContent='остановлено пользователем'; ps.className='badge';

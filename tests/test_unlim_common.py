@@ -131,3 +131,53 @@ def test_get_all_clusters_pagination(monkeypatch):
     assert len(clusters) == 3
     assert [c["id"] for c in clusters] == ["c1", "c2", "c3"]
     assert len(calls) == 2
+
+
+@pytest.fixture()
+def unlim_db(tmp_path, monkeypatch):
+    import unlim_download as ud
+    monkeypatch.setattr(ud, "DB_FILE", str(tmp_path / "unlim_state.db"))
+    monkeypatch.setattr(ud, "_tls", __import__("threading").local())
+    ud.db_init()
+    return ud
+
+
+def _unlim_item(name, size):
+    return {"type": "file", "name": name, "path": f"/photounlim/{name}",
+            "meta": {"size": size, "md5": "a" * 32, "mimetype": "image/jpeg"}}
+
+
+def test_collect_via_list_pages_through_photounlim(unlim_db, monkeypatch, capsys):
+    ud = unlim_db
+    monkeypatch.setattr(ud, "LIST_PAGE", 2)
+    root = {"type": "dir", "path": "/photounlim", "id": "/photounlim/"}
+    pages = {0: [root, _unlim_item("a.jpg", 10), _unlim_item("b.jpg", 20)],
+             2: [root, _unlim_item("c.jpg", 30)]}
+    calls = []
+
+    def fake_api_call(s, sk, uid, method, params=None, retries=3):
+        assert method == "mpfs/list" and params["path"] == "/photounlim" and "size" in params["meta"]
+        calls.append(params["offset"])
+        return pages[params["offset"]]
+
+    monkeypatch.setattr(ud, "api_call", fake_api_call)
+    assert ud.collect_via_list(None, "sk", "uid") == 3
+    assert calls == [0, 2]
+    rows = ud.db().execute("SELECT file_id, name, size, md5, status FROM unlim_files ORDER BY name").fetchall()
+    assert [tuple(r) for r in rows] == [
+        ("/photounlim/a.jpg", "a.jpg", 10, "a" * 32, "pending"),
+        ("/photounlim/b.jpg", "b.jpg", 20, "a" * 32, "pending"),
+        ("/photounlim/c.jpg", "c.jpg", 30, "a" * 32, "pending"),
+    ]
+    assert "Найдено: 3 файлов" in capsys.readouterr().out  # строку читает Web UI
+
+
+def test_save_listed_files_does_not_duplicate_photoslice_rows(unlim_db):
+    ud = unlim_db
+    ud.db().execute("INSERT INTO unlim_files (file_id, name, size, status) "
+                    "VALUES ('photounlim:/a.jpg', 'a.jpg', 0, 'downloaded')")
+    assert ud.save_listed_files([_unlim_item("a.jpg", 10), _unlim_item("b.jpg", 20)]) == 1
+    rows = {r["file_id"]: (r["size"], r["md5"], r["status"]) for r in ud.db().execute("SELECT * FROM unlim_files")}
+    assert rows["photounlim:/a.jpg"] == (10, "a" * 32, "downloaded")  # дополнен, не задублирован
+    assert rows["/photounlim/b.jpg"][2] == "pending"
+    assert len(rows) == 2

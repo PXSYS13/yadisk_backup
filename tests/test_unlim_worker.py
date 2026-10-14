@@ -574,7 +574,7 @@ def test_permanent_prepare_failure_burns_attempt_immediately(db, quiet_worker):
 def test_multi_file_prepare_failure_releases_and_shrinks_batch(db, sleeps, monkeypatch):
     uw.ensure_attempts_column()
     monkeypatch.setattr(uw, "get_sk_uid", lambda s: ("sk", "uid"))
-    w = uw.Worker(worker_id=1, batch_size=10)
+    w = uw.Worker(worker_id=1, batch_size=10, mode="zip")
     batch = uw.take_batch(1, size=10)
     assert len(batch) == 2
 
@@ -639,7 +639,7 @@ def test_rate_limit_is_not_reported_as_disabled_bulk(db, quiet_worker, sleeps, c
     out = capsys.readouterr().out
     assert "bulk_unavailable" not in out
     assert "массовое скачивание ограничено" not in out
-    assert "rate_limit | Яндекс 5 пачек подряд" in out
+    assert "rate_limit | Яндекс 5 раз подряд" in out  # direct: счёт по файлам, не пачкам
     # Пауза растёт и не меньше базовой для 429
     assert sleeps[-1] >= uw.RATE_LIMIT_BASE_PAUSE_SEC
     assert max(sleeps) == uw.RATE_LIMIT_MAX_PAUSE_SEC or max(sleeps) > uw.RATE_LIMIT_BASE_PAUSE_SEC
@@ -754,7 +754,7 @@ def test_download_and_extract_contains_malicious_zip(tmp_path, monkeypatch):
             yield self._data
 
     class FakeSession:
-        def get(self, url, stream=False, timeout=None):
+        def get(self, url, stream=False, timeout=None, **kwargs):
             return FakeResponse(src_zip.read_bytes())
 
     res = uw.download_and_extract(FakeSession(), "http://x", 1, 1)
@@ -795,7 +795,7 @@ class _FakeStream:
 
 def _session_with(resp):
     class S:
-        def get(self, url, stream=False, timeout=None):
+        def get(self, url, stream=False, timeout=None, **kwargs):
             return resp
     return S()
 
@@ -846,3 +846,380 @@ def test_check_disk_space(tmp_path, monkeypatch):
     ok, free = uw.check_disk_space(str(tmp_path), min_bytes=100)
     assert ok is False
     assert free == 50
+
+
+# ── режим direct: по одному файлу через mpfs/url ────────────────────────────
+
+
+class _UrlResp:
+    def __init__(self, status=200, data=None, text="", headers=None):
+        self.status_code = status
+        self._data = data
+        self.text = text
+        self.headers = headers or {}
+
+    def json(self):
+        if self._data is None:
+            raise ValueError("Expecting value")
+        return self._data
+
+
+def _url_session(resp):
+    class S:
+        def __init__(self):
+            self.bodies = []
+
+        def post(self, url, params=None, json=None, timeout=None):
+            self.bodies.append(json)
+            return resp
+    return S()
+
+
+def test_get_file_url_success_normalizes_protocol_relative_url():
+    s = _url_session(_UrlResp(data={"file": "//downloader.disk.yandex.ru/disk/abc", "digest": "//x"}))
+    url, err = uw.get_file_url(s, "sk", "123", "/photounlim/a.jpg")
+    assert err is None
+    assert url == "https://downloader.disk.yandex.ru/disk/abc"
+    body = s.bodies[0]
+    assert body["apiMethod"] == "mpfs/url"
+    assert body["requestParams"] == {"path": "/photounlim/a.jpg"}
+
+
+@pytest.mark.parametrize(
+    "status,kind",
+    [(500, "server_50x"), (504, "server_50x"), (429, "rate_limit"), (403, "auth_expired"), (404, "prepare_failed")],
+)
+def test_get_file_url_http_errors_are_typed(status, kind):
+    url, err = uw.get_file_url(_url_session(_UrlResp(status, text="oops")), "sk", "1", "/p")
+    assert url is None
+    assert err.kind == kind
+    assert str(err).startswith(f"{kind} | ")
+
+
+def test_get_file_url_service_error_missing_link_and_bad_json():
+    url, err = uw.get_file_url(_url_session(_UrlResp(data={"error": {"id": "HTTP_404"}})), "sk", "1", "/p")
+    assert url is None and err.kind == "prepare_failed" and "HTTP_404" in str(err)
+    url, err = uw.get_file_url(_url_session(_UrlResp(data={"something": 1})), "sk", "1", "/p")
+    assert url is None and err.kind == "prepare_failed"
+    url, err = uw.get_file_url(_url_session(_UrlResp(text="<html>")), "sk", "1", "/p")
+    assert url is None and err.kind == "invalid_json"
+
+
+def test_get_file_url_captcha_is_a_rate_limit():
+    """Капча на частые запросы — пауза для всех воркеров, а не «куки протухли»."""
+    resp = _UrlResp(403, text='{"type":"captcha","captcha":{"img_url":"..."}}')
+    url, err = uw.get_file_url(_url_session(resp), "sk", "1", "/p")
+    assert url is None
+    assert err.kind == "rate_limit"
+    assert "капч" in str(err)
+
+
+@pytest.fixture()
+def dirs(tmp_path, monkeypatch):
+    extract = tmp_path / "extract"
+    monkeypatch.setattr(uw, "EXTRACT_DIR", str(extract))
+    monkeypatch.setattr(uw, "ZIP_TMP_DIR", str(tmp_path / "tmp"))
+    return extract
+
+
+def test_download_file_writes_file_and_leaves_no_part(dirs):
+    dst = str(dirs / "a.jpg")
+    path, failure = uw.download_file(_session_with(_FakeStream(b"0123456789")), "http://x", dst, 10, 1)
+    assert failure is None
+    assert path == dst
+    assert (dirs / "a.jpg").read_bytes() == b"0123456789"
+    assert not list((dirs.parent / "tmp").iterdir())
+
+
+def test_download_file_never_overwrites_existing_file(dirs):
+    dirs.mkdir()
+    (dirs / "a.jpg").write_bytes(b"other")
+    path, failure = uw.download_file(_session_with(_FakeStream(b"0123456789")), "http://x",
+                                     str(dirs / "a.jpg"), 10, 1)
+    assert failure is None
+    assert path == str(dirs / "a_1.jpg")
+    assert (dirs / "a.jpg").read_bytes() == b"other"
+
+
+def test_download_file_size_mismatch_is_not_saved(dirs):
+    path, failure = uw.download_file(_session_with(_FakeStream(b"short")), "http://x", str(dirs / "a.jpg"), 10, 1)
+    assert path == ""
+    assert failure.kind == "bad_file"
+    assert not failure.is_server_issue  # файл не тот — попытку сжигаем
+    assert not (dirs / "a.jpg").exists()
+    assert not list((dirs.parent / "tmp").iterdir())
+
+
+def test_download_file_truncated_transfer_is_a_connection_issue(dirs):
+    resp = _FakeStream(b"01234", headers={"Content-Length": "10"})
+    path, failure = uw.download_file(_session_with(resp), "http://x", str(dirs / "a.jpg"), 0, 1)
+    assert failure.kind == "connection" and failure.is_server_issue
+
+
+def test_download_file_html_and_http_errors(dirs):
+    html = _FakeStream(b"<html>captcha</html>", headers={"Content-Type": "text/html"})
+    _, failure = uw.download_file(_session_with(html), "http://x", str(dirs / "a.jpg"), 0, 1)
+    assert failure.kind == "refused"
+    _, failure = uw.download_file(_session_with(_FakeStream(b"", status=503)), "http://x", str(dirs / "a.jpg"), 0, 1)
+    assert failure.kind == "server_50x"
+    _, failure = uw.download_file(_session_with(_FakeStream(b"", status=429)), "http://x", str(dirs / "a.jpg"), 0, 1)
+    assert failure.kind == "rate_limit"
+    assert not (dirs / "a.jpg").exists()
+
+
+class _DirectSession:
+    """models-v2 mpfs/url + downloader: files — путь → байты, broken — путь → HTTP-код ссылки."""
+
+    def __init__(self, files, broken=None):
+        self.files = files
+        self.broken = broken or {}
+        self.asked = []
+
+    def post(self, url, params=None, json=None, timeout=None):
+        path = json["requestParams"]["path"]
+        self.asked.append(path)
+        code = self.broken.get(path)
+        if code:
+            return _UrlResp(code, text="error")
+        return _UrlResp(data={"file": f"//dl/{path}"})
+
+    def get(self, url, stream=False, timeout=None, **kwargs):
+        return _FakeStream(self.files[url.split("//dl/", 1)[1]])
+
+
+def test_direct_batch_downloads_each_file(db, quiet_worker, dirs, capsys):
+    w = quiet_worker
+    w.session = _DirectSession({"1": b"a" * 10, "2": b"b" * 20})
+    batch = uw.take_batch(1, size=10)
+    w.batch_idx = 1
+    w._process(batch)
+
+    assert status_of(db, "1") == ("downloaded", 0)
+    assert status_of(db, "2") == ("downloaded", 0)
+    assert (dirs / "a.jpg").read_bytes() == b"a" * 10
+    assert (dirs / "b.jpg").read_bytes() == b"b" * 20
+    con = sqlite3.connect(db)
+    assert con.execute("SELECT local_path FROM unlim_files WHERE file_id='2'").fetchone()[0] == str(dirs / "b.jpg")
+    con.close()
+    assert w.total_files == 2 and w.total_bytes == 30
+    # Строку прогресса читает Web UI (parseDownloadProgress)
+    assert "batch 1: ✓ 2/2 files / 0.00 GB" in capsys.readouterr().out
+
+
+def test_direct_failure_keeps_done_files_and_returns_the_rest(db, quiet_worker, dirs):
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO unlim_files (file_id, name, size) VALUES ('3', 'c.jpg', 5)")
+    con.commit()
+    con.close()
+    w = quiet_worker
+    w.session = _DirectSession({"1": b"a" * 10, "3": b"c" * 5}, broken={"2": 500})
+    w._process(uw.take_batch(1, size=10))
+
+    assert status_of(db, "1") == ("downloaded", 0)
+    assert status_of(db, "2") == ("pending", 0)  # 500 — вина Яндекса, попытку не сжигаем
+    assert status_of(db, "3") == ("pending", 0)  # до него очередь не дошла — вернулся в очередь
+    assert w.session.asked == ["1", "2"]
+
+
+def test_direct_reuses_file_already_on_disk(db, quiet_worker, dirs):
+    dirs.mkdir()
+    (dirs / "a.jpg").write_bytes(b"a" * 10)
+    w = quiet_worker
+    w.session = _DirectSession({"2": b"b" * 20})
+    w._process(uw.take_batch(1, size=10))
+    assert status_of(db, "1") == ("downloaded", 0)
+    assert w.session.asked == ["2"]  # за уже скачанным к Яндексу не ходили
+
+
+def test_direct_forbidden_with_live_cookies_does_not_exit(db, quiet_worker, dirs):
+    w = quiet_worker
+    w.session = _DirectSession({}, broken={"1": 403, "2": 403})
+    w._process(uw.take_batch(1, size=10))
+    assert status_of(db, "1") == ("pending", 0)
+    assert status_of(db, "2") == ("pending", 0)
+
+
+def test_direct_stops_batch_when_another_worker_hit_rate_limit(db, quiet_worker, dirs):
+    w = quiet_worker
+    w.session = _DirectSession({"1": b"a" * 10, "2": b"b" * 20})
+    batch = uw.take_batch(1, size=10)
+    uw.set_shared_cooldown(60)
+    w._process(batch)
+    assert status_of(db, "1") == ("downloaded", 0)  # первый файл пачки качается всегда
+    assert status_of(db, "2") == ("pending", 0)
+    assert w.session.asked == ["1"]
+
+
+def test_worker_rejects_unknown_mode():
+    with pytest.raises(ValueError):
+        uw.Worker(1, mode="torrent")
+
+
+# ── серверы хранения и MD5 ──────────────────────────────────────────────────
+
+
+class _Redirect:
+    """Ответ downloader'а: 302 на сервер хранения."""
+
+    def __init__(self, location):
+        self.status_code = 302
+        self.headers = {"Location": location}
+
+    def close(self):
+        pass
+
+
+class _StorageSession:
+    """downloader → 302 → сервер хранения; storage — host → байты или исключение."""
+
+    def __init__(self, storage):
+        self.storage = storage
+        self.hits = []
+
+    def get(self, url, stream=False, timeout=None, allow_redirects=True):
+        host = url.split("/")[2]
+        self.hits.append(host)
+        if host == "dl":
+            return _Redirect("https://" + url.split("/", 3)[3])
+        data = self.storage[host]
+        if isinstance(data, Exception):
+            raise data
+        return _FakeStream(data)
+
+
+def test_download_file_follows_redirect_and_checks_md5(dirs):
+    import hashlib
+    s = _StorageSession({"s1klg.storage.yandex.net": b"photo"})
+    good = hashlib.md5(b"photo").hexdigest()
+    path, failure = uw.download_file(s, "https://dl/s1klg.storage.yandex.net/f", str(dirs / "a.jpg"),
+                                     5, 1, expected_md5=good)
+    assert failure is None and (dirs / "a.jpg").read_bytes() == b"photo"
+
+    path, failure = uw.download_file(s, "https://dl/s1klg.storage.yandex.net/f", str(dirs / "b.jpg"),
+                                     5, 1, expected_md5="0" * 32)
+    assert failure.kind == "bad_file" and "MD5" in str(failure)
+    assert not (dirs / "b.jpg").exists()
+
+
+def test_download_file_silent_storage_is_storage_down(dirs):
+    import requests
+    s = _StorageSession({"s2klg.storage.yandex.net": requests.exceptions.ReadTimeout("read timed out")})
+    path, failure = uw.download_file(s, "https://dl/s2klg.storage.yandex.net/f", str(dirs / "a.jpg"), 5, 1)
+    assert path == ""
+    assert failure.kind == "storage_down"
+    assert failure.host == "s2klg.storage.yandex.net"
+    assert str(failure).startswith("storage_down | ")  # маркер для диагностики Web UI
+
+
+def test_download_file_skips_known_dead_storage_without_waiting(dirs):
+    s = _StorageSession({})
+    path, failure = uw.download_file(s, "https://dl/s3klg.storage.yandex.net/f", str(dirs / "a.jpg"), 5, 1,
+                                     host_is_dead=lambda h: h == "s3klg.storage.yandex.net")
+    assert failure.kind == "storage_skip"
+    assert s.hits == ["dl"]  # к самому серверу хранения не ходили
+
+
+def test_dead_hosts_are_shared_and_expire(db):
+    assert not uw.is_host_dead("s4klg.storage.yandex.net")  # таблицы ещё нет
+    uw.mark_host_dead("s4klg.storage.yandex.net")
+    assert uw.is_host_dead("s4klg.storage.yandex.net")
+    assert not uw.is_host_dead("s5klg.storage.yandex.net")
+    uw.mark_host_dead("s4klg.storage.yandex.net", ttl=-1)
+    assert not uw.is_host_dead("s4klg.storage.yandex.net")
+
+
+class _StorageDirectSession(_StorageSession):
+    """mpfs/url отдаёт https://dl/<host>/<file_id>; hosts — file_id → сервер хранения."""
+
+    def __init__(self, storage, hosts):
+        super().__init__(storage)
+        self.file_hosts = hosts
+
+    def post(self, url, params=None, json=None, timeout=None):
+        fid = json["requestParams"]["path"]
+        return _UrlResp(data={"file": f"//dl/{self.file_hosts[fid]}/{fid}"})
+
+
+def test_direct_defers_files_on_dead_storage_and_continues(db, quiet_worker, dirs, sleeps, capsys):
+    import requests
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO unlim_files (file_id, name, size) VALUES ('3', 'c.jpg', 5)")
+    con.commit()
+    con.close()
+    dead, alive = "s6klg.storage.yandex.net", "s7klg.storage.yandex.net"
+    w = quiet_worker
+    w.session = _StorageDirectSession(
+        {dead: requests.exceptions.ConnectTimeout("timed out"), alive: b"c" * 5},
+        {"1": dead, "2": dead, "3": alive},
+    )
+    w._process(uw.take_batch(1, size=10))
+
+    assert status_of(db, "1") == ("pending", 0)  # отложен, попытка не сожжена
+    assert status_of(db, "2") == ("pending", 0)  # тот же сервер — отложен без ожидания
+    assert status_of(db, "3") == ("downloaded", 0)  # пачка не прервалась
+    assert w.session.hits.count(dead) == 1
+    assert uw.is_host_dead(dead)
+    out = capsys.readouterr().out
+    assert out.count("storage_down | ") == 1
+    assert "отложено 2" in out
+    assert w._fail_streak == 0  # недоступный сервер — не отказ Яндекса в целом
+
+
+def test_direct_all_deferred_pauses_then_exits_5(db, quiet_worker, dirs, sleeps):
+    uw.ensure_attempts_column()  # колонка storage_host
+    uw.mark_host_dead("s8klg.storage.yandex.net")
+    w = quiet_worker
+    w.session = _StorageDirectSession({}, {"1": "s8klg.storage.yandex.net", "2": "s8klg.storage.yandex.net"})
+    w._process(uw.take_batch(1, size=10))
+    assert sleeps[-1] == 5
+    assert status_of(db, "1") == ("pending", 0)
+
+    # Файлы молчащего сервера в очереди есть, но take_batch их не отдаёт —
+    # воркер не крутится вхолостую, а сразу говорит «ждём Яндекса» (код 5)
+    assert uw.take_batch(1, size=10) == []
+    assert w.run() == uw.EXIT_DEFERRED
+    assert status_of(db, "2") == ("pending", 0)
+
+
+def test_all_deferred_for_an_hour_exits_5(db, quiet_worker, sleeps):
+    quiet_worker._last_success_at -= uw.OUTAGE_GIVE_UP_SEC + 1
+    with pytest.raises(SystemExit) as e:
+        quiet_worker._on_all_deferred(2)
+    assert e.value.code == uw.EXIT_DEFERRED
+
+
+def test_deferred_file_remembers_host_and_returns_when_host_revives(db, quiet_worker):
+    uw.ensure_attempts_column()
+    (item,) = uw.take_batch(1, size=1)
+    uw.mark_deferred([item["file_id"]], "s9klg.storage.yandex.net", "сервер молчит", worker_id=1)
+    con = sqlite3.connect(db)
+    error, host = con.execute("SELECT error, storage_host FROM unlim_files WHERE file_id=?",
+                              (item["file_id"],)).fetchone()
+    con.close()
+    assert error.startswith("storage_down | ") and host == "s9klg.storage.yandex.net"
+    assert uw.count_deferred(db) == 1
+
+    uw.mark_host_dead("s9klg.storage.yandex.net")
+    assert all(b["file_id"] != item["file_id"] for b in uw.take_batch(1, size=10))
+    uw.mark_host_dead("s9klg.storage.yandex.net", ttl=-1)  # сервер «ожил»
+    assert any(b["file_id"] == item["file_id"] for b in uw.take_batch(1, size=10))
+
+
+def test_persistent_500_on_file_defers_instead_of_burning(db, quiet_worker, dirs):
+    import requests
+    w = quiet_worker
+    alive = "s5nrg.storage.yandex.net"
+
+    class Broken(_StorageDirectSession):
+        def get(self, url, stream=False, timeout=None, allow_redirects=True):
+            if url.split("/")[2] == alive:
+                self.hits.append(alive)
+                raise requests.exceptions.HTTPError("500", response=type("R", (), {"status_code": 500})())
+            return super().get(url, stream, timeout, allow_redirects)
+
+    w.session = Broken({}, {"1": alive, "2": alive})
+    w._process(uw.take_batch(1, size=10))
+    assert status_of(db, "1") == ("pending", 0)
+    assert status_of(db, "2") == ("pending", 0)
+    assert w.session.hits.count(alive) == 4  # по одному повтору на файл
+    assert w._fail_streak == 0  # не «отказ Яндекса в целом»

@@ -19,6 +19,7 @@ from contextlib import contextmanager
 import requests
 from dotenv import load_dotenv
 
+from storage_fetch import response_trace  # noqa: F401 — заодно реэкспорт для воркера и тестов
 from utils import sqlite_tx
 
 log = logging.getLogger("unlim")
@@ -50,7 +51,8 @@ CREATE TABLE IF NOT EXISTS unlim_files (
     attempts INTEGER DEFAULT 0,
     worker_id INTEGER,
     assigned_at TIMESTAMP,
-    downloaded_at TIMESTAMP
+    downloaded_at TIMESTAMP,
+    storage_host TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_unlim_status ON unlim_files(status);
 CREATE TABLE IF NOT EXISTS unlim_clusters (
@@ -71,6 +73,10 @@ class UnlimError(Exception):
 
 class AuthExpiredError(UnlimError):
     """Срок действия сессии или кук истёк (401/403/passport redirect)."""
+
+
+class YandexUnavailableError(UnlimError):
+    """Яндекс не ответил или ответил ошибкой сервера — куки при этом могут быть живы."""
 
 
 class CookiesFormatError(SystemExit, UnlimError):
@@ -133,10 +139,20 @@ def make_session(cookies: dict[str, str] | None = None,
 
 
 def get_sk_uid(s: requests.Session) -> tuple[str, str]:
-    """Извлекает sk и uid из HTML-страницы диска."""
-    r = s.get(f"{BASE}/client/disk", timeout=30)
-    if "passport.yandex" in r.url or r.status_code != 200:
+    """Извлекает sk и uid из HTML-страницы диска.
+
+    AuthExpiredError — только когда Яндекс явно не пускает (редирект на вход, 401/403).
+    Сеть, 50x и 429 дают YandexUnavailableError: во время сбоев Яндекса куки живы,
+    и просить человека обновить их — значит гонять его по кругу.
+    """
+    try:
+        r = s.get(f"{BASE}/client/disk", timeout=30)
+    except requests.exceptions.RequestException as e:
+        raise YandexUnavailableError(f"Яндекс не ответил ({type(e).__name__})") from e
+    if "passport.yandex" in r.url or r.status_code in (401, 403):
         raise AuthExpiredError("Куки невалидны — нужно обновить cookies.json")
+    if r.status_code != 200:
+        raise YandexUnavailableError(f"Яндекс ответил HTTP {r.status_code} — сбой на его стороне")
     sk = re.search(r'"sk"\s*:\s*"([^"]+)"', r.text)
     uid = re.search(r'"uid"\s*:\s*"?(\d+)"?', r.text)
     if not sk or not uid:
@@ -147,21 +163,6 @@ def get_sk_uid(s: requests.Session) -> tuple[str, str]:
 def make_cid(uid: str) -> str:
     """Генерирует connection_id для API-запроса."""
     return f"{uid}{int(time.time() * 1000)}{random.randint(100, 999)}"
-
-
-def response_trace(r) -> str:
-    """Идентификаторы ответа Яндекса для логов — по ним поддержка Яндекса находит запрос."""
-    headers = getattr(r, "headers", None) or {}
-    parts = []
-    for h in ("x-request-id", "x-yandex-req-id", "yandexuid-req-id"):
-        v = headers.get(h) if hasattr(headers, "get") else None
-        if v:
-            parts.append(f"{h}={v}")
-            break
-    ctype = headers.get("content-type") if hasattr(headers, "get") else None
-    if ctype:
-        parts.append(f"type={str(ctype).split(';')[0]}")
-    return f" ({', '.join(parts)})" if parts else ""
 
 
 def api_call(s: requests.Session, sk: str, uid: str, method: str,
@@ -183,7 +184,8 @@ def api_call(s: requests.Session, sk: str, uid: str, method: str,
                     data = r.json()
                 except Exception:
                     raise RuntimeError(f"{method}: ответ не JSON: {r.text[:200]}")
-                if not isinstance(data, dict):
+                # mpfs/list отвечает списком, остальные методы — объектом
+                if not isinstance(data, (dict, list)):
                     raise RuntimeError(f"{method}: неожиданный формат ответа: {type(data).__name__}")
                 return data
             if r.status_code in (401, 403):
@@ -253,19 +255,68 @@ def reset_failed_files(db_path: str | None = None, *, include_in_progress: bool 
         return n
 
 
-def ensure_attempts_column(db_path: str | None = None) -> None:
-    """Миграция для старых БД: добавляет колонку attempts и индекс если отсутствуют."""
+# Маркер отложенного файла в колонке error (его же считает db_stats в webui.py)
+DEFERRED_MARKER = "storage_down | "
+
+
+def _add_column(c: sqlite3.Connection, ddl: str) -> None:
+    """ALTER TABLE, который не падает, если колонку только что добавил соседний воркер."""
+    try:
+        c.execute(ddl)
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
+
+def ensure_unlim_schema(db_path: str | None = None) -> None:
+    """Миграция старых БД: колонки attempts и storage_host, индекс, таблица unlim_meta.
+
+    Воркеры стартуют одновременно и зовут её параллельно — это безопасно.
+    """
     db_path = db_path or UNLIM_DB_FILE
     c = sqlite3.connect(db_path, timeout=60)
     try:
         cols = {r[1] for r in c.execute("PRAGMA table_info(unlim_files)")}
-        if "attempts" not in cols:
-            c.execute("ALTER TABLE unlim_files ADD COLUMN attempts INTEGER DEFAULT 0")
+        if cols and "attempts" not in cols:
+            _add_column(c, "ALTER TABLE unlim_files ADD COLUMN attempts INTEGER DEFAULT 0")
             cols.add("attempts")
+        if cols and "storage_host" not in cols:
+            _add_column(c, "ALTER TABLE unlim_files ADD COLUMN storage_host TEXT")
         if {"status", "attempts", "assigned_at"}.issubset(cols):
             c.execute("CREATE INDEX IF NOT EXISTS idx_unlim_pending ON unlim_files(status, attempts, assigned_at)")
-        # Общие для всех воркеров значения (например, пауза по 429)
+        # Общие для всех воркеров значения: пауза по 429, молчащие серверы хранения
         c.execute("CREATE TABLE IF NOT EXISTS unlim_meta (key TEXT PRIMARY KEY, value TEXT)")
         c.commit()
+    finally:
+        c.close()
+
+
+# Старое имя — им пользуются CLI и тесты
+ensure_attempts_column = ensure_unlim_schema
+
+
+def clear_dead_hosts(db_path: str | None = None) -> int:
+    """Забывает молчащие серверы хранения: в новом раунде каждый пробуется снова."""
+    db_path = db_path or UNLIM_DB_FILE
+    if not os.path.exists(db_path):
+        return 0
+    with unlim_tx(db_path) as c:
+        try:
+            return c.execute("DELETE FROM unlim_meta WHERE key LIKE 'dead_host:%'").rowcount
+        except sqlite3.OperationalError:  # старая БД без unlim_meta
+            return 0
+
+
+def count_deferred(db_path: str | None = None) -> int:
+    """Сколько файлов ждут, когда их серверы хранения оживут."""
+    db_path = db_path or UNLIM_DB_FILE
+    if not os.path.exists(db_path):
+        return 0
+    c = connect_unlim_db(db_path)
+    try:
+        return c.execute(
+            "SELECT COUNT(*) FROM unlim_files WHERE status='pending' AND error LIKE ?",
+            (DEFERRED_MARKER + "%",),
+        ).fetchone()[0]
     finally:
         c.close()

@@ -1,5 +1,6 @@
 """Тесты политики повторов: что ретраим, что нет и сколько ждём."""
 
+import pytest
 import yadisk
 
 from downloader import (
@@ -162,18 +163,55 @@ def test_wait_policy_is_exponential_otherwise():
 # ── resume-логика ───────────────────────────────────────────────────────────
 
 
+# Ссылка → содержимое файла: FakeClient выдаёт ссылки, _FakeHttp по ним отдаёт байты
+_LINKS: dict = {}
+
+
 class FakeClient:
     def __init__(self, payload=b"data", fail_with=None):
         self.payload = payload
         self.fail_with = fail_with
         self.calls = []
 
-    def download(self, remote, local):
+    def get_download_link(self, remote):
         self.calls.append(remote)
         if self.fail_with:
             raise self.fail_with
-        with open(local, "wb") as f:
-            f.write(self.payload)
+        link = f"https://downloader.test/{len(_LINKS)}"
+        _LINKS[link] = self.payload
+        return link
+
+
+class _Stream:
+    def __init__(self, data):
+        self._data = data
+        self.status_code = 200
+        self.headers = {"Content-Length": str(len(data))}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, chunk_size):
+        if self._data:
+            yield self._data
+
+
+class _FakeHttp:
+    def get(self, url, stream=False, timeout=None, allow_redirects=True):
+        return _Stream(_LINKS[url])
+
+
+@pytest.fixture(autouse=True)
+def _fake_http(monkeypatch):
+    import downloader
+    monkeypatch.setattr(downloader, "_thread_http", lambda: _FakeHttp())
+    downloader.DEAD_HOSTS.clear()
 
 
 def test_existing_file_with_same_size_is_skipped(tmp_path):
@@ -276,7 +314,7 @@ def test_existing_file_same_size_md5_mismatch_is_redownloaded(tmp_path):
 def test_download_one_cleans_up_part_file_on_failure(tmp_path, monkeypatch):
     import downloader
 
-    def fail_download(cli, remote, local):
+    def fail_download(cli, remote, local, job=None):
         with open(local, "wb") as f:
             f.write(b"part_data")
         raise ConnectionError("dropped")
@@ -299,7 +337,7 @@ def test_download_one_diagnostics_classification(tmp_path, monkeypatch):
     import downloader
 
     def make_failer(exc):
-        def _fail(cli, remote, local):
+        def _fail(cli, remote, local, job=None):
             raise exc
 
         return _fail
