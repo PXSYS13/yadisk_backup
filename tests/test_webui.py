@@ -403,7 +403,7 @@ def test_api_set_dir_quotes_hash_and_spaces(tmp_path, monkeypatch):
 
 def test_disk_clear_waits_for_task_stop(tmp_path, monkeypatch):
     db_file = tmp_path / "state.db"
-    db_file.write_text("fake db content")
+    db_file.write_text("fake db content", encoding="utf-8")
     monkeypatch.setattr(webui, "DB_FILE", db_file)
 
     calls = []

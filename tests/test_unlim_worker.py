@@ -189,10 +189,10 @@ def test_clean_stem():
 
 def test_non_colliding_path(tmp_path):
     orig = tmp_path / "test.jpg"
-    orig.write_text("first")
+    orig.write_text("first", encoding="utf-8")
     cand1 = uw._non_colliding_path(str(orig))
     assert cand1.endswith("test_1.jpg")
-    (tmp_path / "test_1.jpg").write_text("second")
+    (tmp_path / "test_1.jpg").write_text("second", encoding="utf-8")
     cand2 = uw._non_colliding_path(str(orig))
     assert cand2.endswith("test_2.jpg")
 

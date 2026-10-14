@@ -32,6 +32,7 @@ filterwarnings = [
     "error::DeprecationWarning:state",
     "error::DeprecationWarning:utils",
     "error::DeprecationWarning:downloader",
+    "error::EncodingWarning",
 ]
 
 [tool.ruff]

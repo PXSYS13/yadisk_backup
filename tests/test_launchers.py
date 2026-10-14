@@ -35,7 +35,7 @@ def test_mac_launcher_delegates_to_webui_sh():
 def test_unix_launchers_are_executable_in_git(name):
     """Бит исполнения попадает в ZIP с GitHub — без него двойной клик на macOS не сработает."""
     out = subprocess.run(["git", "ls-files", "-s", name], cwd=ROOT,
-                         capture_output=True, text=True).stdout
+                         capture_output=True, text=True, encoding="utf-8").stdout
     if not out:
         pytest.skip("файл ещё не в индексе git")
     assert out.split()[0] == "100755", out

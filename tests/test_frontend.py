@@ -27,7 +27,7 @@ def test_there_is_a_new_ui():
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
 @pytest.mark.parametrize("path", JS_FILES, ids=lambda p: p.name)
 def test_js_syntax(path):
-    res = subprocess.run(["node", "--check", str(path)], capture_output=True, text=True)
+    res = subprocess.run(["node", "--check", str(path)], capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert res.returncode == 0, res.stderr
 
 

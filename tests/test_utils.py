@@ -147,7 +147,7 @@ def test_avoid_case_collision(tmp_path):
         return
 
     f_upper = tmp_path / "IMAGE.PNG"
-    f_upper.write_text("dummy")
+    f_upper.write_text("dummy", encoding="utf-8")
 
     # Файл с тем же именем, но строчными буквами должен получить суффикс
     f_lower = str(tmp_path / "image.png")
@@ -415,11 +415,11 @@ def test_organize_get_date_filename_regex(tmp_path):
     import organize
 
     f1 = tmp_path / "2022-04-15_vacation.jpg"
-    f1.write_text("dummy")
+    f1.write_text("dummy", encoding="utf-8")
     assert organize.get_date(str(f1)) == (2022, 4)
 
     f2 = tmp_path / "IMG_20210930_1234.png"
-    f2.write_text("dummy")
+    f2.write_text("dummy", encoding="utf-8")
     assert organize.get_date(str(f2)) == (2021, 9)
 
 
@@ -445,7 +445,7 @@ def test_organize_get_date_mtime_fallback(tmp_path):
     import organize
 
     unknown = tmp_path / "random_file.doc"
-    unknown.write_text("data")
+    unknown.write_text("data", encoding="utf-8")
     # Устанавливаем mtime на фиксированную дату (2020-02-01)
     import time
     ts = time.mktime((2020, 2, 1, 12, 0, 0, 0, 0, -1))

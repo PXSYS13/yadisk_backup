@@ -390,7 +390,7 @@ def test_full_local_disk_stops_the_round_with_code_4(db, net, tmp_path):
 
 def test_unwritable_download_folder_exits_4_with_a_plain_line(tmp_path, monkeypatch, capsys):
     blocker = tmp_path / "not_a_folder"
-    blocker.write_text("x")
+    blocker.write_text("x", encoding="utf-8")
     monkeypatch.setenv("DOWNLOAD_DIR", str(blocker))
     assert pd.main([]) == EXIT_DISK_FULL
     assert "local_disk |" in capsys.readouterr().out

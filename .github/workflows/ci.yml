@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
@@ -19,14 +19,17 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: "latest"
+          version: "0.13.0"
           enable-cache: true
 
       - name: Set up Python
         run: uv python install ${{ matrix.python-version }}
 
       - name: Lint
-        run: uv run --python ${{ matrix.python-version }} ruff check .
+        run: uv run --locked --python ${{ matrix.python-version }} ruff check .
 
       - name: Tests
-        run: uv run --python ${{ matrix.python-version }} pytest -q
+        run: uv run --locked --python ${{ matrix.python-version }} pytest -q
+        env:
+          # open() без encoding= на Windows-раннерах (cp1252) уже ломал CI — ловим класс ошибки целиком
+          PYTHONWARNDEFAULTENCODING: "1"
