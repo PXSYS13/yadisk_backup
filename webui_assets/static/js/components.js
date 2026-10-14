@@ -244,12 +244,13 @@
     const unlim = (r.sources || {}).unlim || {};
     const size = ((disk.folder || {}).size_bytes || 0);
     const previews = ((disk.files || {}).preview_only || 0) + ((unlim.files || {}).preview_only || 0);
+    const links = ((s.links || {}).items || []).length;
     const free = s.free_space && s.free_space.free != null ? ` · свободно на диске ${fmt.bytes(s.free_space.free)}` : '';
     return `<div class="card"><div class="card-head"><span class="icon-box info">${icon('folder')}</span>
       <div class="grow"><h3>Где мои файлы</h3><span class="tiny">Уже в папке: ${fmt.bytes(size)}${free}</span></div></div>
       <div class="path-box">${icon('drive')}<code>${esc(dir)}</code></div>
       <p class="small muted" style="margin-top:10px">Обычный Диск — с сохранением ваших папок, фото из Безлимита — в подпапке «_unlim»${
-        previews ? ', превью — в подпапке «_превью»' : ''}.</p>
+        previews ? ', превью — в подпапке «_превью»' : ''}${links ? ', скачанное по ссылкам — в подпапке «_ссылки»' : ''}.</p>
       <div class="row" style="margin-top:14px">
         <button data-action="open-folder" data-which="download">${icon('folder')}Открыть папку</button>
         <button data-action="copy-path" data-path="${esc(dir)}">${icon('copy')}Скопировать путь</button>
@@ -327,8 +328,9 @@
         const cfg = s.config || {};
         const free = s.free_space && s.free_space.free != null ? ` · свободно ${fmt.bytes(s.free_space.free)}` : '';
         App.text(q('[data-field="folder-state"]'), `${cfg.download_dir || '—'}${cfg.download_dir_set ? '' : ' (по умолчанию)'}${free}`);
-        App.html(q('[data-field="folder-buttons"]'), !withButtons ? '' : running
-          ? '<span class="tiny">Сменить папку можно после остановки скачивания</span>'
+        const linksRunning = !!(s.links && s.links.running);
+        App.html(q('[data-field="folder-buttons"]'), !withButtons ? '' : running || linksRunning
+          ? `<span class="tiny">Сменить папку можно после остановки скачивания${running ? '' : ' по ссылкам'}</span>`
           : '<button class="small" data-action="toggle-form" data-form-kind="folder">Сменить папку</button>');
         const input = q('[data-field="folder-input"]');
         if (input && !input.value && document.activeElement !== input) input.value = cfg.download_dir || '';

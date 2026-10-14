@@ -42,6 +42,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from downloader import account_info, api_error_details, list_disk_folders, make_browse_client, make_client
+from public_download import (
+    LinkError,
+    PublicApi,
+    add_link,
+    link_key,
+    normalize_public_url,
+    poke,
+    remove_link,
+)
+from public_download import connect_db as links_connect
 from state import CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER, SELECTION_MARKERS
 from unlim_common import (
     DEFERRED_MARKER,
@@ -67,6 +77,7 @@ from utils import (
     MAX_UNLIM_BATCH,
     MAX_UNLIM_WORKERS,
     IS_WINDOWS,
+    LINKS_DIRNAME,
     PREVIEW_DIRNAME,
     TELEGRAM_CHANNEL,
     TELEGRAM_HANDLE,
@@ -95,6 +106,7 @@ load_dotenv(ENV_FILE)
 
 DB_FILE = PROJECT / "state.db"
 UNLIM_DB_FILE = PROJECT / "unlim_state.db"
+LINKS_DB_FILE = PROJECT / "links_state.db"
 COOKIES_FILE = PROJECT / "cookies.json"
 TEMPLATES_DIR = PROJECT / "webui_assets"
 LOG_DIR = PROJECT / "logs"
@@ -161,6 +173,7 @@ SLOT_UNLIM_COLLECT = "unlim_collect"
 SLOT_ORGANIZE = "organize"
 UNLIM_WORKER_SLOT_PREFIX = "unlim_w"  # unlim_w1, unlim_w2, ...
 UNLIM_SLOT_PREFIX = "unlim"  # collect + все воркеры
+SLOT_LINKS = "links"  # скачивание по публичным ссылкам — живёт отдельно от спасения
 
 # Маркеры выбора в колонке error (CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER) живут
 # в state.py: сбор списка обязан их узнавать. webui.CATEGORY_SKIP_MARKER остаётся
@@ -241,6 +254,7 @@ def task_kind(cmd: list[str]) -> str:
         "unlim_download.py": "unlim_collect",
         "unlim_worker.py": "unlim_worker",
         "organize.py": "organize",
+        "public_download.py": "links",
     }.get(script, script.removesuffix(".py") or "other")
 
 
@@ -441,15 +455,19 @@ class TaskManager:
         with self._lock:
             return {slot: t.snapshot() for slot, t in self._tasks.items()}
 
-    def recent_log_lines(self, per_task: int = 40, recent_sec: float = DIAG_RECENT_SEC) -> list[str]:
+    def recent_log_lines(self, per_task: int = 40, recent_sec: float = DIAG_RECENT_SEC,
+                         exclude: tuple[str, ...] = ()) -> list[str]:
         """Хвосты логов живых задач и задач, закончившихся не раньше recent_sec назад.
 
         Старые задачи не учитываем: исправленная проблема не должна висеть баннером.
+        exclude — слоты, чьи строки к этим объяснениям не относятся.
         """
         now = time.time()
         with self._lock:
             lines: list[str] = []
-            for t in self._tasks.values():
+            for slot, t in self._tasks.items():
+                if slot in exclude:
+                    continue
                 if t.alive() or (t.finished_at is not None and now - t.finished_at <= recent_sec):
                     lines.extend(list(t.log)[-per_task:])
             return lines
@@ -1757,7 +1775,8 @@ def diagnose_tasks() -> dict:
     Возвращает и старые поля (*_detected, message, recommendation), и новые:
     kind, title, explain, affects, counts, links.
     """
-    lines = [ln.lower() for ln in tm.recent_log_lines(40)]
+    # Строки скачивания по ссылкам объясняет свой экран: здесь они дали бы баннер «Диска»
+    lines = [ln.lower() for ln in tm.recent_log_lines(40, exclude=(SLOT_LINKS,))]
     counts = {
         rule["kind"]: sum(1 for ln in lines if any(m in ln for m in rule["markers"]))
         for rule in _DIAG_RULES
@@ -2338,6 +2357,8 @@ def api_status(demo: str | None = None):
             pipe_st, disk_db, unlim_db, token, cookies, cfg, diag, free, disk_local, unlim_local,
             live=live),
         "settings": get_settings(),
+        "links": demo_links(time.time(), os.path.join(cfg["download_dir"], LINKS_DIRNAME)) if demo_data
+        else links_status(cfg, tasks),
         "demo": demo if demo_data else None,
         "diagnostics": diag,
         "yandex_health": health_monitor.snapshot() if health_monitor else None,
@@ -2577,17 +2598,43 @@ def api_problem_files(source: str, limit: int = 200):
 
 
 class OpenFolderPayload(BaseModel):
-    which: str = "download"  # download | unlim | previews
+    which: str = "download"  # download | unlim | previews | links
+    link_id: int | None = None  # для links: папка одной ссылки
+
+
+def _link_folder(base: Path, link_id: int) -> Path | None:
+    """Папка ссылки — только из базы и только внутри папки скачивания."""
+    if not LINKS_DB_FILE.exists():
+        return None
+    c = sqlite3.connect(sqlite_ro_uri(LINKS_DB_FILE), uri=True, timeout=5)
+    try:
+        row = c.execute("SELECT local_dir, kind FROM links WHERE id=?", (link_id,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    finally:
+        c.close()
+    if not row or not row[0]:
+        return None
+    path = base.joinpath(*row[0].split("/"))
+    if row[1] == "file":
+        path = path.parent  # ссылка на один файл — открываем папку, где он лежит
+    try:
+        path.resolve().relative_to(base.resolve())
+    except ValueError:
+        return None
+    return path
 
 
 @app.post("/api/open_folder")
 def api_open_folder(p: OpenFolderPayload):
     """Открывает папку скачивания в проводнике. Только настроенную — никаких чужих путей."""
     base = Path(get_config()["download_dir"])
-    sub = {"download": "", "unlim": "_unlim", "previews": PREVIEW_DIRNAME}.get(p.which)
+    sub = {"download": "", "unlim": "_unlim", "previews": PREVIEW_DIRNAME, "links": LINKS_DIRNAME}.get(p.which)
     if sub is None:
         raise HTTPException(400, "Неизвестная папка")
     path = base / sub if sub else base
+    if p.which == "links" and p.link_id is not None:
+        path = _link_folder(base, p.link_id) or path
     if not path.exists():
         return {"ok": False, "msg": "Папки пока нет — в ней ещё ничего не скачано"}
     try:
@@ -2600,6 +2647,242 @@ def api_open_folder(p: OpenFolderPayload):
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "msg": f"Не получилось открыть папку: {e}. Путь: {path}"}
     return {"ok": True, "msg": "Открыл папку", "path": str(path)}
+
+
+# ── Скачивание по публичным ссылкам (раздел «По ссылке») ───────────────────
+
+_LINK_ERROR_TEXT = {
+    "not_found": "Ссылка больше не работает: её удалили или закрыли",
+    "password": "Ссылка с паролем — такие программа пока не скачивает",
+    "forbidden": "Владелец закрыл скачивание по этой ссылке",
+}
+
+
+def _links_rows() -> tuple[list[dict], dict]:
+    """Ссылки со счётчиками файлов и служебные отметки — одним чтением, только на чтение."""
+    if not LINKS_DB_FILE.exists():
+        return [], {}
+    c = None
+    try:
+        c = sqlite3.connect(sqlite_ro_uri(LINKS_DB_FILE), uri=True, timeout=5)
+        c.row_factory = sqlite3.Row
+        rows = [dict(r) for r in c.execute(
+            """
+            SELECT l.id, l.name, l.kind, l.error_kind, l.error, l.limit_until, l.listed_at, l.added_at,
+                   SUM(f.status IS NOT NULL AND f.status <> 'gone') AS total,
+                   SUM(f.status = 'downloaded') AS done,
+                   SUM(f.status = 'pending' AND COALESCE(f.error, '') LIKE ?) AS deferred,
+                   SUM(f.status = 'pending' AND COALESCE(f.error, '') LIKE 'link_limit |%') AS limited,
+                   SUM(f.status = 'pending') AS pending,
+                   SUM(f.status = 'failed') AS failed,
+                   SUM(CASE WHEN f.status IN ('pending', 'downloaded', 'failed') THEN COALESCE(f.size, 0) END) AS bytes_total,
+                   SUM(CASE WHEN f.status = 'downloaded' THEN COALESCE(f.size, 0) END) AS bytes_done
+              FROM links l LEFT JOIN link_files f ON f.link_id = l.id
+             WHERE l.state = 'active'
+             GROUP BY l.id ORDER BY l.added_at DESC, l.id DESC
+            """,
+            (DEFERRED_MARKER + "%",),
+        )]
+        meta = {k: v for k, v in c.execute("SELECT key, value FROM links_meta")}
+        return rows, meta
+    except sqlite3.Error:
+        return [], {}
+    finally:
+        if c is not None:
+            c.close()
+
+
+def _num(value) -> float | None:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def build_links_status(rows: list[dict], meta: dict, task: dict | None, now: float, folder: str) -> dict:
+    """Блок /api/status.links: каждая ссылка — состояние простыми словами и счётчики."""
+    running = bool(task and task.get("running"))
+    waiting_round = running and meta.get("state") == "waiting"
+    next_retry = _num(meta.get("next_retry_at")) if waiting_round else None
+    exit_code = task.get("exit_code") if task and not running else None
+    problem = None
+    if exit_code == EXIT_DISK_FULL:
+        problem = {"kind": "local_disk",
+                   "text": "Не получается записать файлы в папку: нет места, нет прав или диск отключён"}
+    items = []
+    for r in rows:
+        total, done, failed = int(r["total"] or 0), int(r["done"] or 0), int(r["failed"] or 0)
+        pending, deferred, limited = int(r["pending"] or 0), int(r["deferred"] or 0), int(r["limited"] or 0)
+        queue = max(0, pending - deferred - limited)
+        limit_until = r["limit_until"] if r["limit_until"] and r["limit_until"] > now else None
+        if r["error_kind"]:
+            state, text = "error", r["error"] or _LINK_ERROR_TEXT.get(r["error_kind"], "Ссылка не работает")
+        elif r["listed_at"] is None:
+            state, text = ("listing", "Получаю список файлов") if running and not waiting_round else (
+                "paused", "Список файлов ещё не получен")
+        elif limit_until and pending:
+            state, text = "limited", f"Яндекс ограничил скачивание по этой ссылке — продолжу в {_hhmm(limit_until)}"
+        elif pending and running and queue and not waiting_round:
+            state, text = "downloading", "Скачиваю"
+        elif pending and running:
+            state = "waiting"
+            text = f"Ждут Яндекса: {_files(pending)}" + (f", повтор в {_hhmm(next_retry)}" if next_retry else "")
+        elif pending:
+            state, text = "paused", f"На паузе — осталось {_files(pending)}"
+        elif failed:
+            state, text = "done_partial", f"Готово, не скачались: {_files(failed)}"
+        else:
+            state, text = "done", "Готово: все файлы скачаны" if total else "Готово: файлов по ссылке нет"
+        items.append({
+            "id": r["id"], "name": r["name"] or "Ссылка", "kind": r["kind"], "state": state, "status_text": text,
+            "added_at": r["added_at"], "limit_until": limit_until,
+            "files": {"total": total, "done": done, "pending": pending, "queue": queue,
+                      "deferred": deferred, "limited": limited, "failed": failed},
+            "bytes": {"total": int(r["bytes_total"] or 0), "done": int(r["bytes_done"] or 0)},
+        })
+    any_pending = any(i["files"]["pending"] or i["state"] == "paused" for i in items)
+    return {
+        "running": running,
+        "state": ("waiting" if waiting_round else "running") if running else ("paused" if any_pending else "idle"),
+        "next_retry_at": next_retry,
+        "last_activity_at": task.get("last_line_at") if running and task else None,
+        "problem": problem,
+        "folder": folder,
+        "items": items,
+    }
+
+
+def links_status(cfg: dict, tasks: dict) -> dict:
+    rows, meta = _links_rows()
+    return build_links_status(rows, meta, tasks.get(SLOT_LINKS), time.time(),
+                              os.path.join(cfg["download_dir"], LINKS_DIRNAME))
+
+
+def demo_links(now: float, folder: str) -> dict:
+    """Пример раздела «По ссылке» для демо-режима: все состояния сразу."""
+    def row(i, name, total, done, pending=0, deferred=0, limited=0, failed=0, error_kind=None, limit_until=None,
+            listed=True, size=3_500_000):
+        return {"id": i, "name": name, "kind": "dir", "error_kind": error_kind,
+                "error": _LINK_ERROR_TEXT.get(error_kind) if error_kind else None, "limit_until": limit_until,
+                "listed_at": now - 600 if listed else None, "added_at": now - i * 3600, "total": total,
+                "done": done, "pending": pending, "deferred": deferred, "limited": limited, "failed": failed,
+                "bytes_total": total * size, "bytes_done": done * size}
+    rows = [
+        row(1, "Свадьба Ани и Пети", 412, 268, pending=144, deferred=31),
+        row(2, "Курс фотографии — материалы", 96, 40, pending=56, limited=56, limit_until=now + 5 * 3600),
+        row(3, "Отчёты 2024", 18, 18),
+        row(4, "Старая ссылка", 0, 0, error_kind="not_found", listed=False),
+    ]
+    task = {"running": True, "last_line_at": now - 4, "exit_code": None}
+    return build_links_status(rows, {"state": "running"}, task, now, folder)
+
+
+class LinkAddPayload(BaseModel):
+    url: str = Field(max_length=4000)
+
+
+class LinkIdPayload(BaseModel):
+    id: int | None = None
+
+
+def _links_start() -> tuple[bool, str]:
+    """Запускает скачивание по ссылкам, если оно ещё не идёт. Бережный режим — меньше потоков."""
+    if tm.any_alive(SLOT_LINKS):
+        return True, "Скачивание по ссылкам уже идёт"
+    workers = 2 if get_settings().get("gentle") else 3
+    return tm.start(SLOT_LINKS, "public_download.py", ["--wait", "--workers", str(workers)])
+
+
+@app.post("/api/links/add")
+def api_links_add(p: LinkAddPayload):
+    """«Скачать» по ссылке: проверить её у Яндекса, добавить в список и начать качать."""
+    try:
+        public_url, sub = normalize_public_url(p.url)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    conn = links_connect(LINKS_DB_FILE)
+    try:
+        existing = conn.execute("SELECT id, state FROM links WHERE url=?", (link_key(public_url, sub),)).fetchone()
+        meta, note = None, ""
+        if not existing or existing["state"] == "removed":
+            try:
+                meta = PublicApi(timeout=(5, 10)).meta(public_url, sub, limit=1)
+            except LinkError as e:
+                if e.link_level:
+                    raise HTTPException(400, e.text) from None
+                note = "Яндекс сейчас не ответил — программа попробует сама"
+        link_id, new = add_link(conn, public_url, sub, meta)
+        poke(conn)
+    finally:
+        conn.close()
+    ok, msg = _links_start()
+    log.info("ссылка #%s: %s", link_id, "добавлена" if new else "уже в списке")
+    text = ("Ссылка добавлена — начинаю скачивание" if new else "Эта ссылка уже в списке") + (f". {note}" if note else "")
+    return {"ok": ok, "msg": text if ok else msg, "id": link_id, "new": new}
+
+
+@app.post("/api/links/remove")
+def api_links_remove(p: LinkIdPayload):
+    """«Убрать из списка»: файлы на диске остаются. Идущее скачивание пропустит ссылку само."""
+    if p.id is None:
+        raise HTTPException(400, "Не указано, какую ссылку убрать")
+    conn = links_connect(LINKS_DB_FILE)
+    try:
+        removed = remove_link(conn, p.id, purge=not tm.any_alive(SLOT_LINKS))
+        poke(conn)
+    finally:
+        conn.close()
+    log.info("ссылка #%s убрана из списка", p.id)
+    return {"ok": removed, "msg": "Убрал ссылку из списка. Скачанные файлы остались в папке" if removed
+            else "Такой ссылки в списке нет"}
+
+
+@app.post("/api/links/retry_now")
+def api_links_retry_now(p: LinkIdPayload):
+    """«Попробовать сейчас»: не ждать раунда, вернуть упавшие и снять паузу лимита."""
+    conn = links_connect(LINKS_DB_FILE)
+    try:
+        only = " AND link_id=?" if p.id is not None else ""
+        params = (p.id,) if p.id is not None else ()
+        with sqlite_tx(conn):
+            conn.execute(f"UPDATE link_files SET status='pending', error=NULL WHERE status='failed'{only}", params)
+            conn.execute(f"UPDATE links SET limit_until=NULL, error_kind=NULL, error=NULL "
+                         f"WHERE state='active'{only.replace('link_id', 'id')}", params)
+        poke(conn, wake=True)
+    finally:
+        conn.close()
+    ok, msg = _links_start()
+    return {"ok": ok, "msg": "Пробую снова прямо сейчас" if ok else msg}
+
+
+@app.post("/api/links/relist")
+def api_links_relist(p: LinkIdPayload):
+    """«Проверить новые файлы»: собрать список ссылки заново — владелец мог что-то добавить."""
+    if p.id is None:
+        raise HTTPException(400, "Не указано, какую ссылку проверить")
+    conn = links_connect(LINKS_DB_FILE)
+    try:
+        with sqlite_tx(conn):
+            conn.execute("UPDATE links SET listed_at=NULL WHERE id=? AND state='active'", (p.id,))
+        poke(conn, wake=True)
+    finally:
+        conn.close()
+    ok, msg = _links_start()
+    return {"ok": ok, "msg": "Проверяю, что нового по ссылке" if ok else msg}
+
+
+@app.post("/api/links/resume")
+def api_links_resume():
+    ok, msg = _links_start()
+    return {"ok": ok, "msg": "Продолжаю скачивание по ссылкам" if ok else msg}
+
+
+@app.post("/api/links/stop")
+def api_links_stop():
+    if not tm.any_alive(SLOT_LINKS):
+        return {"ok": True, "msg": "Скачивание по ссылкам и так остановлено"}
+    ok, _msg = tm.stop(SLOT_LINKS)
+    return {"ok": ok, "msg": "Остановил скачивание по ссылкам. Скачанное сохранено"}
 
 
 # ── Демо-режим: пройти все состояния главного экрана без настоящего Яндекса ──
@@ -2841,6 +3124,9 @@ def support_info() -> dict:
         "free_space": _free_space(cfg["download_dir"]),
         "disk_db": db_stats(DB_FILE, "files", "remote_path"),
         "unlim_db": db_stats(UNLIM_DB_FILE, "unlim_files", "file_id"),
+        # Ссылки — только состояния и счётчики: ни адресов, ни имён папок
+        "links": [{"id": i["id"], "state": i["state"], "files": i["files"]}
+                  for i in links_status(cfg, tm.status())["items"]],
         "tasks": tm.status(),
         "pipeline": pipeline.status(),
         "diagnostics": diagnose_tasks(),
@@ -2961,7 +3247,8 @@ class PlanStartPayload(BaseModel):
 def api_plan_start(payload: PlanStartPayload):
     if not payload.do_disk and not payload.do_unlim:
         return {"ok": False, "msg": "Выберите хотя бы одно: диск или безлимит"}
-    if tm.any_alive(""):
+    # Скачивание по ссылкам живёт отдельно и мастеру не мешает
+    if any(tm.any_alive(slot) for slot in (SLOT_DISK, UNLIM_SLOT_PREFIX, SLOT_ORGANIZE)):
         return {"ok": False, "msg": "Сначала остановите текущие задачи"}
     src = preflight_sources(payload.do_disk, payload.do_unlim)
     if src["error"]:
@@ -3034,6 +3321,8 @@ def api_set_dir(payload: DownloadDirPayload):
     if pipeline.is_running():
         # Раунды спасения качают в одну папку; смена посреди них расколола бы бэкап
         raise HTTPException(409, "Сначала остановите скачивание — потом можно сменить папку")
+    if tm.any_alive(SLOT_LINKS):
+        raise HTTPException(409, "Сначала остановите скачивание по ссылкам — потом можно сменить папку")
     ok, msg = is_safe_download_dir(d)
     if not ok:
         log.warning("папка отклонена: %r — %s", d, msg)
@@ -3435,7 +3724,7 @@ def organize(payload: OrganizePayload):
         return {"ok": False, "msg": "Неизвестное действие"}
     # И во время ожидания раунда: следующий раунд скачал бы разложенные файлы заново
     if payload.action == "move" and (pipeline.is_running() or tm.any_alive(SLOT_DISK)
-                                     or tm.any_alive(UNLIM_SLOT_PREFIX)):
+                                     or tm.any_alive(UNLIM_SLOT_PREFIX) or tm.any_alive(SLOT_LINKS)):
         return {"ok": False, "msg": "Сначала остановите скачивание: сортировка во время загрузки перепутает файлы"}
     return _resp(tm.start(SLOT_ORGANIZE, "organize.py",
                           ["--input", payload.input,

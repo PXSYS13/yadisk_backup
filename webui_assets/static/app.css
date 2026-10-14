@@ -381,6 +381,15 @@ textarea{min-height:120px;font-family:var(--mono);font-size:12.5px;resize:vertic
 fieldset.bare{border:none;min-width:0}
 fieldset.bare:disabled .tree,fieldset.bare:disabled .folders-summary{opacity:.6}
 .spin{width:14px;height:14px;border-radius:50%;border:2px solid var(--border-strong);border-top-color:var(--accent);animation:spin .9s linear infinite;flex:none}
+/* По ссылке */
+.link-form{display:flex;gap:10px;flex-wrap:wrap}
+.link-form input{flex:1 1 280px;min-width:0}
+.link-item{display:flex;flex-direction:column;gap:12px;padding:16px;border:1px solid var(--border);border-radius:var(--radius-md);background:var(--surface-2)}
+.link-item .source-head{flex-wrap:wrap}
+.link-item .source-head .grow{flex:1 1 170px}
+.link-item .source-title{overflow-wrap:break-word}
+.link-progress:empty{display:none}
+.link-progress{display:flex;flex-direction:column;gap:8px}
 /* Дерево папок Диска в Настройках */
 .folders.off{opacity:.55}
 .folders-summary{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:12px}

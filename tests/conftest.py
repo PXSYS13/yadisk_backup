@@ -16,12 +16,16 @@ def _isolate_project_files(tmp_path, monkeypatch):
 
     Тесты не должны ни зависеть от них, ни портить их: подменяем пути на tmp.
     """
+    import public_download
     import webui
 
     monkeypatch.setattr(webui, "ENV_FILE", tmp_path / ".env")
     monkeypatch.setattr(webui, "COOKIES_FILE", tmp_path / "cookies.json")
     monkeypatch.setattr(webui, "DB_FILE", tmp_path / "state.db")
     monkeypatch.setattr(webui, "UNLIM_DB_FILE", tmp_path / "unlim_state.db")
+    monkeypatch.setattr(webui, "LINKS_DB_FILE", tmp_path / "links_state.db")
+    monkeypatch.setattr(public_download, "DB_FILE", tmp_path / "links_state.db")
+    monkeypatch.setattr(public_download, "ENV_FILE", tmp_path / ".env")
     monkeypatch.setattr(webui, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(webui, "TASK_LOG_DIR", tmp_path / "logs" / "tasks")
     monkeypatch.setattr(webui, "WEBUI_LOG", tmp_path / "logs" / "webui.log")

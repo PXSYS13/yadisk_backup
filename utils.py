@@ -30,7 +30,7 @@ IS_WINDOWS = sys.platform.startswith("win")
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 
@@ -45,6 +45,8 @@ MAX_UNLIM_BATCH = 80
 # Пока оригинал фото лежит на молчащем сервере Яндекса, сохраняем его превью
 # (JPEG до 1280 px) — чтобы у человека было хоть что-то уже сейчас.
 PREVIEW_DIRNAME = "_превью"
+# Папки и файлы, скачанные по публичным ссылкам: <папка скачивания>/_ссылки/<имя ссылки>
+LINKS_DIRNAME = "_ссылки"
 
 
 def previews_enabled() -> bool:
@@ -569,6 +571,19 @@ def file_size_safe(local_path: str) -> int | None:
         return os.path.getsize(to_long_path(local_path))
     except OSError:
         return None
+
+
+def local_copy_matches(local_path: str, size: int | None, md5: str | None) -> bool:
+    """Докачка: на месте уже лежит файл того же размера (и MD5, если он известен)."""
+    existing = file_size_safe(local_path)
+    if existing is None or size is None or existing != size:
+        return False
+    if not md5:
+        return True
+    try:
+        return compute_md5(local_path).lower() == md5.lower()
+    except OSError:
+        return False
 
 
 def remove_quiet(path: str) -> None:
