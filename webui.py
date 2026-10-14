@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import calendar
 import json
 import logging
 import mimetypes
@@ -97,7 +98,18 @@ HEALTH_LOG = LOG_DIR / "yandex_health.jsonl"
 TASK_LOG_MAX_BYTES = 10 * 1024 * 1024
 
 HOST = "127.0.0.1"
-PORT = 8000
+
+
+def _port_from_env() -> int:
+    """Порт интерфейса. YADISK_PORT — для разработки и второй копии программы."""
+    try:
+        port = int(os.environ.get("YADISK_PORT") or 8000)
+    except ValueError:
+        return 8000
+    return port if 1024 <= port <= 65535 else 8000
+
+
+PORT = _port_from_env()
 
 log = logging.getLogger("webui")
 
@@ -240,6 +252,8 @@ class Task:
         self.kind = task_kind(self.cmd)
         self.started_at = time.time()
         self.finished_at: float | None = None
+        # Когда процесс последний раз что-то напечатал — интерфейс показывает, что он жив
+        self.last_line_at: float | None = None
         self.was_stopped = False
         self.log: deque[str] = deque(maxlen=300)
         self.thread = threading.Thread(target=self._read, daemon=True)
@@ -268,6 +282,7 @@ class Task:
                         ts = time.strftime("%H:%M:%S")
                         line = f"{ts}  {line}"
                     self.log.append(line)
+                    self.last_line_at = time.time()
                     if f is not None:
                         try:
                             f.write(line + "\n")
@@ -334,6 +349,7 @@ class Task:
             "was_stopped": self.was_stopped,
             "kind": self.kind,
             "finished_at": self.finished_at,
+            "last_line_at": self.last_line_at,
             "log_tail": list(self.log)[-80:],
             "log_file": self.log_file.name if self.log_file else None,
         }
@@ -550,6 +566,10 @@ def _free_space(path: str) -> dict | None:
 RESCUE_RELIST_SEC = 6 * 3600
 # Столько раундов подряд с непонятным кодом выхода — дальше просим прислать отчёт
 RESCUE_STUCK_ROUNDS = 3
+# Процесс скачивания оборвался, не дойдя до конца очереди, — повтор через минуту, а не через полчаса
+RESCUE_CRASH_RETRY_SEC = 60
+# Меньше этого свободного места — «закончилось место», больше — значит, папка недоступна
+LOW_FREE_BYTES = 1024 ** 3
 # Временные ошибки Диска: явный старт возвращает такие файлы в очередь
 _DISK_TRANSIENT_ERRORS = ("local_disk |", "auth_expired |", "server_50x |",
                           "download_timeout |", "rate_limit |")
@@ -614,6 +634,17 @@ class Branch:
         self.wake = threading.Event()
         self.reset()
 
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @state.setter
+    def state(self, value: str) -> None:
+        # Когда начался текущий этап — по нему считается «за последние N минут»
+        if value != getattr(self, "_state", None):
+            self._state = value
+            self.state_since = time.time()
+
     def reset(self) -> None:
         self.state = "off"  # off|checking|listing|downloading|waiting|done|needs_action|stopped|error
         self.action: str | None = None  # token | cookies | free_space | send_logs
@@ -621,6 +652,7 @@ class Branch:
         self.activity = ""              # что делается прямо сейчас
         self.round = 0
         self.next_retry_at: float | None = None
+        self.wait_kind: str | None = None  # deferred | outage | crash — чего ждёт ветка
         self.last_exit: dict | None = None
         self.odd_rounds = 0
         self.reset_done = False
@@ -635,9 +667,9 @@ class Branch:
 
     def snapshot(self) -> dict:
         return {
-            "state": self.state, "action": self.action, "reason": self.reason,
+            "state": self.state, "state_since": self.state_since, "action": self.action, "reason": self.reason,
             "activity": self.activity, "round": self.round,
-            "next_retry_at": self.next_retry_at, "last_exit": self.last_exit,
+            "next_retry_at": self.next_retry_at, "wait_kind": self.wait_kind, "last_exit": self.last_exit,
             "running": self.alive(),
         }
 
@@ -660,6 +692,8 @@ class Rescue:
         self._thread: threading.Thread | None = None
         self.branches = {"disk": Branch("disk"), "unlim": Branch("unlim")}
         self.log: deque[str] = deque(maxlen=200)
+        # Лента «Что происходит» на Главной: простые фразы без кодов и жаргона
+        self.events: deque[dict] = deque(maxlen=60)
         self.state = "idle"  # idle | running | done | failed | stopped
         self.started_at: float | None = None
         self.finished_at: float | None = None
@@ -694,6 +728,7 @@ class Rescue:
             self._owned_slots.clear()
             self.state = "running"
             self.log.clear()
+            self.events.clear()
             self.started_at = time.time()
             self.finished_at = None
             self.workers = max(1, min(workers, MAX_UNLIM_WORKERS))
@@ -722,6 +757,7 @@ class Rescue:
         if waiting:
             clear_dead_hosts(str(UNLIM_DB_FILE))
             self._log("🔁 Повторяю отложенные файлы по запросу")
+            self._event(None, "run", "Пробую отложенные файлы прямо сейчас — по вашей просьбе")
             for b in waiting:
                 b.wake.set()
         return bool(waiting)
@@ -738,6 +774,7 @@ class Rescue:
             self._thread.join(timeout=10)
         _release_orphaned_unlim()
         self._log("⏹ остановлено пользователем")
+        self._event(None, "info", "Скачивание остановлено. Всё скачанное сохранено")
         return True, "Остановлено"
 
     # ── статус ──
@@ -761,6 +798,7 @@ class Rescue:
             "branches": {name: b.snapshot() for name, b in self.branches.items()},
             "next_retry_at": min(retry_at) if retry_at else None,
             "retry_every": self.retry_every,
+            "events": list(self.events),
         }
 
     def _step_text(self) -> str:
@@ -780,6 +818,10 @@ class Rescue:
         ts = time.strftime("%H:%M:%S")
         self.log.append(f"{ts}  {msg}")
         log.info("rescue: %s", msg)
+
+    def _event(self, source: str | None, kind: str, text: str) -> None:
+        """Событие для ленты на Главной. kind: run | ok | wait | warn | err | info."""
+        self.events.append({"at": time.time(), "source": source, "kind": kind, "text": text})
 
     def _stopped(self) -> bool:
         return self._stop_evt.is_set()
@@ -867,6 +909,7 @@ class Rescue:
     def _run_awake(self) -> None:
         try:
             cfg = get_config()
+            self._event(None, "run", "Начинаю: проверяю доступ к Яндексу")
             tok: dict = {"ok": False}
             if not self.skip_disk:
                 self.branches["disk"].state = "checking"
@@ -874,20 +917,29 @@ class Rescue:
                 tok = check_token(cfg["token"])
                 if tok.get("ok"):
                     self._log(f"✓ Ключ работает: {tok.get('login')}, {tok.get('used', 0) / 1e9:.1f} ГБ занято")
+                    self._event("disk", "ok", "Ключ доступа к Диску работает")
                 elif tok.get("unreachable"):
                     self._log("⚠️ Яндекс не ответил на проверку ключа — попробую качать, ключ, скорее всего, в порядке")
+                    self._event("disk", "warn", "Яндекс не ответил на проверку ключа — всё равно пробую качать")
                 else:
                     self._log(f"✗ Ключ: {tok.get('msg')}")
             cookies: dict = {"ok": False}
             if not self.skip_unlim:
                 cookies = check_cookies()
                 self._log(f"{'✓' if cookies.get('ok') else '✗'} Доступ к Безлимиту: {cookies.get('msg')}")
+                if cookies.get("ok"):
+                    self._event("unlim", "ok", "Доступ к Безлимиту работает")
             token_usable = bool(tok.get("ok") or tok.get("unreachable"))
             src = plan_sources(not self.skip_disk, not self.skip_unlim, token_usable, bool(cookies.get("ok")))
             for note in src["notes"]:
                 self._log(note)
+            if not self.skip_disk and not src["run_disk"] and not src["error"]:
+                self._event("disk", "warn", "Обычный Диск пропускаю: нет рабочего ключа доступа")
+            if not self.skip_unlim and not src["run_unlim"] and not src["error"]:
+                self._event("unlim", "warn", "Безлимит пропускаю: доступ к нему не подключён")
             if src["error"]:
                 self._log(f"❌ {src['error']}")
+                self._event(None, "err", "Нечего скачивать: подключите Диск или Безлимит в «Настройках»")
                 for b in self.branches.values():
                     b.state = "off"
                 self.state = "failed"
@@ -913,14 +965,18 @@ class Rescue:
                 "failed": "⚠️ Нужно ваше действие — подробности выше",
                 "stopped": "⏹ Спасение остановлено. Уже скачанное сохранено",
             }.get(self.state, self.state))
+            if self.state == "failed":
+                self._event(None, "err", "Скачивание приостановлено: нужно ваше действие — оно описано сверху")
         except Exception as e:
             diag = classify_yandex_error(e)
             if diag["is_yandex_server"]:
                 self._log(f"⚠️ Сбой серверов Яндекса: {diag['title']}")
                 self._log(f"   {diag['message']}")
                 self._log(f"   Новости дата-центров Яндекса: {TELEGRAM_CHANNEL}")
+                self._event(None, "err", f"Сбой серверов Яндекса: {diag['title']}")
             else:
                 self._log(f"❌ Ошибка: {e}")
+                self._event(None, "err", "Ошибка программы — скачайте отчёт для поддержки во вкладке «Помощь»")
             log.exception("rescue")
             self.state = "failed"
         finally:
@@ -943,6 +999,7 @@ class Rescue:
             b.action = "send_logs"
             b.reason = f"Внутренняя ошибка программы: {e}"
             self._log(f"❌ {b.label}: {e}")
+            self._event(b.name, "err", "Ошибка программы — скачайте отчёт для поддержки во вкладке «Помощь»")
 
     def _drive(self, b: Branch, prepare: Callable[[Branch], int], download: Callable[[Branch], int],
                db: tuple[Path, str, str]) -> None:
@@ -981,11 +1038,17 @@ class Rescue:
             b.reason = ("Яндекс перестал принимать ключ доступа к Диску" if b.name == "disk"
                         else "Нужно обновить доступ к Безлимиту")
             self._log(f"🔑 {b.label}: {b.reason}. Остальное продолжает качаться")
+            self._event(b.name, "err", f"{b.reason} — эта часть на паузе")
             return False
         if code == EXIT_DISK_FULL:
             self._halt_for_disk()
             return False
         deferred = int(stats.get("deferred") or 0)
+        left = max(0, int(stats.get("pending") or 0) - deferred)
+        if code in (0, EXIT_PARTIAL) and left:
+            # Шаг «закончился», а в очереди остались нетронутые файлы: процесс оборвался
+            # (у Python код падения тоже 1). Это не «скачано почти всё»
+            return self._step_interrupted(b, code, left, deferred)
         if code in (EXIT_OUTAGE, EXIT_DEFERRED) or (code in (0, EXIT_PARTIAL) and deferred):
             b.odd_rounds = 0
             return self._wait_round(b, deferred, outage=(code == EXIT_OUTAGE))
@@ -996,6 +1059,8 @@ class Rescue:
             b.reason = (f"Скачано почти всё: {failed} файлов не скачались" if failed
                         else "Все файлы сохранены")
             self._log(f"✓ {b.label}: {b.reason}")
+            self._event(b.name, "ok", f"Готово. Не скачалось: {_files(failed)}" if failed
+                        else "Готово: все файлы сохранены")
             return False
         b.odd_rounds += 1
         self._log(f"⚠️ {b.label}: шаг завершился с кодом {code} ({b.odd_rounds}/{RESCUE_STUCK_ROUNDS})")
@@ -1003,36 +1068,75 @@ class Rescue:
             b.state = "needs_action"
             b.action = "send_logs"
             b.reason = "Что-то пошло не так — отправьте отчёт для поддержки"
+            self._event(b.name, "err", "Не получается продолжить — скачайте отчёт для поддержки")
             return False
+        self._event(b.name, "warn", "Что-то пошло не так — попробую ещё раз чуть позже")
         return self._wait_round(b, deferred, outage=True)
 
-    def _wait_round(self, b: Branch, deferred: int, outage: bool) -> bool:
+    def _wait_round(self, b: Branch, deferred: int, outage: bool, kind: str | None = None,
+                    delay: float | None = None) -> bool:
+        """Ждёт следующий раунд. kind: deferred — файлы на молчащих серверах, outage —
+        Яндекс не отвечает, crash — процесс скачивания оборвался (повтор раньше)."""
+        kind = kind or ("deferred" if deferred and not outage else "outage")
         b.state = "waiting"
-        b.next_retry_at = time.time() + self.retry_every
-        b.reason = (f"Ждут Яндекса: {deferred} файлов" if deferred and not outage
-                    else "Яндекс сейчас не отвечает")
-        b.activity = f"следующая попытка в {_hhmm(b.next_retry_at)}"
-        self._log(f"⏳ {b.label}: {b.reason}. Следующая попытка в {_hhmm(b.next_retry_at)}")
+        b.wait_kind = kind
+        b.next_retry_at = time.time() + (self.retry_every if delay is None else delay)
+        at = _hhmm(b.next_retry_at)
+        b.reason = {"deferred": f"Ждут Яндекса: {_files(deferred)}",
+                    "outage": "Яндекс сейчас не отвечает",
+                    "crash": "Скачивание прервалось — пробую ещё раз"}[kind]
+        b.activity = f"следующая попытка в {at}"
+        self._log(f"⏳ {b.label}: {b.reason}. Следующая попытка в {at}")
+        if kind == "deferred":
+            self._event(b.name, "wait", f"Всё доступное скачано. Ждут Яндекса: {_files(deferred)}. Повтор в {at}")
+        elif kind == "outage":
+            self._event(b.name, "wait", f"Яндекс сейчас не отвечает. Повтор в {at}")
+        manual = False
         while not self._stopped():
             remaining = b.next_retry_at - time.time()
-            if remaining <= 0 or b.wake.wait(min(remaining, 1.0)):
+            if remaining <= 0:
+                break
+            if b.wake.wait(min(remaining, 1.0)):
+                manual = True
                 break
         b.wake.clear()
         b.next_retry_at = None
+        b.wait_kind = None
         if self._stopped():
             self._branch_stopped(b)
             return False
+        if not manual:
+            self._event(b.name, "run", "Запускаю скачивание снова" if kind == "crash" else "Пробую отложенные файлы снова")
         return True
 
+    def _step_interrupted(self, b: Branch, code: int, left: int, deferred: int) -> bool:
+        """Шаг вернул 0/1, но не дошёл до конца очереди: короткая пауза и ещё раз."""
+        b.odd_rounds += 1
+        self._log(f"⚠️ {b.label}: скачивание прервалось (код {code}), не тронуто файлов: {left} "
+                  f"({b.odd_rounds}/{RESCUE_STUCK_ROUNDS})")
+        if b.odd_rounds >= RESCUE_STUCK_ROUNDS:
+            b.state = "needs_action"
+            b.action = "send_logs"
+            b.reason = "Скачивание всё время прерывается — скачайте отчёт для поддержки"
+            self._event(b.name, "err", b.reason)
+            return False
+        self._event(b.name, "warn", "Скачивание прервалось — пробую ещё раз через минуту")
+        return self._wait_round(b, deferred, outage=False, kind="crash",
+                                delay=min(self.retry_every, RESCUE_CRASH_RETRY_SEC))
+
     def _halt_for_disk(self) -> None:
-        """Нет места — обе ветки ждут человека: скачанное дальше всё равно не ляжет."""
+        """Нет места или папка недоступна — обе ветки ждут человека: файлы всё равно не лягут."""
+        free = (_free_space(get_config()["download_dir"]) or {}).get("free")
+        reason = ("На диске закончилось место" if free is not None and free < LOW_FREE_BYTES
+                  else "Не получается записать файлы в папку")
         for x in self.branches.values():
             if x.state != "off":
                 x.state = "needs_action"
                 x.action = "free_space"
-                x.reason = "На диске закончилось место"
+                x.reason = reason
                 x.activity = ""
-        self._log("💾 На диске закончилось место — останавливаю скачивание. Освободите место и продолжите")
+        self._log(f"💾 {reason} — останавливаю скачивание. Освободите место или выберите другую папку")
+        self._event(None, "err", f"{reason} — скачивание на паузе")
         self._stop_evt.set()
         for x in self.branches.values():
             x.wake.set()
@@ -1049,15 +1153,20 @@ class Rescue:
             n = _reset_transient_disk_failures()
             if n:
                 self._log(f"↩️ Диск: {n} файлов с временными ошибками снова в очереди")
+                self._event("disk", "info", f"Снова в очереди: {_files(n)}, которые раньше не скачались")
         if self._needs_listing("disk"):
             b.state = "listing"
+            self._event("disk", "run", "Получаю у Яндекса список файлов")
             code = self._run_step(b, SLOT_DISK, "main.py", ["scan"], "получаю список файлов")
             if code == -1:
                 return -1
             if code == 0:
                 self._listed_at["disk"] = time.time()
+                total = int(db_stats(DB_FILE, "files", "remote_path").get("total") or 0)
+                self._event("disk", "ok", f"Список получен: {_files(total)}")
             elif _db_has_rows(DB_FILE, "files"):
                 self._log(f"⚠️ Диск: список не обновился (код {code}) — качаю по уже собранному")
+                self._event("disk", "warn", "Список не обновился — качаю по уже собранному")
             else:
                 return code
         self._apply_category_choice(DB_FILE, "files", "remote_path", self.disk_categories, "Диск")
@@ -1065,6 +1174,7 @@ class Rescue:
 
     def _disk_download(self, b: Branch) -> int:
         b.state = "downloading"
+        self._event("disk", "run", "Новая попытка для отложенных файлов" if b.round > 1 else "Начинаю скачивание")
         workers = min(self.workers, MAX_DISK_WORKERS)
         return self._run_step(b, SLOT_DISK, "main.py", ["download", "--workers", str(workers), "--no-scan"],
                               "скачиваю файлы")
@@ -1080,16 +1190,21 @@ class Rescue:
             n = reset_failed_files(str(UNLIM_DB_FILE)) if UNLIM_DB_FILE.exists() else 0
             if n:
                 self._log(f"↩️ Безлимит: {n} файлов с ошибками снова в очереди")
+                self._event("unlim", "info", f"Снова в очереди: {_files(n)}, которые раньше не скачались")
         if self._needs_listing("unlim"):
             b.state = "listing"
+            self._event("unlim", "run", "Получаю у Яндекса список фото и видео")
             code = self._run_step(b, SLOT_UNLIM_COLLECT, "unlim_download.py", ["--collect"],
                                   "получаю список файлов")
             if code == -1:
                 return -1
             if code == 0:
                 self._listed_at["unlim"] = time.time()
+                total = int(db_stats(UNLIM_DB_FILE, "unlim_files", "file_id").get("total") or 0)
+                self._event("unlim", "ok", f"Список получен: {_files(total)}")
             elif _db_has_rows(UNLIM_DB_FILE, "unlim_files"):
                 self._log(f"⚠️ Безлимит: список не обновился (код {code}) — качаю по уже собранному")
+                self._event("unlim", "warn", "Список не обновился — качаю по уже собранному")
             else:
                 return code
         self._apply_category_choice(UNLIM_DB_FILE, "unlim_files", "file_id", self.unlim_categories, "Безлимит")
@@ -1111,6 +1226,9 @@ class Rescue:
             if self._stop_evt.wait(5):
                 return -1
         self._log(f"🚀 Безлимит: запущено воркеров — {len(res['started'])}")
+        n = len(res["started"])
+        self._event("unlim", "run", "Новая попытка для отложенных файлов" if b.round > 1 else
+                    f"Начинаю скачивание в {n} {_plural(n, 'поток', 'потока', 'потоков')}")
         codes = self._wait_workers(res["started"])
         if codes is None:
             return -1
@@ -1163,6 +1281,16 @@ def _empty_db_stats() -> dict:
         # Страховочные превью у ещё не скачанных оригиналов
         "previews": 0,
     }
+
+
+def _utc_ts(value) -> float | None:
+    """downloaded_at ('YYYY-MM-DD HH:MM:SS' или с 'T', UTC) → секунды эпохи."""
+    if not value:
+        return None
+    try:
+        return float(calendar.timegm(time.strptime(str(value)[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")))
+    except ValueError:
+        return None
 
 
 def db_stats(db_file: Path, table: str = "files",
@@ -1235,12 +1363,12 @@ def db_stats(db_file: Path, table: str = "files",
         out["done_10m"] = rate["n"]
         out["bytes_10m"] = rate["b"]
         recent = list(c.execute(
-            f"SELECT {id_col} AS path, status, size FROM {table} "
+            f"SELECT {id_col} AS path, status, size, downloaded_at FROM {table} "
             f"WHERE downloaded_at IS NOT NULL "
             f"ORDER BY downloaded_at DESC LIMIT 10"
         ))
         out["recent"] = [{"path": r["path"], "status": r["status"],
-                          "size": r["size"]} for r in recent]
+                          "size": r["size"], "at": _utc_ts(r["downloaded_at"])} for r in recent]
         return out
     except sqlite3.Error as e:
         return {"error": str(e)}
@@ -1705,9 +1833,89 @@ _RESCUE_NOTICES = {
 }
 
 
+class ProgressMeter:
+    """Сколько файлов обработано за последние минуты — чтобы было видно, что программа жива.
+
+    Замер — при каждом опросе /api/status: «проверено» = скачано + ждут Яндекса +
+    не скачались. Скачанные почти никогда не убывают, а отложенные при повторе
+    уходят обратно в работу — поэтому приросты не бывают меньше нуля.
+    """
+
+    WINDOW_SEC = 300
+    MIN_SPAN_SEC = 20
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._samples: dict[str, deque] = {}
+
+    def sample(self, name: str, checked: int, done: int, now: float | None = None) -> dict | None:
+        now = now or time.time()
+        with self._lock:
+            q = self._samples.setdefault(name, deque())
+            q.append((now, checked, done))
+            while len(q) > 1 and now - q[0][0] > self.WINDOW_SEC:
+                q.popleft()
+            t0, c0, d0 = q[0]
+        span = now - t0
+        if span < self.MIN_SPAN_SEC:
+            return None
+        return {"window_sec": round(span), "checked": max(0, checked - c0), "done": max(0, done - d0)}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._samples.clear()
+
+
+progress_meter = ProgressMeter()
+_FOUND_RE = re.compile(r"Найдено[^:\n]*:\s*(\d+)")
+
+
+def _listing_found(task: dict | None) -> int | None:
+    """Сколько файлов уже нашёл сбор списка — по последней строке «Найдено: N»."""
+    for line in reversed((task or {}).get("log_tail") or []):
+        m = _FOUND_RE.search(line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def source_live(name: str, tasks: dict, branch_state: str | None, rate: dict | None) -> dict:
+    """Признаки жизни источника: когда его задачи последний раз что-то писали и т. п."""
+    if name == "disk":
+        snaps = [tasks.get(SLOT_DISK)]
+        listing = tasks.get(SLOT_DISK)
+    else:
+        snaps = [t for slot, t in tasks.items() if slot.startswith(UNLIM_SLOT_PREFIX)]
+        listing = tasks.get(SLOT_UNLIM_COLLECT)
+    snaps = [t for t in snaps if t]
+    last = max((t.get("last_line_at") or 0 for t in snaps), default=0)
+    return {
+        "last_activity_at": last or None,
+        "tasks_running": sum(1 for t in snaps if t.get("running")),
+        "listing_found": _listing_found(listing) if branch_state == "listing" else None,
+        "recent": rate,
+    }
+
+
+def _db_checked_done(db: dict) -> tuple[int, int]:
+    """(проверено, скачано) по db_stats: проверено = скачано + ждут Яндекса + не скачались."""
+    excluded = int(db.get("category_skipped") or 0)
+    done = int(db.get("downloaded") or 0) + max(0, int(db.get("skipped") or 0) - excluded)
+    return done + int(db.get("deferred") or 0) + int(db.get("failed") or 0), done
+
+
 def _source_block(name: str, db: dict, branch: dict | None, configured: bool, folder: str,
-                  local: dict | None, window_sec: float | None) -> dict:
+                  local: dict | None, window_sec: float | None, live: dict | None = None,
+                  now: float | None = None) -> dict:
     db = db or {}
+    live = live or {}
+    # «За последние N минут» — не дольше, чем идёт текущий этап: иначе сразу после
+    # сбора списка вышло бы «за 5 минут новых файлов нет»
+    recent = live.get("recent")
+    since = (branch or {}).get("state_since")
+    if recent and since and now:
+        span = min(float(recent.get("window_sec") or 0), now - since)
+        recent = dict(recent, window_sec=round(span)) if span >= ProgressMeter.MIN_SPAN_SEC else None
     total = int(db.get("total") or 0)
     excluded = int(db.get("category_skipped") or 0)
     deferred = int(db.get("deferred") or 0)
@@ -1755,6 +1963,7 @@ def _source_block(name: str, db: dict, branch: dict | None, configured: bool, fo
         "action": branch.get("action"),
         "round": branch.get("round") or 0,
         "next_retry_at": branch.get("next_retry_at"),
+        "wait_kind": branch.get("wait_kind"),
         "last_exit": branch.get("last_exit"),
         "files": files,
         "bytes": bytes_,
@@ -1762,18 +1971,29 @@ def _source_block(name: str, db: dict, branch: dict | None, configured: bool, fo
         "speed_bps": speed,
         "eta_sec": eta,
         "folder": {"path": folder, "size_bytes": int((local or {}).get("bytes") or 0)},
+        # Признаки жизни: последние скачанные файлы, отклик задач, прирост за минуты
+        "recent_files": [
+            {"name": str(r.get("path") or "").replace("\\", "/").rsplit("/", 1)[-1],
+             "size": int(r.get("size") or 0), "at": r.get("at")}
+            for r in (db.get("recent") or []) if r.get("status") == "downloaded"][:5],
+        "last_activity_at": live.get("last_activity_at"),
+        "tasks_running": int(live.get("tasks_running") or 0),
+        "listing_found": live.get("listing_found"),
+        "recent": recent,
     }
 
 
 def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: dict, cookies: dict,
                         cfg: dict, diag: dict | None = None, free_space: dict | None = None,
                         disk_local: dict | None = None, unlim_local: dict | None = None,
-                        now: float | None = None) -> dict:
+                        now: float | None = None, live: dict | None = None) -> dict:
     """Всё, что нужно главному экрану, одним объектом: без разбора логов во фронтенде.
 
-    Чистая функция от уже собранных данных — её легко проверить тестом.
+    Чистая функция от уже собранных данных — её легко проверить тестом. live —
+    признаки жизни по источникам (см. source_live), их собирает /api/status.
     """
     now = now or time.time()
+    live = live or {}
     branches = rescue_st.get("branches") or {}
     running = bool(rescue_st.get("running"))
     started = rescue_st.get("started_at")
@@ -1782,10 +2002,10 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
     token_ok = bool(token.get("ok") or token.get("unreachable"))
     sources = {
         "disk": _source_block("disk", disk_db, branches.get("disk") if started else None, token_ok,
-                              download_dir, disk_local, window),
+                              download_dir, disk_local, window, live.get("disk"), now),
         "unlim": _source_block("unlim", unlim_db, branches.get("unlim") if started else None,
                                bool(cookies.get("ok")), os.path.join(download_dir, "_unlim") if download_dir else "",
-                               unlim_local, window),
+                               unlim_local, window, live.get("unlim"), now),
     }
     active = [s for s in sources.values() if s["enabled"]]
 
@@ -1817,9 +2037,20 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
     action = None
     if action_id in _RESCUE_ACTIONS:
         title, text, button = _RESCUE_ACTIONS[action_id]
-        if action_id == "free_space" and free_space:
-            text = f"Свободно {_ru_bytes(free_space.get('free', 0))}. {text}"
-        action = {"id": action_id, "source": action_source, "title": title, "text": text, "button": button}
+        variant = None
+        if action_id == "free_space":
+            free = (free_space or {}).get("free")
+            if free is not None and free < LOW_FREE_BYTES:
+                text = f"Свободно {_ru_bytes(free)}. {text}"
+            else:
+                # Место есть — значит, папка недоступна: диск отключён, путь неверный или нет прав
+                variant = "folder"
+                title = "Не получается записать файлы в папку"
+                text = ("Проверьте, что диск с папкой подключён и папка доступна, или выберите другую "
+                        "папку — продолжим с того же места.")
+                button = "Попробовать снова"
+        action = {"id": action_id, "source": action_source, "title": title, "text": text, "button": button,
+                  "variant": variant}
 
     # Спокойное пояснение
     notice = None
@@ -1842,10 +2073,21 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
         what = [n for n, s in (("Диск", sources["disk"]), ("Безлимит", sources["unlim"])) if s["configured"]]
         headline = "Всё готово к скачиванию"
         subline = f"Скачаем {' и '.join(what) or 'ваши файлы'} в папку {download_dir}"
+    elif state == "running" and active and all(s["state"] in ("checking", "listing") for s in active):
+        headline = "Готовлюсь к скачиванию"
+        subline = "Проверяю доступ и получаю у Яндекса список ваших файлов — обычно это минута-две."
     elif state == "running":
         headline = "Скачиваем ваши файлы"
-        subline = (f"Готово {totals['done']:,} из {_files(totals['selected'])}".replace(",", " ")
-                   + ". Не закрывайте чёрное окно программы — компьютер сам не уснёт, пока идёт скачивание.")
+        subline = ("Ничего делать не нужно: программа сама скачивает файлы и повторяет те, что Яндекс "
+                   "пока не отдаёт. Только не закрывайте окно программы.")
+    elif state == "waiting" and "crash" in {s.get("wait_kind") for s in active}:
+        headline = "Скачивание прервалось — пробую ещё раз"
+        subline = (f"Программа запустит скачивание снова в {_hhmm(next_retry)}. Уже скачанное сохранено. "
+                   "Если это повторится, она попросит прислать отчёт для поддержки.")
+    elif state == "waiting" and {s.get("wait_kind") for s in active if s["state"] == "waiting"} == {"outage"}:
+        headline = "Яндекс сейчас не отвечает"
+        subline = (f"Программа попробует снова в {_hhmm(next_retry)}. Уже скачанное сохранено — "
+                   "оставьте программу открытой.")
     elif state == "waiting":
         headline = "Всё, что Яндекс отдаёт сейчас, уже скачано"
         previews = (f" Для {_files(totals['preview_only'])} уже сохранены превью — уменьшенные копии."
@@ -1855,8 +2097,7 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
     elif state == "needs_action" and action and running:
         # Действие — в баннере над карточкой; здесь — что продолжает качаться
         headline = "Скачиваем ваши файлы"
-        subline = (f"Готово {totals['done']:,} из {_files(totals['selected'])}".replace(",", " ")
-                   + ". Чтобы скачать всё, нужно ваше действие — подробности выше.")
+        subline = "Часть файлов ждёт вашего действия — оно описано выше. Остальное продолжает качаться."
     elif state == "needs_action" and action:
         headline, subline = action["title"], action["text"]
     elif state == "done":
@@ -1873,10 +2114,16 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
     else:
         headline, subline = "Скачиваем ваши файлы", ""
 
+    windows = [s["recent"] for s in active if s.get("recent")]
+    recent = ({"window_sec": max(w["window_sec"] for w in windows),
+               "checked": sum(w["checked"] for w in windows),
+               "done": sum(w["done"] for w in windows)} if windows else None)
+
     return {
         "schema": RESCUE_SCHEMA,
         "state": state,
         "running": running,
+        "now": now,
         "headline": headline,
         "subline": subline,
         "started_at": started,
@@ -1886,8 +2133,15 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
         "action": action,
         "notice": notice,
         "sources": sources,
+        # Лента «Что происходит» — новые сверху; признаки жизни — по всем источникам
+        "events": list(reversed(rescue_st.get("events") or []))[:12] if started else [],
+        "last_activity_at": max((s.get("last_activity_at") or 0 for s in active), default=0) or None,
+        "recent": recent,
         "summary": {
             "complete": complete,
+            "selected_files": totals["selected"],
+            "left_files": totals["pending"] + totals["in_progress"],
+            "selected_bytes": sum(s["bytes"]["selected"] or s["bytes"]["total"] for s in active),
             "downloaded_files": totals["done"],
             "downloaded_bytes": done_bytes,
             "deferred_files": totals["deferred"],
@@ -1922,6 +2176,15 @@ def api_status(demo: str | None = None):
     diag = diagnose_tasks()
     disk_local = local_size(cfg["download_dir"])
     unlim_local = local_size(os.path.join(cfg["download_dir"], "_unlim"))
+    tasks = tm.status()
+    live = None
+    if not demo_data:
+        live = {}
+        branches = pipe_st.get("branches") or {}
+        for name, db in (("disk", disk_db), ("unlim", unlim_db)):
+            checked, done = _db_checked_done(db)
+            rate = progress_meter.sample(name, checked, done)
+            live[name] = source_live(name, tasks, (branches.get(name) or {}).get("state"), rate)
     return {
         "app_version": APP_VERSION,
         "donation_url": DONATION_URL,
@@ -1940,10 +2203,11 @@ def api_status(demo: str | None = None):
             "db": unlim_db,
             "local": unlim_local,
         },
-        "tasks": tm.status(),
+        "tasks": tasks,
         "pipeline": pipe_st,
         "rescue": demo_data["rescue"] if demo_data else build_rescue_status(
-            pipe_st, disk_db, unlim_db, token, cookies, cfg, diag, free, disk_local, unlim_local),
+            pipe_st, disk_db, unlim_db, token, cookies, cfg, diag, free, disk_local, unlim_local,
+            live=live),
         "settings": get_settings(),
         "demo": demo if demo_data else None,
         "diagnostics": diag,
@@ -2173,14 +2437,20 @@ def api_open_folder(p: OpenFolderPayload):
 
 # ── Демо-режим: пройти все состояния главного экрана без настоящего Яндекса ──
 
-DEMO_STATES = ("setup", "ready", "downloading", "waiting", "token", "cookies",
+DEMO_STATES = ("setup", "ready", "listing", "downloading", "waiting", "token", "cookies",
                "disk_full", "done", "done_partial", "stopped")
+
+_DEMO_DISK_FILES = ("Документы/Договор аренды.pdf", "Фото/2023/Отпуск/IMG_2041.JPG",
+                    "Фото/2023/Отпуск/IMG_2042.JPG", "Видео/День рождения.mp4", "Музыка/Плейлист.m3u")
+_DEMO_UNLIM_FILES = ("2021-07-14 18-22-05.JPG", "2021-07-14 18-25-41.JPG", "2021-07-15 09-02-11.HEIC",
+                     "2021-07-15 09-03-37.MOV", "2021-07-16 20-14-55.JPG")
 
 
 def demo_rescue(kind: str, cfg: dict) -> dict:
     gb = 1024 ** 3
+    now = time.time()
 
-    def db(total, done, pending=0, deferred=0, failed=0, previews=0, size=6 * gb, speed=0):
+    def db(total, done, pending=0, deferred=0, failed=0, previews=0, size=6 * gb, speed=0, names=()):
         st = _empty_db_stats()
         st.update(total=total, downloaded=done, pending=pending + deferred, deferred=deferred,
                   failed=failed, previews=previews, bytes_total=size,
@@ -2188,9 +2458,27 @@ def demo_rescue(kind: str, cfg: dict) -> dict:
                   bytes_pending=int(size * (pending + deferred) / max(total, 1)),
                   bytes_deferred=int(size * deferred / max(total, 1)),
                   bytes_selected_total=size, bytes_10m=speed, deferred_hosts=deferred // 40)
+        st["recent"] = [{"path": n, "status": "downloaded", "size": (3 + i * 7) * 1024 ** 2,
+                         "at": now - 4 - i * 37} for i, n in enumerate(names)] if done else []
         return st
 
-    now = time.time()
+    def alive(checked, done, listing=None, ago=2):
+        return {"last_activity_at": now - ago, "tasks_running": 1, "listing_found": listing,
+                "recent": {"window_sec": 300, "checked": checked, "done": done}}
+
+    def events(*items):
+        return [{"at": now - ago, "source": src, "kind": k, "text": text} for ago, src, k, text in items]
+
+    start_events = [(1800, None, "run", "Начинаю: проверяю доступ к Яндексу"),
+                    (1799, "disk", "ok", "Ключ доступа к Диску работает"),
+                    (1799, "unlim", "ok", "Доступ к Безлимиту работает"),
+                    (1798, "disk", "run", "Получаю у Яндекса список файлов"),
+                    (1798, "unlim", "run", "Получаю у Яндекса список фото и видео"),
+                    (1755, "disk", "ok", "Список получен: 6 015 файлов"),
+                    (1755, "disk", "run", "Начинаю скачивание"),
+                    (1741, "unlim", "ok", "Список получен: 13 602 файла"),
+                    (1740, "unlim", "run", "Начинаю скачивание в 4 потока")]
+    live: dict | None = None
     tok = {"ok": True, "login": "demo", "account": {"photo_unlim": 69 * gb}}
     coo = {"ok": True}
     st: dict = {"running": False, "started_at": None, "state": "idle", "next_retry_at": None,
@@ -2198,44 +2486,75 @@ def demo_rescue(kind: str, cfg: dict) -> dict:
     disk, unlim = db(6015, 0, pending=6015), db(13602, 0, pending=13602, size=69 * gb)
     free = {"free": 120 * gb}
 
-    def run(d, u, state="running", running=True, next_retry=None):
-        return {"running": running, "started_at": now - 1800, "finished_at": None if running else now,
-                "state": state, "next_retry_at": next_retry, "branches": {"disk": d, "unlim": u}}
+    def run(d, u, state="running", running=True, next_retry=None, ev=(), started_ago=1800):
+        return {"running": running, "started_at": now - started_ago, "finished_at": None if running else now,
+                "state": state, "next_retry_at": next_retry, "branches": {"disk": d, "unlim": u},
+                "events": events(*ev)}
 
+    dl = {"state": "downloading", "activity": "скачиваю файлы", "round": 1}
     if kind == "setup":
         tok, coo = {"ok": False}, {"ok": False}
+    elif kind == "listing":
+        st = run({"state": "listing", "round": 1}, {"state": "listing", "round": 1}, started_ago=40,
+                 ev=[(40, None, "run", "Начинаю: проверяю доступ к Яндексу"),
+                     (39, "disk", "ok", "Ключ доступа к Диску работает"),
+                     (39, "unlim", "ok", "Доступ к Безлимиту работает"),
+                     (38, "disk", "run", "Получаю у Яндекса список файлов"),
+                     (38, "unlim", "run", "Получаю у Яндекса список фото и видео")])
+        disk, unlim = db(0, 0), db(0, 0)
+        live = {"disk": alive(0, 0, listing=2400), "unlim": alive(0, 0, listing=9000, ago=1)}
     elif kind == "downloading":
-        st = run({"state": "downloading", "activity": "скачиваю файлы"},
-                 {"state": "downloading", "activity": "скачиваю файлы"})
-        disk = db(6015, 2100, pending=3500, deferred=415, speed=420 * 1024 ** 2)
-        unlim = db(13602, 1900, pending=10900, deferred=802, previews=650, size=69 * gb, speed=380 * 1024 ** 2)
+        st = run(dl, dl, ev=start_events + [(600, "disk", "info", "Снова в очереди: 12 файлов, которые раньше не скачались")])
+        disk = db(6015, 2100, pending=3500, deferred=415, speed=420 * 1024 ** 2, names=_DEMO_DISK_FILES)
+        unlim = db(13602, 1900, pending=10900, deferred=802, previews=650, size=69 * gb, speed=380 * 1024 ** 2,
+                   names=_DEMO_UNLIM_FILES)
+        live = {"disk": alive(140, 18), "unlim": alive(260, 41, ago=1)}
     elif kind == "waiting":
-        st = run({"state": "waiting", "next_retry_at": now + 1500}, {"state": "waiting", "next_retry_at": now + 1500},
-                 next_retry=now + 1500)
-        disk = db(6015, 1203, deferred=4812, previews=4100)
-        unlim = db(13602, 2721, deferred=10881, previews=9500, size=69 * gb)
+        wait = {"state": "waiting", "next_retry_at": now + 1500, "round": 2}
+        st = run(wait, wait, next_retry=now + 1500, ev=start_events + [
+            (310, "disk", "wait", "Всё доступное скачано. Ждут Яндекса: 4 812 файлов. Повтор в "
+             + _hhmm(now + 1500)),
+            (300, "unlim", "wait", "Всё доступное скачано. Ждут Яндекса: 10 881 файл. Повтор в "
+             + _hhmm(now + 1500))])
+        disk = db(6015, 1203, deferred=4812, previews=4100, names=_DEMO_DISK_FILES)
+        unlim = db(13602, 2721, deferred=10881, previews=9500, size=69 * gb, names=_DEMO_UNLIM_FILES)
+        live = {"disk": {"last_activity_at": now - 310}, "unlim": {"last_activity_at": now - 300}}
     elif kind == "token":
-        st = run({"state": "needs_action", "action": "token"}, {"state": "downloading", "activity": "скачиваю файлы"})
-        disk, unlim = db(6015, 800, pending=5215), db(13602, 3000, pending=10602, size=69 * gb)
+        st = run({"state": "needs_action", "action": "token", "round": 1}, dl, ev=start_events + [
+            (120, "disk", "err", "Яндекс перестал принимать ключ доступа к Диску — эта часть на паузе")])
+        disk = db(6015, 800, pending=5215, names=_DEMO_DISK_FILES)
+        unlim = db(13602, 3000, pending=10602, size=69 * gb, names=_DEMO_UNLIM_FILES)
+        live = {"disk": {"last_activity_at": now - 120}, "unlim": alive(220, 35)}
     elif kind == "cookies":
-        st = run({"state": "downloading", "activity": "скачиваю файлы"}, {"state": "needs_action", "action": "cookies"})
-        disk, unlim = db(6015, 2500, pending=3515), db(13602, 400, pending=13202, size=69 * gb)
+        st = run(dl, {"state": "needs_action", "action": "cookies", "round": 1}, ev=start_events + [
+            (90, "unlim", "err", "Нужно обновить доступ к Безлимиту — эта часть на паузе")])
+        disk = db(6015, 2500, pending=3515, names=_DEMO_DISK_FILES)
+        unlim = db(13602, 400, pending=13202, size=69 * gb, names=_DEMO_UNLIM_FILES)
+        live = {"disk": alive(120, 30), "unlim": {"last_activity_at": now - 90}}
     elif kind == "disk_full":
         st = run({"state": "needs_action", "action": "free_space"}, {"state": "needs_action", "action": "free_space"},
-                 state="failed", running=False)
+                 state="failed", running=False, ev=start_events + [
+                     (60, None, "err", "На диске закончилось место — скачивание на паузе")])
         free = {"free": 120 * 1024 ** 2}
-        disk, unlim = db(6015, 3000, pending=3015), db(13602, 5000, pending=8602, size=69 * gb)
+        disk = db(6015, 3000, pending=3015, names=_DEMO_DISK_FILES)
+        unlim = db(13602, 5000, pending=8602, size=69 * gb, names=_DEMO_UNLIM_FILES)
     elif kind == "done":
-        st = run({"state": "done"}, {"state": "done"}, state="done", running=False)
-        disk, unlim = db(6015, 6015), db(13602, 13602, size=69 * gb)
+        st = run({"state": "done"}, {"state": "done"}, state="done", running=False, ev=start_events + [
+            (30, "disk", "ok", "Готово: все файлы сохранены"), (10, "unlim", "ok", "Готово: все файлы сохранены")])
+        disk = db(6015, 6015, names=_DEMO_DISK_FILES)
+        unlim = db(13602, 13602, size=69 * gb, names=_DEMO_UNLIM_FILES)
     elif kind == "done_partial":
-        st = run({"state": "done"}, {"state": "done"}, state="done", running=False)
-        disk, unlim = db(6015, 5995, failed=20), db(13602, 13590, failed=12, size=69 * gb)
+        st = run({"state": "done"}, {"state": "done"}, state="done", running=False, ev=start_events + [
+            (30, "disk", "ok", "Готово. Не скачалось: 20 файлов"), (10, "unlim", "ok", "Готово. Не скачалось: 12 файлов")])
+        disk = db(6015, 5995, failed=20, names=_DEMO_DISK_FILES)
+        unlim = db(13602, 13590, failed=12, size=69 * gb, names=_DEMO_UNLIM_FILES)
     elif kind == "stopped":
-        st = run({"state": "stopped"}, {"state": "stopped"}, state="stopped", running=False)
-        disk, unlim = db(6015, 1500, pending=4515), db(13602, 2000, pending=11602, size=69 * gb)
+        st = run({"state": "stopped"}, {"state": "stopped"}, state="stopped", running=False, ev=start_events + [
+            (15, None, "info", "Скачивание остановлено. Всё скачанное сохранено")])
+        disk = db(6015, 1500, pending=4515, names=_DEMO_DISK_FILES)
+        unlim = db(13602, 2000, pending=11602, size=69 * gb, names=_DEMO_UNLIM_FILES)
     rescue_st = build_rescue_status(st, disk, unlim, tok, coo, cfg, {"kind": None}, free,
-                                    {"bytes": 31 * gb}, {"bytes": 12 * gb})
+                                    {"bytes": 31 * gb}, {"bytes": 12 * gb}, live=live)
     return {"rescue": rescue_st, "token": tok, "cookies": coo, "disk_db": disk, "unlim_db": unlim,
             "free_space": dict(free, total=2048 * gb, path=cfg.get("download_dir", ""))}
 

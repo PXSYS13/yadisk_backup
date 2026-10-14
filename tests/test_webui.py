@@ -678,13 +678,22 @@ def test_pipeline_applies_categories_after_scan(tmp_path, monkeypatch):
     pipe = webui.Pipeline()
     pipe.skip_unlim = True
     pipe.disk_categories = ["photos"]
-    monkeypatch.setattr(pipe, "_wait_task", lambda slot, on_finish_msg="": 0)
+
+    def finish(slot, on_finish_msg=""):
+        # «Скачивание» забирает всю очередь, как настоящий main.py download
+        if "скачиваю" in on_finish_msg:
+            with sqlite3.connect(db) as c:
+                c.execute("UPDATE files SET status='downloaded' WHERE status='pending'")
+        return 0
+
+    monkeypatch.setattr(pipe, "_wait_task", finish)
     pipe._run()
     assert pipe.state == "done"
     con = sqlite3.connect(db)
     st = dict(con.execute("SELECT remote_path, status FROM files"))
     con.close()
-    assert st == {"disk:/a.jpg": "pending", "disk:/b.pdf": "skipped"}
+    # Фото выбраны и скачаны, документ снят выбором категорий и не качался
+    assert st == {"disk:/a.jpg": "downloaded", "disk:/b.pdf": "skipped"}
 
 
 def test_api_plan_shape(monkeypatch):

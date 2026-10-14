@@ -45,6 +45,7 @@ from utils import (
     TELEGRAM_CHANNEL,
     YOUTUBE_VIDEO_URL,
     compute_md5,
+    ensure_dir,
     ensure_utf8_stdio,
     file_size_safe,
     human_bytes,
@@ -158,6 +159,14 @@ def _download_exit_code(counters: dict) -> int:
 def _run_download(cfg: dict, state: State, workers: int) -> int:
     """Запускает download_all и печатает итог. Коды выхода — _download_exit_code, 130 — Ctrl+C."""
     print(f"Старт скачивания в {workers} потоков → {cfg['download_dir']}")
+    try:
+        ensure_dir(cfg["download_dir"])
+    except OSError as e:
+        # Диск отключён, путь неверный или нет прав: без этого процесс падал с кодом 1,
+        # и интерфейс принимал падение за «скачано, часть не скачалась»
+        print(f"local_disk | Не получается создать папку {cfg['download_dir']}: {e}. "
+              f"Проверьте, что диск подключён, или выберите другую папку.", flush=True)
+        return EXIT_DISK_FULL
     t0 = time.time()
     counters = dict(EMPTY_COUNTERS)
     try:

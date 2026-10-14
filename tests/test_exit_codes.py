@@ -152,3 +152,16 @@ def test_collect_exits_3_when_no_list_could_be_fetched(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ud, "api_call", broken)
     assert ud.cmd_collect() == EXIT_OUTAGE
+
+
+def test_unwritable_download_folder_is_a_local_disk_problem(monkeypatch, capsys):
+    # Диск отключён или путь неверный: раньше процесс падал с кодом 1, и интерфейс
+    # принимал это за «скачано, часть не скачалась»
+    from utils import EXIT_DISK_FULL
+
+    def broken(path):
+        raise OSError(22, "Синтаксическая ошибка в имени файла")
+
+    monkeypatch.setattr(main, "ensure_dir", broken)
+    assert main._run_download({"download_dir": "X:\нет", "token": "t"}, None, 1) == EXIT_DISK_FULL
+    assert "local_disk |" in capsys.readouterr().out

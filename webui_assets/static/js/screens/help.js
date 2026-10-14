@@ -55,20 +55,26 @@
 
   App.screens.help = {
     mount(el) {
-      el.innerHTML = `<div class="stack">
-        <div class="card"><h2>Что происходит с Яндексом</h2><div id="help-health"></div>
-          <div class="section-title" style="margin-top:16px">Новости</div><ul class="small" id="help-news" style="padding-left:18px"></ul></div>
-        <div class="card faq"><h2>Частые вопросы</h2>
+      const I = App.icon;
+      const head = (ic, cls, title, sub) => `<div class="card-head"><span class="icon-box ${cls}">${I(ic)}</span>
+        <div class="grow"><h2>${title}</h2>${sub ? `<span class="tiny">${sub}</span>` : ''}</div></div>`;
+      el.innerHTML = `<div class="page-head"><h1>Помощь</h1>
+          <p>Что сейчас с Яндексом, ответы на частые вопросы и как получить помощь.</p></div>
+        <div class="stack">
+        <div class="card">${head('server', 'info', 'Что происходит с Яндексом', 'Программа сама проверяет серверы Яндекса каждые несколько минут')}
+          <div id="help-health"></div>
+          <div class="section-title" style="margin-top:18px">Новости</div><ul class="news small" id="help-news"></ul></div>
+        <div class="card faq">${head('help', '', 'Частые вопросы', '')}
           ${FAQ.map(([q, a]) => `<details><summary>${esc(q)}</summary><div class="body"><p>${esc(a)}</p></div></details>`).join('')}</div>
-        <div class="card"><h2>Нужна помощь</h2>
+        <div class="card">${head('lifebuoy', 'ok', 'Нужна помощь', '')}
           <p class="lead">Подробная инструкция для новичков — по шагам, с картинками. Если что-то не работает — скачайте отчёт
           и пришлите его в Telegram: в нём нет ключа и паролей.</p>
           <div class="row">
-            <a class="btn" href="/guide" target="_blank" rel="noopener">Открыть инструкцию</a>
-            <a class="btn primary" href="/api/logs/bundle">Скачать отчёт для поддержки</a>
-            <a class="btn" id="help-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">Написать в Telegram</a>
+            <a class="btn" href="/guide" target="_blank" rel="noopener">${I('book')}Открыть инструкцию</a>
+            <a class="btn primary" href="/api/logs/bundle">${I('download')}Скачать отчёт для поддержки</a>
+            <a class="btn" id="help-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">${I('send')}Написать в Telegram</a>
           </div></div>
-        <div class="card"><details id="help-logs-box"><summary>Журналы программы</summary><div class="body">
+        <div class="card"><details id="help-logs-box"><summary>Журналы программы — для поддержки</summary><div class="body">
           <div class="row" style="margin-bottom:10px"><select id="help-log-select" style="max-width:360px"></select>
             <button data-action="help-log-show">Показать</button></div>
           <div class="console" id="help-log"></div></div></details></div>
@@ -78,7 +84,7 @@
     update(s) {
       App.html(byId('help-health'), healthHtml(s.yandex_health, s));
       App.html(byId('help-news'), (s.news || []).map((n) =>
-        `<li><a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.title)}</a></li>`).join(''));
+        `<li><a href="${esc(n.url)}" target="_blank" rel="noopener">${App.icon('external')}${esc(n.title)}</a></li>`).join(''));
       if (s.telegram_url) byId('help-telegram').href = s.telegram_url;
     },
   };

@@ -19,7 +19,10 @@
     const box = byId('det-problems');
     if (!box) return;
     if (!problems) { App.html(box, '<p class="muted">Загружаю…</p>'); return; }
-    if (!problems.total) { App.html(box, '<p class="muted">Всё, что программа уже пробовала, скачалось. 🎉</p>'); return; }
+    if (!problems.total) {
+      App.html(box, `<div class="empty">${App.icon('check')}Всё, что программа уже пробовала, скачалось.</div>`);
+      return;
+    }
     const reasons = Object.entries(problems.reasons || {}).sort((a, b) => b[1] - a[1])
       .map(([text, n]) => `<li>${esc(text)} — <b>${fmt.files(n)}</b></li>`).join('');
     const failed = problems.items.filter((x) => x.state === 'failed').length;
@@ -28,8 +31,8 @@
         <td>${fmt.bytes(x.size)}</td>
         <td><span class="badge ${x.state === 'deferred' ? 'wait' : 'err'}">${x.state === 'deferred' ? 'ждёт Яндекса' : 'не скачался'}</span></td>
         <td class="small muted">${esc(x.state === 'deferred' ? 'сервер Яндекса не отвечает' : x.reason)}</td></tr>`).join('');
-    App.html(box, `<ul class="small" style="padding-left:18px;margin-bottom:12px">${reasons}</ul>
-      ${failed ? `<div class="row" style="margin-bottom:12px"><button class="primary" data-action="retry-failed" data-source="${source}">Повторить не скачавшиеся</button>
+    App.html(box, `<ul class="reasons">${reasons}</ul>
+      ${failed ? `<div class="row" style="margin-bottom:14px"><button class="primary" data-action="retry-failed" data-source="${source}">${App.icon('refresh')}Повторить не скачавшиеся</button>
         <span class="tiny">Файлы, которые ждут Яндекса, программа повторяет сама.</span></div>` : ''}
       <div class="scroll"><table class="list"><thead><tr><th>Файл</th><th>Размер</th><th>Состояние</th><th>Почему</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
@@ -49,16 +52,19 @@
 
   App.screens.details = {
     mount(el) {
-      el.innerHTML = `<p><a href="#/home">← На главную</a></p>
-        <h1 style="font-size:24px;margin:10px 0 14px" id="det-title">Подробнее</h1>
+      const head = (ic, cls, title, sub) => `<div class="card-head"><span class="icon-box ${cls}">${App.icon(ic)}</span>
+        <div class="grow"><h2>${title}</h2>${sub ? `<span class="tiny">${sub}</span>` : ''}</div></div>`;
+      el.innerHTML = `<a class="back" href="#/home">${App.icon('back')}На главную</a>
+        <div class="page-head"><h1 id="det-title">Подробнее</h1><p id="det-sub"></p></div>
         <div class="stack">
-          <div class="card"><div class="counters" id="det-counters"></div><p class="small muted" id="det-hosts" style="margin-top:12px"></p></div>
-          <div class="card"><h2>Что не скачалось и почему</h2><div id="det-problems"></div></div>
-          <div class="card"><h2>Последние скачанные</h2><div id="det-recent"></div></div>
-          <div class="card"><details><summary>Для опытных</summary><div class="body">
-            <div class="row" style="margin-bottom:10px">
-              <button data-action="details-relist" id="det-relist">Собрать список файлов заново</button>
-              <a class="btn" href="/api/logs/bundle">Скачать отчёт для поддержки</a></div>
+          <div class="card"><div id="det-steps"></div><div class="counters" id="det-counters" style="margin-top:18px"></div>
+            <p class="small muted" id="det-hosts" style="margin-top:14px"></p></div>
+          <div class="card">${head('alert', 'wait', 'Что не скачалось и почему', 'Файлы, которые ждут Яндекса, программа повторяет сама')}<div id="det-problems"></div></div>
+          <div class="card">${head('check', 'ok', 'Последние скачанные', 'Эти файлы уже лежат в вашей папке')}<div id="det-recent"></div></div>
+          <div class="card"><details><summary>Для опытных: журнал и пересбор списка</summary><div class="body">
+            <div class="row" style="margin-bottom:12px">
+              <button data-action="details-relist" id="det-relist">${App.icon('refresh')}Собрать список файлов заново</button>
+              <a class="btn" href="/api/logs/bundle">${App.icon('download')}Скачать отчёт для поддержки</a></div>
             <div class="console" id="det-log"></div></div></details></div>
         </div>`;
     },
@@ -70,20 +76,25 @@
       loadProblems();
     },
     update(s) {
-      const src = ((s.rescue || {}).sources || {})[source] || {};
+      const r = s.rescue || {};
+      const src = (r.sources || {})[source] || {};
       const f = src.files || {};
-      const c = (v, l) => `<div class="counter"><div class="v">${fmt.num(v)}</div><div class="l">${l}</div></div>`;
-      App.html(byId('det-counters'), c(f.selected, 'выбрано') + c(f.done, 'скачано') +
-        c((f.pending || 0) + (f.in_progress || 0), 'в очереди') + c(f.deferred, 'ждут Яндекса') +
-        c(f.failed, 'не скачались') + c(f.excluded, 'не выбраны') + c(f.preview_only, 'есть превью'));
+      App.text(byId('det-sub'), source === 'disk' ? 'Ваши папки и файлы с Диска — по ключу доступа.'
+        : 'Фото и видео, которые телефон загружал в безлимит, — по доступу к Безлимиту.');
+      App.html(byId('det-steps'), r.started_at ? App.steps(src) : '');
+      const c = (cls, v, l) => `<div class="counter ${cls}"><div class="v">${fmt.num(v)}</div><div class="l">${l}</div></div>`;
+      App.html(byId('det-counters'), c('', f.selected, 'выбрано') + c('ok', f.done, 'скачано') +
+        c('', (f.pending || 0) + (f.in_progress || 0), 'в очереди') + c(f.deferred ? 'wait' : '', f.deferred, 'ждут Яндекса') +
+        c(f.failed ? 'err' : '', f.failed, 'не скачались') + c('', f.excluded, 'не выбраны') + c('', f.preview_only, 'есть превью'));
       App.text(byId('det-hosts'), src.storage_hosts_down
         ? `Файлы, которые ждут Яндекса, лежат на ${fmt.num(src.storage_hosts_down)} серверах хранения, которые сейчас не отвечают. Программа повторяет их сама.`
         : '');
       const db = (s[source] || {}).db || {};
-      const recent = (db.recent || []).filter((r) => r.status === 'downloaded');
+      const recent = (db.recent || []).filter((x) => x.status === 'downloaded');
       App.html(byId('det-recent'), recent.length
-        ? `<table class="list"><tbody>${recent.map((r) => `<tr><td class="name">${esc(String(r.path).split('/').pop())}</td><td>${fmt.bytes(r.size)}</td></tr>`).join('')}</tbody></table>`
-        : '<p class="muted">Пока ничего.</p>');
+        ? `<table class="list"><tbody>${recent.map((x) => `<tr><td class="name">${esc(String(x.path).split('/').pop())}</td>
+            <td>${fmt.bytes(x.size)}</td><td class="tiny">${x.at ? fmt.hhmm(x.at) : ''}</td></tr>`).join('')}</tbody></table>`
+        : `<div class="empty">${App.icon('hourglass')}Пока ничего.</div>`);
       const running = !!(s.pipeline && s.pipeline.running);
       byId('det-relist').disabled = running;
       App.text(byId('det-log'), taskLog(s));

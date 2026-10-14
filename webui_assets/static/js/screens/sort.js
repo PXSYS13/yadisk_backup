@@ -33,17 +33,20 @@
 
   App.screens.sort = {
     mount(el) {
-      el.innerHTML = `<div class="stack">
-        <div class="card"><h2>Разложить скачанное по папкам</h2>
+      el.innerHTML = `<div class="page-head"><h1>Сортировка</h1>
+          <p>Когда всё скачается, программа может разложить файлы по папкам. Сначала покажет, что получится.</p></div>
+        <div class="stack">
+        <div class="card"><div class="card-head"><span class="icon-box">${App.icon('grid')}</span>
+          <div class="grow"><h2>Разложить скачанное по папкам</h2></div></div>
           <p class="lead">Программа разложит файлы по папкам «Фото», «Видео», «Документы», «Архивы» и другим — фото и видео
           ещё и по годам. Одинаковые файлы уедут в папку «_duplicates». <b>Ничего не удаляется.</b>
           Превью и служебные папки не трогаются.</p>
           <label class="field"><span>Какую папку разложить</span>
             <input type="text" id="sort-path" spellcheck="false"></label>
           <div class="row" style="margin-top:6px">
-            <button class="primary" data-action="sort-report" id="sort-report-btn">Посмотреть, что получится</button>
-            <button data-action="sort-apply" id="sort-apply-btn" disabled>Разложить файлы</button>
-            <button class="hidden" data-action="sort-stop" id="sort-stop-btn">Остановить</button>
+            <button class="primary" data-action="sort-report" id="sort-report-btn">${App.icon('list')}Посмотреть, что получится</button>
+            <button data-action="sort-apply" id="sort-apply-btn" disabled>${App.icon('grid')}Разложить файлы</button>
+            <button class="hidden" data-action="sort-stop" id="sort-stop-btn">${App.icon('stop')}Остановить</button>
           </div>
           <p class="tiny" id="sort-note" style="margin-top:10px"></p></div>
         <div class="card hidden" id="sort-out-card"><h2 id="sort-out-title">Что получится</h2><div id="sort-out"></div></div>

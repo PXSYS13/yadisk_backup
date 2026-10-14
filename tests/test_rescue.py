@@ -74,6 +74,22 @@ def test_deferred_files_get_another_round_without_relisting(rescue, monkeypatch)
     assert any("Следующая попытка" in line for line in rescue.log)
 
 
+def test_events_tell_the_story_in_plain_words(rescue, monkeypatch):
+    Script(monkeypatch, rescue, {"disk": [0, EXIT_DEFERRED, 0], "unlim_collect": [0]})
+    rescue._run()
+    events = rescue.status()["events"]
+    texts = [e["text"] for e in events]
+    assert texts[0] == "Начинаю: проверяю доступ к Яндексу"
+    assert "Ключ доступа к Диску работает" in texts and "Доступ к Безлимиту работает" in texts
+    assert any(t.startswith("Список получен:") for t in texts)
+    assert any(e["kind"] == "wait" and e["source"] == "disk" for e in events)
+    assert "Пробую отложенные файлы снова" in texts
+    assert texts.count("Готово: все файлы сохранены") == 2
+    assert all(set(e) == {"at", "source", "kind", "text"} for e in events)
+    # Без кодов выхода и жаргона
+    assert not any("код" in t or "воркер" in t.lower() or "cookies" in t.lower() for t in texts)
+
+
 def test_expired_token_stops_only_the_disk(rescue, monkeypatch):
     Script(monkeypatch, rescue, {"disk": [0, EXIT_AUTH], "unlim_collect": [0]})
     rescue._run()
@@ -184,6 +200,31 @@ def test_choosing_everything_brings_back_deselected_categories(rescue, monkeypat
     con = sqlite3.connect(db)
     assert con.execute("SELECT status FROM files").fetchone()[0] == "pending"
     con.close()
+
+
+def test_a_crashed_download_is_not_reported_as_done(rescue, monkeypatch, tmp_path):
+    # Процесс упал (у Python код падения 1 = EXIT_PARTIAL), очередь не тронута
+    db = tmp_path / "state.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE files (remote_path TEXT PRIMARY KEY, size INTEGER, md5 TEXT,"
+        " status TEXT NOT NULL DEFAULT 'pending', local_path TEXT, error TEXT, downloaded_at TIMESTAMP);"
+        "INSERT INTO files (remote_path, size) VALUES ('disk:/a.jpg', 1), ('disk:/b.jpg', 2);"
+    )
+    con.close()
+    monkeypatch.setattr(webui, "DB_FILE", db)
+    rescue.skip_unlim = True
+    sc = Script(monkeypatch, rescue, {"disk": [0, EXIT_PARTIAL]})
+    rescue._run()
+    disk = rescue.status()["branches"]["disk"]
+    assert disk["state"] == "needs_action" and disk["action"] == "send_logs"
+    assert rescue.state == "failed"
+    # Три быстрые попытки, а не «Скачано почти всё» после первой
+    assert sc.steps("disk").count(("disk", "download")) == webui.RESCUE_STUCK_ROUNDS
+    texts = [e["text"] for e in rescue.status()["events"]]
+    assert "Скачивание прервалось — пробую ещё раз через минуту" in texts
+    assert "Запускаю скачивание снова" in texts
+    assert not any(t.startswith("Готово") for t in texts)
 
 
 def test_status_keeps_the_old_pipeline_shape(rescue):

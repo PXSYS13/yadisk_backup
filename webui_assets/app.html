@@ -3,7 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Бэкап Яндекс.Диска</title>
+<script>
+  // Тема — до отрисовки, чтобы не мигало: сохранённый выбор или тема системы
+  (function () {
+    var theme = null;
+    try { theme = localStorage.getItem('yadisk-theme'); } catch (e) { /* приватный режим */ }
+    if (theme !== 'light' && theme !== 'dark') {
+      theme = window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-theme', theme);
+  })();
+</script>
 <link rel="stylesheet" href="/static/app.css?v=__APP_VERSION__">
 <script defer src="/static/js/core.js?v=__APP_VERSION__"></script>
 <script defer src="/static/js/components.js?v=__APP_VERSION__"></script>
@@ -17,27 +29,41 @@
 <script defer src="/static/js/main.js?v=__APP_VERSION__"></script>
 </head>
 <body>
-<div class="container">
-  <header class="topbar">
+<div class="app">
+  <aside class="side">
     <a class="brand" href="#/home" aria-label="На главную">
-      <span class="brand-logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span>
-      <span>
+      <span class="brand-logo" data-icon="download"></span>
+      <span class="brand-text">
         <span class="brand-name">Бэкап Яндекс.Диска</span>
         <span class="brand-sub" id="brand-version">версия __APP_VERSION__</span>
       </span>
     </a>
-    <div class="chips" id="chips"></div>
-  </header>
 
-  <nav class="tabs" id="tabs">
-    <a href="#/home" data-route="home">Главная</a>
-    <a href="#/settings" data-route="settings">Настройки</a>
-    <a href="#/sort" data-route="sort">Сортировка</a>
-    <a href="#/help" data-route="help">Помощь</a>
-    <a href="#/support" data-route="support">Поддержать</a>
-  </nav>
+    <nav class="nav" id="tabs" aria-label="Разделы">
+      <a href="#/home" data-route="home"><span class="ico" data-icon="home"></span><span>Главная</span></a>
+      <a href="#/settings" data-route="settings"><span class="ico" data-icon="sliders"></span><span>Настройки</span></a>
+      <a href="#/sort" data-route="sort"><span class="ico" data-icon="grid"></span><span>Сортировка</span></a>
+      <a href="#/help" data-route="help"><span class="ico" data-icon="help"></span><span>Помощь</span></a>
+      <a href="#/support" data-route="support"><span class="ico" data-icon="heart"></span><span>Поддержать</span></a>
+    </nav>
 
-  <main>
+    <div class="side-block">
+      <div class="side-title">Подключения</div>
+      <div class="chips" id="chips"></div>
+    </div>
+
+    <div class="side-foot">
+      <button type="button" class="small ghost theme-toggle" data-action="theme-toggle" id="theme-toggle">Тема</button>
+      <div class="side-links">
+        <a href="/guide" target="_blank" rel="noopener">Инструкция</a>
+        <a id="footer-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">Telegram</a>
+        <a href="/?ui=old">Прежний интерфейс</a>
+      </div>
+      <span class="tiny" id="footer-text">Бэкап Яндекс.Диска</span>
+    </div>
+  </aside>
+
+  <main class="main">
     <section id="screen-home" class="screen hidden"></section>
     <section id="screen-setup" class="screen hidden"></section>
     <section id="screen-settings" class="screen hidden"></section>
@@ -45,14 +71,12 @@
     <section id="screen-sort" class="screen hidden"></section>
     <section id="screen-help" class="screen hidden"></section>
     <section id="screen-support" class="screen hidden"></section>
+    <footer class="main-foot">
+      <a href="/guide" target="_blank" rel="noopener">Инструкция</a>
+      <a href="https://t.me/davronsv" target="_blank" rel="noopener">Telegram</a>
+      <a href="/?ui=old">Прежний интерфейс</a>
+    </footer>
   </main>
-
-  <footer>
-    <span id="footer-text">Бэкап Яндекс.Диска</span> ·
-    <a href="/guide" target="_blank" rel="noopener">Инструкция</a> ·
-    <a id="footer-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">Telegram</a> ·
-    <a href="/?ui=old">Прежний интерфейс</a>
-  </footer>
 </div>
 <div id="dialog-root"></div>
 <div id="toast" class="hidden" role="status" aria-live="polite"></div>

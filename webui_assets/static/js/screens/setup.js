@@ -27,15 +27,16 @@
   function render() {
     const st = STEPS[step];
     byId('setup-step').innerHTML = finished
-      ? `<h2>Всё готово</h2><p class="lead">Нажмите кнопку — программа начнёт сохранять ваши файлы.
+      ? `<div class="card-head"><span class="icon-box ok">${App.icon('check')}</span><div class="grow"><h2>Всё готово</h2></div></div>
+         <p class="lead">Нажмите кнопку — программа начнёт сохранять ваши файлы.
           Можно свернуть браузер, но не закрывайте чёрное окно программы.</p>
-         <div class="row"><button class="primary big" data-action="setup-start">Сохранить мои файлы</button></div>`
+         <div class="row"><button class="primary big" data-action="setup-start">${App.icon('download')}Сохранить мои файлы</button></div>`
       : `<h2>Шаг ${step + 1}. ${st.title}</h2><p class="lead">${st.text}</p><div id="setup-access"></div>
-         <div class="row" style="margin-top:14px">
-           ${step > 0 ? '<button data-action="setup-back">Назад</button>' : ''}
+         <div class="row" style="margin-top:16px">
+           ${step > 0 ? `<button data-action="setup-back">${App.icon('back')}Назад</button>` : ''}
            <span class="spacer"></span>
            ${st.skip ? `<button class="link" data-action="setup-next">${st.skip}</button>` : ''}
-           <button data-action="setup-next" data-require="${st.kind}">Дальше</button>
+           <button data-action="setup-next" data-require="${st.kind}">Дальше${App.icon('arrow')}</button>
          </div>`;
     if (!finished) {
       App.Access.mount(byId('setup-access'), [st.kind], [st.kind], { buttons: false });
@@ -45,15 +46,19 @@
   }
 
   function paintStepper(s) {
-    const html = STEPS.map((st, i) => `<div class="s ${i === step && !finished ? 'active' : ''} ${isDone(st.kind, s) ? 'done' : ''}"
-        data-action="setup-goto" data-step="${i}"><b>${i + 1}. ${st.title}</b></div>`).join('');
+    const html = STEPS.map((st, i) => {
+      const done = isDone(st.kind, s);
+      return `<div class="s ${i === step && !finished ? 'active' : ''} ${done ? 'done' : ''}" data-action="setup-goto" data-step="${i}">
+        <span class="n">${done ? App.icon('check') : i + 1}</span><b>${st.title}</b></div>`;
+    }).join('');
     App.html(byId('setup-stepper'), html);
   }
 
   App.screens.setup = {
     mount(el) {
-      el.innerHTML = `<p><a href="#/home">← На главную</a></p>
-        <h1 style="font-size:24px;margin:10px 0 14px">Настройка за 3 шага</h1>
+      el.innerHTML = `<a class="back" href="#/home">${App.icon('back')}На главную</a>
+        <div class="page-head"><h1>Настройка за 3 шага</h1>
+          <p>Один раз дайте программе доступ и выберите папку — это 3–5 минут. Всё хранится только на этом компьютере.</p></div>
         <div class="stepper" id="setup-stepper"></div>
         <div class="card" id="setup-step"></div>`;
       el.addEventListener('access-saved', () => {

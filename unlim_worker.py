@@ -1557,6 +1557,16 @@ def main() -> int:
     worker.say(f"{summary}; свободно на диске {free_str}")
     log.info("worker %d: %s; свободно %s", worker.id, summary, free_str)
 
+    try:
+        os.makedirs(EXTRACT_DIR, exist_ok=True)
+        os.makedirs(ZIP_TMP_DIR, exist_ok=True)
+    except OSError as e:
+        # Диск отключён, путь неверный или нет прав — иначе падение с кодом 1 выглядело
+        # бы для интерфейса как «скачано, часть не скачалась»
+        worker.say(f"local_disk | Не получается создать папку {EXTRACT_DIR}: {e}. "
+                   f"Проверьте, что диск подключён, или выберите другую папку.")
+        return EXIT_DISK_FULL
+
     worker.authorize()
     code = worker.run()
     log.info("worker %d завершён: код %s, %d файлов, %s", worker.id, code,

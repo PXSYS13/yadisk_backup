@@ -60,14 +60,16 @@
 
   App.screens.settings = {
     mount(el) {
-      el.innerHTML = `<div class="stack" id="set-root">
-        <div class="card"><h2>Доступ</h2>
-          <p class="lead">Ключ к Диску, папка для файлов и доступ к Безлимиту. Всё хранится только на этом компьютере.</p>
+      const head = (ic, cls, title, sub) => `<div class="card-head"><span class="icon-box ${cls}">${App.icon(ic)}</span>
+        <div class="grow"><h2>${title}</h2><span class="tiny">${sub}</span></div></div>`;
+      el.innerHTML = `<div class="page-head"><h1>Настройки</h1>
+          <p>Доступ к Яндексу, что скачивать и дополнительные параметры. Менять можно в любой момент.</p></div>
+        <div class="stack" id="set-root">
+        <div class="card">${head('key', '', 'Доступ', 'Ключ к Диску, папка для файлов и доступ к Безлимиту. Всё хранится только на этом компьютере.')}
           <div id="set-access"></div></div>
-        <div class="card"><h2>Что скачивать</h2>
-          <p class="lead">Снимите галочки с того, что не нужно. Остальное программа скачает.</p>
+        <div class="card">${head('list', 'ok', 'Что скачивать', 'Снимите галочки с того, что не нужно. Остальное программа скачает.')}
           <div id="set-what"></div></div>
-        <div class="card"><h2>Дополнительно</h2>
+        <div class="card">${head('sliders', 'plain', 'Дополнительно', 'Обычно менять ничего не нужно.')}
           <div class="switch"><div><b>Бережный режим</b>
               <p class="small muted">Вдвое меньше одновременных скачиваний. Включите, если Яндекс часто отвечает
               «слишком много запросов» или медленный интернет.</p></div>
@@ -77,7 +79,7 @@
               в папку «_превью». Оригинал докачается сам, когда Яндекс его отдаст.</p></div>
             <input type="checkbox" data-field="opt-previews" data-action="settings-toggle" data-option="previews"></div>
         </div>
-        <div class="card"><details><summary>Опасная зона</summary><div class="body">
+        <div class="card"><details><summary>Опасная зона — нужна, только если что-то пошло совсем не так</summary><div class="body">
           <p class="small">Программа забудет список файлов и при следующем запуске соберёт его заново.
           Скачанные файлы в папке <b>не удаляются</b>. Нужно, только если что-то пошло совсем не так.</p>
           <div class="row" style="margin-top:12px">
