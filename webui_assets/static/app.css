@@ -301,6 +301,9 @@ button.small .i,.btn.small .i{width:16px;height:16px}
 .activity.wait .i{color:var(--warn)}
 .activity.err .i{color:var(--err)}
 .activity.ok .i{color:var(--ok)}
+.listed{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;color:var(--text-3)}
+.listed .i{width:15px;height:15px}
+.listed button.link{font-size:13px}
 .source-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding-top:14px;border-top:1px solid var(--border);font-size:13px;color:var(--text-3)}
 .more{display:inline-flex;align-items:center;gap:5px;font-weight:600;font-size:13.5px}
 .more .i{width:15px;height:15px}

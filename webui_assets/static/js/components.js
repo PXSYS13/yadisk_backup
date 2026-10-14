@@ -155,6 +155,27 @@
     }
   }
 
+  // ── «Список файлов собран в 14:05 · Обновить список»: список программа помнит между запусками ──
+  const RELIST_STATES = new Set(['idle', 'waiting', 'done', 'stopped']);
+  function whenText(ts) {
+    const d = new Date(ts * 1000);
+    const now = new Date();
+    const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    const hm = fmt.hhmm(ts);
+    if (d.toDateString() === now.toDateString()) return `в ${hm}`;
+    if (d.toDateString() === yesterday.toDateString()) return `вчера в ${hm}`;
+    return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')} в ${hm}`;
+  }
+  function listedLine(name, src) {
+    if (!src.listed_at || src.state === 'listing') return '';
+    const what = name === 'unlim' ? 'Список фото и видео' : 'Список файлов';
+    const hint = 'Программа сама собирает список заново раз в 6 часов. Нажмите, если ' +
+      (name === 'unlim' ? 'с телефона только что загрузились новые фото' : 'только что добавили файлы на Диск');
+    const btn = RELIST_STATES.has(src.state)
+      ? `<button class="link" data-action="relist" data-source="${name}" title="${esc(hint)}">Обновить список</button>` : '';
+    return `<div class="listed">${icon('list')}<span>${what} собран ${whenText(src.listed_at)}</span>${btn}</div>`;
+  }
+
   // ── Карточка источника ──
   App.sourceBlock = (name, src, r) => {
     src = src || {};
@@ -172,9 +193,10 @@
     const steps = r && r.started_at ? App.steps(src) : '';
     const [nowCls, nowIcon, nowText] = nowLine(src);
     const activity = `<div class="activity ${nowCls}">${icon(nowIcon)}<span>${esc(nowText)}</span></div>`;
+    const listed = listedLine(name, src);
     const f = src.files || {};
     const b = src.bytes || {};
-    if (!f.total) return `<div class="card source">${head}${steps}${activity}</div>`;
+    if (!f.total) return `<div class="card source">${head}${steps}${activity}${listed}</div>`;
     const selected = f.selected || 0;
     const seg = (cls, n) => `<span class="${cls}" style="width:${fmt.pct(n, selected).toFixed(2)}%"></span>`;
     const bar = `<div class="bar" role="img" aria-label="Скачано ${f.done} из ${selected}">${
@@ -195,7 +217,7 @@
         <span class="pct-badge">${fmt.pctText(f.done, selected)}</span></div>
         <div class="muted small" style="margin-top:4px">${fmt.bytes(b.done)} из ${fmt.bytes(b.selected || b.total)}${speed}</div></div>
       ${bar}<div class="legend">${legend}</div>
-      ${activity}
+      ${activity}${listed}
       <div class="source-foot"><span title="${esc(lastText)}">${esc(lastText)}</span>
         <a class="more" href="#/details/${name}">Подробнее ${icon('arrow')}</a></div></div>`;
   };
@@ -448,6 +470,8 @@
     if (yes) App.run(btn, () => App.api.post('/api/start/stop'));
   });
   App.action('retry-now', (btn) => App.run(btn, () => App.api.post('/api/rescue/retry_now')));
+  App.action('relist', (btn) => App.run(btn, () =>
+    App.api.post('/api/rescue/relist', { source: btn.dataset.source })));
   App.action('retry-failed', (btn) => App.run(btn, () =>
     App.api.post('/api/rescue/retry_failed', { source: btn.dataset.source || 'all' })));
   App.action('open-folder', (btn) => App.run(btn, () =>

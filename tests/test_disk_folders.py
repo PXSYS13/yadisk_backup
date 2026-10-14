@@ -2,6 +2,7 @@
 
 import argparse
 import sqlite3
+import threading
 import time
 from types import SimpleNamespace
 
@@ -385,8 +386,7 @@ def test_folder_tree_demo(client, monkeypatch):
 # ── Режим спасения с выбранными папками ─────────────────────────────────────
 
 
-@pytest.fixture()
-def rescue(monkeypatch):
+def _make_rescue(monkeypatch):
     monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": True, "login": "t", "used": 1})
     monkeypatch.setattr(webui, "check_cookies", lambda: {"ok": True, "msg": "ok", "count": 5})
     r = webui.Rescue()
@@ -397,6 +397,11 @@ def rescue(monkeypatch):
     return r
 
 
+@pytest.fixture()
+def rescue(monkeypatch):
+    return _make_rescue(monkeypatch)
+
+
 def test_selected_folders_are_listed_by_root(rescue, monkeypatch):
     sc = Script(monkeypatch, rescue, {"disk": [0, 0]})
     rescue.disk_folders = ["disk:/A", "disk:/Б в"]
@@ -405,22 +410,158 @@ def test_selected_folders_are_listed_by_root(rescue, monkeypatch):
     assert rescue.state == "done"
 
 
-def test_roots_covered():
-    assert webui._roots_covered(None, None)
-    assert webui._roots_covered(["disk:/A"], None)  # весь Диск покрывает любые папки
-    assert not webui._roots_covered(None, ["disk:/A"])
-    assert webui._roots_covered(["disk:/A/B"], ["disk:/A"])
-    assert not webui._roots_covered(["disk:/AB"], ["disk:/A"])
+def test_listing_plan_scans_only_what_is_missing():
+    now = 1_000_000.0
+    plan = webui.disk_listing_plan
+    whole = {"at": now - 60, "whole": True, "folders": []}
+    some = {"at": now - 60, "whole": False, "folders": ["disk:/A"]}
+    assert plan(None, None, now) == ("all", None)                    # списка нет — весь выбор
+    assert plan(["disk:/A"], None, now) == ("all", ["disk:/A"])
+    assert plan(None, whole, now) == ("none", None)                  # свежий список всего Диска
+    assert plan(None, some, now) == ("all", None)                    # собраны были только папки
+    assert plan(["disk:/A"], some, now) == ("none", None)
+    assert plan(["disk:/A", "disk:/B"], some, now) == ("new", ["disk:/B"])  # только новая папка
+    # Весь Диск собран, а потом выбрали папку: её досканируем — в неё могли что-то скопировать
+    assert plan(["disk:/Загрузки/Project1"], whole, now) == ("new", ["disk:/Загрузки/Project1"])
+    assert plan(None, dict(whole, at=now - webui.RESCUE_RELIST_SEC - 1), now) == ("all", None)
+    assert plan(None, dict(whole, at=now + 3600), now) == ("all", None)  # часы ушли назад
 
 
-def test_new_folders_force_a_new_listing(rescue):
-    rescue._listed_at["disk"] = time.time()
-    rescue._listed_roots["disk"] = ["disk:/A"]
-    assert not rescue._needs_listing("disk", ["disk:/A/x"])
-    assert rescue._needs_listing("disk", ["disk:/B"])
-    assert rescue._needs_listing("disk", None)
-    rescue._listed_roots["disk"] = None
-    assert not rescue._needs_listing("disk", ["disk:/B"])
+def test_list_is_remembered_across_restarts(rescue, monkeypatch):
+    sc = Script(monkeypatch, rescue, {"disk": [0, 0]})
+    rescue._run()
+    assert sc.steps("disk") == [("disk", "scan"), ("disk", "download")]
+    rec = webui.read_listing("disk")
+    assert rec["whole"] and rec["folders"] == []
+    again = _make_rescue(monkeypatch)  # перезапуск программы: новый объект, та же база
+    sc2 = Script(monkeypatch, again, {"disk": [0]})
+    again._run()
+    assert sc2.steps("disk") == [("disk", "download")]
+    assert any(e["text"].startswith("Список файлов собран") for e in again.events)
+    assert webui.db_stats(webui.DB_FILE)["listed_at"] == rec["at"]
+
+
+def test_forgetting_the_list_forgets_when_it_was_collected(rescue, monkeypatch):
+    Script(monkeypatch, rescue, {"disk": [0, 0]})
+    rescue._run()
+    assert webui.read_listing("disk")
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    assert client.post("/api/disk/clear").json()["ok"]
+    assert webui.read_listing("disk") is None
+
+
+def test_only_the_new_folder_is_scanned(rescue, monkeypatch):
+    webui.write_listing("disk", {"at": time.time(), "whole": False, "folders": ["disk:/A"]})
+    sc = Script(monkeypatch, rescue, {"disk": [0, 0]})
+    rescue.disk_folders = ["disk:/A", "disk:/B"]
+    rescue._run()
+    assert ("disk", "main.py", ("scan", "--root=disk:/B")) in sc.started
+    assert webui.read_listing("disk")["folders"] == ["disk:/A", "disk:/B"]
+
+
+def test_folder_chosen_after_whole_disk_listing_is_scanned_alone(rescue, monkeypatch):
+    """Project1 скопировали на Диск уже после сбора — отмеченную папку досканируем, весь Диск — нет."""
+    webui.write_listing("disk", {"at": time.time(), "whole": True, "folders": []})
+    sc = Script(monkeypatch, rescue, {"disk": [0, 0]})
+    rescue.disk_folders = ["disk:/Загрузки/Project1"]
+    rescue._run()
+    assert [a for _s, _sc, a in sc.started if a[0] == "scan"] == [("scan", "--root=disk:/Загрузки/Project1")]
+    rec = webui.read_listing("disk")
+    assert rec["whole"] and rec["folders"] == ["disk:/Загрузки/Project1"]
+
+
+def test_missing_new_folder_is_not_remembered(rescue, monkeypatch):
+    webui.write_listing("disk", {"at": time.time(), "whole": False, "folders": ["disk:/A"]})
+    Script(monkeypatch, rescue, {"disk": [0, 0]})
+    monkeypatch.setattr(rescue, "_task_lines", lambda slot: ['folder_missing | {"path": "disk:/B"}'])
+    rescue.disk_folders = ["disk:/A", "disk:/B"]
+    rescue._run()
+    assert webui.read_listing("disk")["folders"] == ["disk:/A"]  # следующий запуск проверит B снова
+
+
+def test_relist_during_download_lists_again_right_after(rescue, monkeypatch):
+    sc = Script(monkeypatch, rescue, {"disk": [0, 5, 0, 0]})  # список, скачивание (ждут Яндекса), …
+    start = webui.tm.start
+
+    def press_relist_on_first_download(slot, script, args):
+        if args[0] == "download" and not any(a[0] == "download" for _s, _sc, a in sc.started):
+            rescue._forget_listing("disk")  # то же, что делает «Обновить список»
+            rescue.branches["disk"].relist = True
+        return start(slot, script, args)
+
+    monkeypatch.setattr(webui.tm, "start", press_relist_on_first_download)
+    rescue._run()
+    # Без паузы между попытками: сразу новый список и снова скачивание
+    assert sc.steps("disk") == [("disk", "scan"), ("disk", "download"), ("disk", "scan"), ("disk", "download")]
+    assert rescue.state == "done"
+
+
+def test_relist_when_idle_forgets_and_asks_the_caller_to_start(rescue):
+    webui.write_listing("disk", {"at": time.time(), "whole": True, "folders": []})
+    assert rescue.relist("disk") == (None, "")
+    assert webui.read_listing("disk") is None
+
+
+def test_relist_api_starts_saving_when_idle(monkeypatch):
+    calls = []
+    monkeypatch.setattr(webui.pipeline, "start", lambda **kw: calls.append(kw) or (True, "Спасение запущено"))
+    monkeypatch.setattr(webui, "preflight_sources", lambda disk, unlim: {"error": None, "notes": []})
+    webui.write_listing("disk", {"at": time.time(), "whole": True, "folders": []})
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    assert client.post("/api/rescue/relist", json={"source": "disk"}).json()["ok"]
+    assert calls and webui.read_listing("disk") is None
+    assert client.post("/api/rescue/relist", json={"source": "files"}).status_code == 422
+
+
+def test_check_new_files_forgets_both_lists_and_starts_once(monkeypatch):
+    """«Проверить новые файлы» на экране «Готово»: оба списка собираются заново."""
+    calls = []
+    monkeypatch.setattr(webui.pipeline, "start", lambda **kw: calls.append(kw) or (True, "Спасение запущено"))
+    monkeypatch.setattr(webui, "preflight_sources", lambda disk, unlim: {"error": None, "notes": []})
+    for source in ("disk", "unlim"):
+        webui.write_listing(source, {"at": time.time(), "whole": True, "folders": []})
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    assert client.post("/api/rescue/relist", json={"source": "all"}).json()["ok"]
+    assert len(calls) == 1
+    assert webui.read_listing("disk") is None and webui.read_listing("unlim") is None
+
+
+@pytest.mark.parametrize("state, flag, woken, ok", [
+    ("waiting", True, True, True),       # ждёт попытки — будим и собираем список
+    ("downloading", True, False, True),  # соберём сразу после текущего скачивания
+    ("listing", False, False, True),     # и так собирается
+    ("off", False, False, False),        # источник в этом запуске не качается
+])
+def test_relist_while_running(rescue, state, flag, woken, ok):
+    gate = threading.Event()
+    rescue._thread = threading.Thread(target=gate.wait)
+    rescue._thread.start()
+    b = rescue.branches["disk"]
+    b.thread = threading.Thread(target=gate.wait)
+    b.thread.start()
+    b.state = state
+    try:
+        got_ok, msg = rescue.relist("disk")
+        assert got_ok is ok and msg
+        assert b.relist is flag and b.wake.is_set() is woken
+    finally:
+        gate.set()
+
+
+def test_relist_restarts_a_finished_branch_while_the_other_runs(rescue, monkeypatch):
+    sc = Script(monkeypatch, rescue, {"disk": [0, 0]})
+    gate = threading.Event()
+    rescue._thread = threading.Thread(target=gate.wait)
+    rescue._thread.start()
+    b = rescue.branches["disk"]
+    b.state = "done"
+    try:
+        assert rescue.relist("disk") == (True, "Обновляю список файлов")
+        b.thread.join(5)
+        assert sc.steps("disk") == [("disk", "scan"), ("disk", "download")]
+        assert b.state == "done"
+    finally:
+        gate.set()
 
 
 def test_all_chosen_folders_gone_asks_to_choose_again(rescue, monkeypatch):

@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS files (
     downloaded_at TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_status ON files(status);
+-- Служебные записи о самой базе: например, когда последний раз собирали список
+-- (webui.py, ключ listing). Удаление базы («Забыть список файлов») стирает и их
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 # Маркер отложенного файла в колонке error (его же считает db_stats в webui.py)
@@ -111,6 +117,22 @@ class State:
             yield conn
 
     # ── публичное API ─────────────────────────────────────────────────
+
+    def get_meta(self, key: str) -> str | None:
+        row = self._conn().execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str | None) -> None:
+        """Записывает служебное значение; None — удаляет его."""
+        with self._tx() as conn:
+            if value is None:
+                conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+            else:
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
 
     def mark_pending(
         self,

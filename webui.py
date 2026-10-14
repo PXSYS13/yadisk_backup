@@ -31,6 +31,7 @@ import time
 import zipfile
 from collections import deque
 from collections.abc import Callable
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -52,11 +53,13 @@ from public_download import (
     remove_link,
 )
 from public_download import connect_db as links_connect
-from state import CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER, SELECTION_MARKERS
+from state import CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER, SELECTION_MARKERS, State
 from unlim_common import (
     DEFERRED_MARKER,
     RELEASE_IN_PROGRESS_SQL,
+    UNLIM_SCHEMA,
     clear_dead_hosts,
+    connect_unlim_db,
     missing_required_cookies,
     reset_failed_files,
     unlim_tx,
@@ -91,7 +94,6 @@ from utils import (
     is_safe_download_dir,
     keep_awake,
     normalize_disk_folders,
-    path_in_folders,
     previews_enabled,
     safe_int,
     sqlite_ro_uri,
@@ -588,7 +590,8 @@ def _free_space(path: str) -> dict | None:
 
 # ── Режим спасения ──────────────────────────────────────────────────────────
 
-# Список файлов, собранный в этом процессе позже этого срока, при новом старте не пересобираем
+# Список файлов моложе этого срока при новом старте не пересобираем — даже после перезапуска
+# программы: запись о сборе лежит в самой базе (см. read_listing)
 RESCUE_RELIST_SEC = 6 * 3600
 # Столько раундов подряд с непонятным кодом выхода — дальше просим прислать отчёт
 RESCUE_STUCK_ROUNDS = 3
@@ -618,16 +621,104 @@ def _hhmm(ts: float | None) -> str:
     return time.strftime("%H:%M", time.localtime(ts)) if ts else ""
 
 
-def _roots_covered(new: list[str] | None, old: list[str] | None) -> bool:
-    """Покрывает ли прошлый сбор списка новые корни. None — весь Диск.
+def _when_text(ts: float, now: float | None = None) -> str:
+    """«в 14:05», «вчера в 22:10», «12.10 в 09:00» — когда это было, по-человечески."""
+    day = datetime.fromtimestamp(ts).date()
+    today = datetime.fromtimestamp(now or time.time()).date()
+    hm = _hhmm(ts)
+    if day == today:
+        return f"в {hm}"
+    if (today - day).days == 1:
+        return f"вчера в {hm}"
+    return f"{day:%d.%m} в {hm}"
 
-    Весь Диск покрывает любые папки, папку покрывает её родитель.
+
+# ── Когда собирали список файлов ──
+# Запись лежит в самой базе источника (state.db → meta, unlim_state.db → unlim_meta): перезапуск
+# программы её не стирает, а «Забыть список файлов» удаляет вместе с базой. Значение — JSON
+# {"at": время сбора, "whole": собран весь Диск, "folders": папки, собранные после этого}
+LISTING_KEY = "listing"
+
+
+def _listing_db(source: str) -> tuple[Path, str]:
+    return (DB_FILE, "meta") if source == "disk" else (UNLIM_DB_FILE, "unlim_meta")
+
+
+def _parse_listing(value: str | None) -> dict | None:
+    try:
+        rec = json.loads(value or "")
+    except ValueError:
+        return None
+    if not isinstance(rec, dict) or not isinstance(rec.get("at"), (int, float)):
+        return None
+    folders = rec.get("folders")
+    return {"at": float(rec["at"]), "whole": bool(rec.get("whole")),
+            "folders": [f for f in folders if isinstance(f, str)] if isinstance(folders, list) else []}
+
+
+def read_listing(source: str) -> dict | None:
+    """Последний удачный сбор списка источника или None, если списка нет."""
+    db, table = _listing_db(source)
+    if not db.exists():
+        return None
+    try:
+        c = sqlite3.connect(sqlite_ro_uri(db), uri=True, timeout=30)
+        try:
+            row = c.execute(f"SELECT value FROM {table} WHERE key = ?", (LISTING_KEY,)).fetchone()
+        finally:
+            c.close()
+    except sqlite3.Error:  # старая база без служебной таблицы
+        return None
+    return _parse_listing(row[0]) if row else None
+
+
+def write_listing(source: str, rec: dict | None) -> None:
+    """Запоминает сбор списка; None — забыть: следующий запуск соберёт список заново."""
+    db, _table = _listing_db(source)
+    if rec is None and not db.exists():
+        return
+    value = None if rec is None else json.dumps(rec, ensure_ascii=False)
+    if source == "disk":
+        st = State(str(db))  # создаст базу со всеми таблицами, если её ещё нет
+        try:
+            st.set_meta(LISTING_KEY, value)
+        finally:
+            st.close()
+        return
+    c = connect_unlim_db(str(db))
+    try:
+        c.executescript(UNLIM_SCHEMA)
+        with sqlite_tx(c):
+            if value is None:
+                c.execute("DELETE FROM unlim_meta WHERE key = ?", (LISTING_KEY,))
+            else:
+                c.execute("INSERT INTO unlim_meta (key, value) VALUES (?, ?) "
+                          "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (LISTING_KEY, value))
+    finally:
+        c.close()
+
+
+def listing_stale(rec: dict | None, now: float) -> bool:
+    """Список надо собрать заново: его нет, он старше RESCUE_RELIST_SEC или часы ушли назад."""
+    return rec is None or now - rec["at"] > RESCUE_RELIST_SEC or rec["at"] - now > 300
+
+
+def disk_listing_plan(folders: list[str] | None, rec: dict | None,
+                      now: float) -> tuple[str, list[str] | None]:
+    """Что собрать перед скачиванием Диска. folders: None — весь Диск.
+
+    ("all", folders) — весь выбор заново: списка нет, он устарел или выбран весь Диск, а собраны
+    были только папки. ("new", [папки]) — только папки, которых не было в прошлом сборе: так
+    найдётся и то, что скопировали на Диск уже после него, а весь Диск заново не сканируется.
+    ("none", None) — список свежий.
     """
-    if old is None:
-        return True
-    if new is None:
-        return False
-    return all(path_in_folders(p, old) for p in new)
+    if listing_stale(rec, now):
+        return "all", folders
+    if not folders:
+        return ("none", None) if rec["whole"] else ("all", None)
+    known = set(rec["folders"])
+    new = [f for f in folders if f not in known]
+    return ("new", new) if new else ("none", None)
 
 
 def _folder_label(path: str) -> str:
@@ -708,6 +799,7 @@ class Branch:
         self.last_exit: dict | None = None
         self.odd_rounds = 0
         self.reset_done = False
+        self.relist = False  # «Обновить список»: перед следующим скачиванием собрать список заново
         self.wake.clear()
 
     @property
@@ -759,10 +851,8 @@ class Rescue:
         self.partial = False
         self.retry_every = _retry_every_sec()
         self._owned_slots: set[str] = set()
-        # Когда список файлов собирался в этом процессе — чтобы не пересобирать на каждый старт
-        self._listed_at: dict[str, float] = {}
-        # Какие папки собирал последний список (None — весь Диск): новые папки требуют пересбора
-        self._listed_roots: dict[str, list[str] | None] = {}
+        # Главный поток уже дождался веток и заканчивает: перезапускать ветку поздно
+        self._closing = False
 
     # ── управление ──
 
@@ -782,6 +872,7 @@ class Rescue:
                 return False, "Спасение уже идёт"
             self._stop_evt.clear()
             self._owned_slots.clear()
+            self._closing = False
             self.state = "running"
             self.log.clear()
             self.events.clear()
@@ -808,6 +899,49 @@ class Rescue:
         if self._wake_waiting():
             return True, "Пробую отложенные файлы прямо сейчас"
         return False, "Сейчас нечего повторять — всё и так качается"
+
+    def relist(self, source: str) -> tuple[bool | None, str]:
+        """«Обновить список»: забыть прошлый сбор списка источника и собрать его заново.
+
+        None — спасение не идёт: вызывающий запускает его целиком, и ветка соберёт список.
+        """
+        self._forget_listing(source)
+        with self._lock:
+            if not self.is_running() or self._closing:
+                return None, ""
+            b = self.branches[source]
+            if b.state == "off":
+                return False, f"{b.label} сейчас не скачивается — проверьте доступ в «Настройках»"
+            if b.state in ("checking", "listing"):
+                return True, "Список и так собирается прямо сейчас"
+            if b.state == "downloading":
+                b.relist = True
+                self._event(source, "info", "Обновлю список файлов, как только закончится текущее скачивание")
+                return True, "Обновлю список, как только закончится текущее скачивание"
+            self._event(source, "run", "Обновляю список файлов — по вашей просьбе")
+            if b.alive():  # ждёт следующей попытки
+                b.relist = True
+                b.wake.set()
+                return True, "Обновляю список файлов"
+            # Ветка закончила (готово или нужно действие), а соседняя ещё работает — запускаем эту снова
+            b.reset()
+            b.state = "checking"
+            target = self._run_disk if source == "disk" else self._run_unlim
+            b.thread = threading.Thread(target=self._branch_main, args=(b, target), daemon=True)
+            b.thread.start()
+            return True, "Обновляю список файлов"
+
+    def _forget_listing(self, source: str) -> None:
+        try:
+            write_listing(source, None)
+        except sqlite3.Error as e:
+            log.warning("не удалось забыть сбор списка %s: %s", source, e)
+
+    def _remember_listing(self, source: str, rec: dict) -> None:
+        try:
+            write_listing(source, rec)
+        except sqlite3.Error as e:  # не страшно: следующий запуск просто соберёт список заново
+            log.warning("не удалось запомнить сбор списка %s: %s", source, e)
 
     def _wake_waiting(self) -> bool:
         waiting = [b for b in self.branches.values() if b.state == "waiting"]
@@ -935,13 +1069,6 @@ class Rescue:
             b.last_exit = {"code": code, "at": time.time(), "step": activity}
         return code
 
-    def _needs_listing(self, name: str, roots: list[str] | None = None) -> bool:
-        at = self._listed_at.get(name)
-        if at is None or time.time() - at > RESCUE_RELIST_SEC:
-            return True
-        # Выбрали папки, которых прошлый сбор не касался, — их файлов в списке ещё нет
-        return not _roots_covered(roots, self._listed_roots.get(name))
-
     def _task_lines(self, slot: str) -> list[str]:
         """Журнал задачи слота — после шага из него читаются находки сбора (тесты подменяют)."""
         task = tm.get(slot)
@@ -1057,7 +1184,6 @@ class Rescue:
                 return
             self.partial = bool(src["notes"])
 
-            threads = []
             for name, run, target in (("disk", src["run_disk"], self._run_disk),
                                       ("unlim", src["run_unlim"], self._run_unlim)):
                 b = self.branches[name]
@@ -1067,9 +1193,7 @@ class Rescue:
                 b.state = "checking"
                 b.thread = threading.Thread(target=self._branch_main, args=(b, target), daemon=True)
                 b.thread.start()
-                threads.append(b.thread)
-            for t in threads:
-                t.join()
+            self._join_branches()
             self.state = self._final_state()
             self._log({
                 "done": "🏁 Готово, но часть источников пропущена (см. выше)" if self.partial else "🏆 ВСЁ ГОТОВО!",
@@ -1092,6 +1216,17 @@ class Rescue:
             self.state = "failed"
         finally:
             self.finished_at = time.time()
+
+    def _join_branches(self) -> None:
+        """Ждёт ветки — и ту, что «Обновить список» запустил заново, пока шла соседняя."""
+        while True:
+            with self._lock:
+                alive = [b.thread for b in self.branches.values() if b.alive()]
+                if not alive:
+                    self._closing = True
+                    return
+            for t in alive:
+                t.join()
 
     def _final_state(self) -> str:
         states = [b.state for b in self.branches.values() if b.state != "off"]
@@ -1118,6 +1253,9 @@ class Rescue:
         ready = False
         while not self._stopped():
             b.round += 1
+            if b.relist:  # «Обновить список» во время ожидания
+                b.relist = False
+                ready = False
             if not ready:
                 code = prepare(b)
                 if code == -1:
@@ -1132,6 +1270,9 @@ class Rescue:
             code = download(b)
             if code == -1:
                 return self._branch_stopped(b)
+            if b.relist and code not in (EXIT_AUTH, EXIT_DISK_FULL):
+                # «Обновить список» нажали во время скачивания — собираем список сразу, без паузы
+                continue
             if not self._after_exit(b, code, db):
                 return
         self._branch_stopped(b)
@@ -1268,14 +1409,20 @@ class Rescue:
                 self._log(f"↩️ Диск: {n} файлов с временными ошибками снова в очереди")
                 self._event("disk", "info", f"Снова в очереди: {_files(n)}, которые раньше не скачались")
         folders = self.disk_folders
-        if self._needs_listing("disk", folders):
+        rec = read_listing("disk")
+        mode, roots = disk_listing_plan(folders, rec, time.time())
+        if mode == "none":
+            self._log(f"📋 Диск: список файлов собран {_when_text(rec['at'])} — заново не собираю")
+            self._event("disk", "info", f"Список файлов собран {_when_text(rec['at'])} — заново не собираю")
+        else:
             b.state = "listing"
-            if folders:
-                self._event("disk", "run", f"Получаю у Яндекса список файлов в папках {_folders_text(folders)}")
-                args = ["scan", *[f"--root={p}" for p in folders]]
+            if mode == "new":
+                self._event("disk", "run", f"Получаю у Яндекса список файлов в новых папках: {_folders_text(roots)}")
+            elif roots:
+                self._event("disk", "run", f"Получаю у Яндекса список файлов в папках {_folders_text(roots)}")
             else:
                 self._event("disk", "run", "Получаю у Яндекса список файлов")
-                args = ["scan"]
+            args = ["scan", *[f"--root={p}" for p in roots]] if roots else ["scan"]
             code = self._run_step(b, SLOT_DISK, "main.py", args, "получаю список файлов")
             if code == -1:
                 return -1
@@ -1297,8 +1444,13 @@ class Rescue:
                 self._log(f"🤝 Диск: нашёл общие папки, к которым вам дали доступ: {names}")
                 self._event("disk", "info", f"Нашёл общие папки, к которым вам дали доступ: {names} — скачаю и их")
             if code == 0:
-                self._listed_at["disk"] = time.time()
-                self._listed_roots["disk"] = list(folders) if folders else None
+                # Пропавшие папки не запоминаем: следующий запуск проверит их снова
+                found = [p for p in roots or [] if p not in missing]
+                if mode == "new" and rec:
+                    rec = dict(rec, folders=rec["folders"] + found)
+                else:
+                    rec = {"at": time.time(), "whole": not roots, "folders": found}
+                self._remember_listing("disk", rec)
                 total = int(db_stats(DB_FILE, "files", "remote_path").get("total") or 0)
                 self._event("disk", "ok", f"Список получен: {_files(total)}")
             elif _db_has_rows(DB_FILE, "files"):
@@ -1328,7 +1480,11 @@ class Rescue:
             if n:
                 self._log(f"↩️ Безлимит: {n} файлов с ошибками снова в очереди")
                 self._event("unlim", "info", f"Снова в очереди: {_files(n)}, которые раньше не скачались")
-        if self._needs_listing("unlim"):
+        rec = read_listing("unlim")
+        if not listing_stale(rec, time.time()):
+            self._log(f"📋 Безлимит: список фото и видео собран {_when_text(rec['at'])} — заново не собираю")
+            self._event("unlim", "info", f"Список фото и видео собран {_when_text(rec['at'])} — заново не собираю")
+        else:
             b.state = "listing"
             self._event("unlim", "run", "Получаю у Яндекса список фото и видео")
             code = self._run_step(b, SLOT_UNLIM_COLLECT, "unlim_download.py", ["--collect"],
@@ -1336,7 +1492,7 @@ class Rescue:
             if code == -1:
                 return -1
             if code == 0:
-                self._listed_at["unlim"] = time.time()
+                self._remember_listing("unlim", {"at": time.time(), "whole": True, "folders": []})
                 total = int(db_stats(UNLIM_DB_FILE, "unlim_files", "file_id").get("total") or 0)
                 self._event("unlim", "ok", f"Список получен: {_files(total)}")
             elif _db_has_rows(UNLIM_DB_FILE, "unlim_files"):
@@ -1416,6 +1572,8 @@ def _empty_db_stats() -> dict:
         "bytes_in_progress": 0, "bytes_failed": 0,
         "bytes_selected_total": 0,
         "done_10m": 0, "bytes_10m": 0,
+        # Когда последний раз собирали список (см. read_listing); None — не собирали
+        "listed_at": None,
         # Отложенные (сервер хранения молчит) — часть pending
         "deferred": 0, "bytes_deferred": 0, "deferred_hosts": 0,
         # Страховочные превью у ещё не скачанных оригиналов
@@ -1512,6 +1670,14 @@ def db_stats(db_file: Path, table: str = "files",
         ))
         out["recent"] = [{"path": r["path"], "status": r["status"],
                           "size": r["size"], "at": _utc_ts(r["downloaded_at"])} for r in recent]
+        meta = {"files": "meta", "unlim_files": "unlim_meta"}.get(table)
+        if meta:
+            try:
+                row = c.execute(f"SELECT value FROM {meta} WHERE key = ?", (LISTING_KEY,)).fetchone()
+                rec = _parse_listing(row[0]) if row else None
+                out["listed_at"] = rec["at"] if rec else None
+            except sqlite3.OperationalError:  # старая база без служебной таблицы
+                pass
         return out
     except sqlite3.Error as e:
         return {"error": str(e)}
@@ -2129,6 +2295,8 @@ def _source_block(name: str, db: dict, branch: dict | None, configured: bool, fo
         "tasks_running": int(live.get("tasks_running") or 0),
         "listing_found": live.get("listing_found"),
         "recent": recent,
+        # Когда собран список: на карточке «Список файлов собран в 14:05 · Обновить список»
+        "listed_at": db.get("listed_at"),
     }
 
 
@@ -2911,6 +3079,7 @@ def demo_rescue(kind: str, cfg: dict) -> dict:
                   bytes_selected_total=size, bytes_10m=speed, deferred_hosts=deferred // 40)
         st["recent"] = [{"path": n, "status": "downloaded", "size": (3 + i * 7) * 1024 ** 2,
                          "at": now - 4 - i * 37} for i, n in enumerate(names)] if done else []
+        st["listed_at"] = now - 1755 if total else None
         return st
 
     def alive(checked, done, listing=None, ago=2):
@@ -3273,6 +3442,28 @@ def api_start_stop():
 def api_rescue_retry_now():
     """«Попробовать сейчас»: не ждать раунда, повторить отложенные файлы немедленно."""
     return _resp(pipeline.retry_now())
+
+
+class RelistPayload(BaseModel):
+    source: str = Field(default="all", pattern="^(disk|unlim|all)$")
+
+
+@app.post("/api/rescue/relist")
+def api_rescue_relist(p: RelistPayload):
+    """«Обновить список» и «Проверить новые файлы» (all): собрать список заново, не дожидаясь
+    шести часов — когда на Диск только что добавили файлы.
+
+    Идёт спасение — пересобирает ветки этих источников; не идёт — запускает его по настройкам.
+    """
+    enabled = get_settings()["sources"]
+    sources = [s for s in ("disk", "unlim") if s in enabled] if p.source == "all" else [p.source]
+    if not sources or not set(sources) <= set(enabled):
+        return {"ok": False, "msg": "Этот источник выключен в «Настройках» → «Что скачивать»"}
+    results = [pipeline.relist(s) for s in sources]
+    if any(ok is None for ok, _ in results):
+        return api_rescue_start()
+    done = [msg for ok, msg in results if ok]
+    return {"ok": bool(done), "msg": done[0] if done else results[0][1]}
 
 
 class TokenPayload(BaseModel):

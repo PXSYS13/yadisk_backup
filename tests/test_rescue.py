@@ -2,6 +2,7 @@
 
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -72,6 +73,55 @@ def test_deferred_files_get_another_round_without_relisting(rescue, monkeypatch)
     assert disk.count(("disk", "download")) == 3
     assert sum(1 for s, _ in sc.steps() if s.startswith("unlim_w")) == 2 * rescue.workers
     assert any("Следующая попытка" in line for line in rescue.log)
+
+
+def test_lists_are_remembered_across_restarts(rescue, monkeypatch):
+    sc = Script(monkeypatch, rescue, {"disk": [0, 0], "unlim_collect": [0]})
+    rescue._run()
+    assert ("unlim_collect", "--collect") in sc.steps()
+    again = webui.Rescue()  # перезапуск программы: новый объект, те же базы
+    again.retry_every, again.workers = 0.05, 1
+    sc2 = Script(monkeypatch, again, {"disk": [0], "unlim_collect": [0]})
+    again._run()
+    assert again.state == "done"
+    assert sc2.steps("disk") == [("disk", "download")]
+    assert ("unlim_collect", "--collect") not in sc2.steps()
+    texts = [e["text"] for e in again.events]
+    assert any(t.startswith("Список фото и видео собран") for t in texts)
+    unlim = webui.db_stats(webui.UNLIM_DB_FILE, "unlim_files", "file_id")
+    assert unlim["listed_at"] == webui.read_listing("unlim")["at"]
+    block = webui._source_block("unlim", unlim, None, True, "", None, None)
+    assert block["listed_at"] == unlim["listed_at"]
+
+
+def test_rescue_waits_for_a_branch_restarted_by_relist(rescue, monkeypatch):
+    """Диск готов, Безлимит ждёт попытки; «Обновить список» запускает Диск снова — спасение ждёт и его."""
+    sc = Script(monkeypatch, rescue, {"disk": [0, 0], "unlim_collect": [0]}, worker_codes=[EXIT_DEFERRED, 0])
+    rescue.retry_every = 1.0
+    unlim = rescue.branches["unlim"]
+    wait = sc._wait
+    disk_steps = []
+
+    def slow_second_listing(slot, on_finish_msg=""):
+        if slot == "disk":
+            disk_steps.append(slot)
+            if len(disk_steps) == 3:  # новый сбор списка заканчивается позже Безлимита
+                deadline = time.time() + 5
+                while unlim.state != "done" and time.time() < deadline:
+                    time.sleep(0.01)
+        return wait(slot, on_finish_msg)
+
+    monkeypatch.setattr(rescue, "_wait_task", slow_second_listing)
+    rescue._thread = threading.Thread(target=rescue._run)
+    rescue._thread.start()
+    deadline = time.time() + 5
+    while not (rescue.branches["disk"].state == "done" and unlim.state == "waiting") and time.time() < deadline:
+        time.sleep(0.005)
+    assert rescue.relist("disk") == (True, "Обновляю список файлов")
+    rescue._thread.join(10)
+    assert not rescue._thread.is_alive() and not rescue.branches["disk"].alive()
+    assert sc.steps("disk").count(("disk", "scan")) == 2
+    assert rescue.state == "done"
 
 
 def test_events_tell_the_story_in_plain_words(rescue, monkeypatch):

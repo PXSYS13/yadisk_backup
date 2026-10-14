@@ -36,7 +36,7 @@
       case 'done':
         return `<button class="primary big" data-action="open-folder" data-which="download">${icon('folder')}Открыть папку</button>` +
           (failed ? `<button data-action="retry-failed" data-source="all">${icon('refresh')}Повторить для ${fmt.files(failed)}</button>` : '') +
-          `<button data-action="rescue-start">${icon('download')}Проверить новые файлы</button>`;
+          `<button data-action="relist" data-source="all">${icon('download')}Проверить новые файлы</button>`;
       case 'stopped':
         return `<button class="primary big" data-action="rescue-start">${icon('play')}Продолжить</button>`;
       default:
