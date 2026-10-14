@@ -48,10 +48,12 @@ from unlim_common import (
     DOWNLOAD_DIR,
     LOG_DIR,
     UNLIM_DB_FILE,
+    DEFERRED_MARKER,
     AuthExpiredError,
     YandexUnavailableError,
     connect_unlim_db,
-    ensure_attempts_column as common_ensure_attempts,
+    count_deferred,
+    ensure_unlim_schema,
     get_sk_uid,
     make_cid,
     make_session as common_make_session,
@@ -111,7 +113,9 @@ RATE_LIMIT_MAX_PAUSE_SEC = 600
 STORAGE_READ_TIMEOUT_SEC = 15
 DEAD_HOST_TTL_SEC = 1800
 # Пачка, где все файлы отложены из-за недоступных серверов, — пауза растёт до этой
-DEFERRED_MAX_PAUSE_SEC = 300
+DEFERRED_MAX_PAUSE_SEC = 30
+# Сбои скачивания самого файла, после которых файл откладывается, а не сжигает попытку
+_RETRY_FILE_KINDS = ("server_50x", "timeout", "connection")
 # Столько подряд проверок «нет места на диске» — выходим с кодом 4
 DISK_FULL_GIVE_UP = 10
 # Сколько подряд пустых выборок из очереди — и воркер завершает работу
@@ -140,8 +144,18 @@ def _tx():
 
 
 def ensure_attempts_column() -> None:
-    """Миграция для старых БД: колонка attempts могла отсутствовать."""
-    common_ensure_attempts(DB_FILE)
+    """Миграция для старых БД: колонки attempts и storage_host могли отсутствовать."""
+    ensure_unlim_schema(DB_FILE)
+
+
+def _columns(c) -> set[str]:
+    return {r[1] for r in c.execute("PRAGMA table_info(unlim_files)")}
+
+
+def _has_meta(c) -> bool:
+    return c.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='unlim_meta'"
+    ).fetchone() is not None
 
 
 def check_disk_space(target_dir: str, min_bytes: int = MIN_FREE_BYTES) -> tuple[bool, int]:
@@ -160,12 +174,20 @@ def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATC
     забирает ровно 1 файл, изолируя проблемные файлы в индивидуальные загрузки.
     """
     with _tx() as c:
-        cols = {r[1] for r in c.execute("PRAGMA table_info(unlim_files)")}
+        cols = _columns(c)
         has_attempts = "attempts" in cols
         has_assigned = "assigned_at" in cols
 
         att_col = "COALESCE(attempts, 0) AS attempts" if has_attempts else "0 AS attempts"
         md5_col = "md5" if "md5" in cols else "NULL AS md5"
+        # Файлы молчащих серверов хранения не берём: зря спросили бы ссылку у Яндекса
+        dead_filter = ""
+        if "storage_host" in cols and _has_meta(c):
+            dead_filter = (
+                " AND (storage_host IS NULL OR NOT EXISTS (SELECT 1 FROM unlim_meta m "
+                "WHERE m.key = 'dead_host:' || unlim_files.storage_host "
+                "AND CAST(m.value AS REAL) > CAST(strftime('%s', 'now') AS REAL)))"
+            )
         order_parts = []
         if has_attempts:
             order_parts.append("attempts ASC")
@@ -175,7 +197,7 @@ def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATC
 
         rows = list(c.execute(
             f"SELECT file_id, name, size, {md5_col}, {att_col} "
-            f"FROM unlim_files WHERE status='pending' "
+            f"FROM unlim_files WHERE status='pending'{dead_filter} "
             f"ORDER BY {', '.join(order_parts)} "
             f"LIMIT ?",
             (max(size * 2, 40),),
@@ -236,10 +258,33 @@ def mark_done(file_ids: list[str], paths: dict[str, str] | None = None) -> None:
         return
     paths = paths or {}
     with _tx() as c:
+        host_reset = ", storage_host=NULL" if "storage_host" in _columns(c) else ""
         c.executemany(
             "UPDATE unlim_files SET status='downloaded', local_path=COALESCE(?, local_path), "
-            "downloaded_at=CURRENT_TIMESTAMP, worker_id=NULL, error=NULL WHERE file_id=?",
+            f"downloaded_at=CURRENT_TIMESTAMP, worker_id=NULL, error=NULL{host_reset} WHERE file_id=?",
             [(paths.get(i), i) for i in file_ids],
+        )
+
+
+def mark_deferred(file_ids: list[str], host: str, error: str, worker_id: int | None = None) -> None:
+    """Файлы на молчащем сервере хранения: обратно в очередь без сжигания попытки.
+
+    Сервер записывается в storage_host — пока он в списке молчащих, take_batch эти
+    файлы не берёт. assigned_at обновляется, чтобы они вставали в конец очереди.
+    """
+    if not file_ids:
+        return
+    text = error if error.startswith(DEFERRED_MARKER) else DEFERRED_MARKER + error
+    clause, extra = _owner_clause(worker_id)
+    with _tx() as c:
+        has_host = "storage_host" in _columns(c)
+        host_set = ", storage_host=?" if has_host else ""
+        host_arg = (host or None,) if has_host else ()
+        c.executemany(
+            "UPDATE unlim_files SET status='pending', worker_id=NULL, error=?, "
+            f"assigned_at=CURRENT_TIMESTAMP{host_set} "
+            f"WHERE file_id=? AND status='in_progress'{clause}",
+            [(text[:500], *host_arg, i, *extra) for i in file_ids],
         )
 
 
@@ -1026,7 +1071,6 @@ class Worker:
             if not batch:
                 empty_polls += 1
                 if empty_polls >= EMPTY_POLLS_BEFORE_EXIT:
-                    self.say("нет работы, выход")
                     break
                 time.sleep(5)
                 continue
@@ -1036,6 +1080,13 @@ class Worker:
 
         self._cleanup()
         self.say(f"ИТОГ: {self.total_files} files / {self.total_bytes / 1e9:.2f} GB")
+        deferred = count_deferred(DB_FILE)
+        if deferred:
+            # Доступное скачано; остальное лежит на молчащих серверах — повторит Rescue
+            self.say(f"storage_down | Всё доступное скачано. Ждут, когда серверы хранения Яндекса "
+                     f"оживут: {deferred} файлов. Попытки не сожжены.")
+            return EXIT_DEFERRED
+        self.say("нет работы, выход")
         return 0
 
     def _process(self, batch: list[dict]) -> None:
@@ -1130,16 +1181,27 @@ class Worker:
             self._on_file_done(fid, expected)
             return "done"
 
-        url, err = get_file_url(self.session, self.sk, self.uid, fid)
-        if err is not None:
-            _release_to_pending(rest, self.id)
-            self._on_prepare_failed([item], err, f"batch {self.batch_idx}: ⚠️ Яндекс не выдал ссылку на файл {name}")
-            return "failed"
-
-        path, failure = download_file(self.session, url, dst, expected, self.id, on_progress=self._heartbeat,
-                                      expected_md5=item.get("md5"), host_is_dead=is_host_dead)
-        if failure is not None and failure.kind in ("storage_down", "storage_skip"):
-            _release_to_pending([fid], self.id)
+        for attempt in range(2):
+            url, err = get_file_url(self.session, self.sk, self.uid, fid)
+            if err is not None:
+                _release_to_pending(rest, self.id)
+                self._on_prepare_failed([item], err, f"batch {self.batch_idx}: ⚠️ Яндекс не выдал ссылку на файл {name}")
+                return "failed"
+            path, failure = download_file(self.session, url, dst, expected, self.id, on_progress=self._heartbeat,
+                                          expected_md5=item.get("md5"), host_is_dead=is_host_dead)
+            # Обрыв или 50x на самом файле — один быстрый повтор со свежей ссылкой
+            if failure is None or failure.kind not in _RETRY_FILE_KINDS or attempt:
+                break
+            time.sleep(2)
+        if failure is not None and failure.kind in _RETRY_FILE_KINDS:
+            # Яндекс стабильно не отдаёт файл («no more reliable hosts»): это не вина
+            # файла — откладываем до следующего раунда, а не сжигаем попытки
+            failure = FetchFailure("storage_down", f"Яндекс не отдал файл после повтора: {failure}", failure.host)
+            mark_deferred([fid], failure.host, str(failure), self.id)
+            self.say(f"batch {self.batch_idx}: ⏳ Файл {name} отложен: {failure}")
+            return "deferred"
+        if failure is not None and failure.is_storage:
+            mark_deferred([fid], failure.host, str(failure), self.id)
             if failure.kind == "storage_down":
                 mark_host_dead(failure.host)
                 self.say(f"storage_down | Сервер хранения Яндекса {failure.host} не отвечает (файл {name}). "
@@ -1163,7 +1225,7 @@ class Worker:
         """Вся пачка — файлы на недоступных серверах хранения. Скорее всего, доступные
         файлы кончились: ждём растущими паузами, через час без успеха выходим с кодом 3."""
         self._deferred_streak += 1
-        pause = min(DEFERRED_MAX_PAUSE_SEC, 30 * self._deferred_streak)
+        pause = min(DEFERRED_MAX_PAUSE_SEC, 5 * self._deferred_streak)
         without_success = time.monotonic() - self._last_success_at
         if without_success >= OUTAGE_GIVE_UP_SEC:
             self.say("storage_down | Выход: больше часа доступных файлов нет — оставшиеся лежат на серверах "

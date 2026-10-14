@@ -99,6 +99,32 @@ def test_silent_storage_defers_file_and_marks_host(tmp_path, net):
     assert not list(tmp_path.rglob("*.part"))
 
 
+class _Http500(_Http):
+    def get(self, url, stream=False, timeout=None, allow_redirects=True):
+        if url.split("/")[2] == ALIVE:
+            self.hits.append(ALIVE)
+            raise requests.exceptions.HTTPError("500", response=type("R", (), {"status_code": 500})())
+        return super().get(url, stream, timeout, allow_redirects)
+
+
+def test_persistent_500_defers_and_deferred_file_gets_one_try(tmp_path, monkeypatch):
+    downloader.DEAD_HOSTS.clear()
+    http = _Http500({})
+    monkeypatch.setattr(downloader, "_thread_http", lambda: http)
+    monkeypatch.setattr(downloader.time, "sleep", lambda s: None)
+    cli = _Client({"disk:/a.jpg": ALIVE})
+
+    res = downloader._download_one(downloader.DownloadJob("disk:/a.jpg", 5, None), cli, str(tmp_path))
+    assert res.status == "deferred"
+    assert http.hits.count(ALIVE) == downloader.FRESH_LINK_RETRIES + 1
+    assert not downloader.DEAD_HOSTS.is_dead(ALIVE)  # 500 на один файл — сервер не «мёртвый»
+
+    http.hits.clear()
+    job = downloader.DownloadJob("disk:/a.jpg", 5, None, error=res.error, storage_host=res.storage_host)
+    res = downloader._download_one(job, cli, str(tmp_path))
+    assert res.status == "deferred" and http.hits.count(ALIVE) == 1
+
+
 def test_regular_disk_keeps_html_and_empty_files(tmp_path, net):
     net.storage[ALIVE] = b""
     cli = _Client({"disk:/empty.txt": ALIVE})

@@ -1165,17 +1165,61 @@ def test_direct_defers_files_on_dead_storage_and_continues(db, quiet_worker, dir
     assert w._fail_streak == 0  # недоступный сервер — не отказ Яндекса в целом
 
 
-def test_direct_all_deferred_pauses_then_gives_up(db, quiet_worker, dirs, sleeps):
+def test_direct_all_deferred_pauses_then_exits_5(db, quiet_worker, dirs, sleeps):
+    uw.ensure_attempts_column()  # колонка storage_host
     uw.mark_host_dead("s8klg.storage.yandex.net")
     w = quiet_worker
     w.session = _StorageDirectSession({}, {"1": "s8klg.storage.yandex.net", "2": "s8klg.storage.yandex.net"})
     w._process(uw.take_batch(1, size=10))
-    assert sleeps[-1] == 30
+    assert sleeps[-1] == 5
     assert status_of(db, "1") == ("pending", 0)
 
-    w._last_success_at -= uw.OUTAGE_GIVE_UP_SEC + 1
+    # Файлы молчащего сервера в очереди есть, но take_batch их не отдаёт —
+    # воркер не крутится вхолостую, а сразу говорит «ждём Яндекса» (код 5)
+    assert uw.take_batch(1, size=10) == []
+    assert w.run() == uw.EXIT_DEFERRED
+    assert status_of(db, "2") == ("pending", 0)
+
+
+def test_all_deferred_for_an_hour_exits_5(db, quiet_worker, sleeps):
+    quiet_worker._last_success_at -= uw.OUTAGE_GIVE_UP_SEC + 1
     with pytest.raises(SystemExit) as e:
-        w._process(uw.take_batch(1, size=10))
+        quiet_worker._on_all_deferred(2)
     assert e.value.code == uw.EXIT_DEFERRED
+
+
+def test_deferred_file_remembers_host_and_returns_when_host_revives(db, quiet_worker):
+    uw.ensure_attempts_column()
+    (item,) = uw.take_batch(1, size=1)
+    uw.mark_deferred([item["file_id"]], "s9klg.storage.yandex.net", "сервер молчит", worker_id=1)
+    con = sqlite3.connect(db)
+    error, host = con.execute("SELECT error, storage_host FROM unlim_files WHERE file_id=?",
+                              (item["file_id"],)).fetchone()
+    con.close()
+    assert error.startswith("storage_down | ") and host == "s9klg.storage.yandex.net"
+    assert uw.count_deferred(db) == 1
+
+    uw.mark_host_dead("s9klg.storage.yandex.net")
+    assert all(b["file_id"] != item["file_id"] for b in uw.take_batch(1, size=10))
+    uw.mark_host_dead("s9klg.storage.yandex.net", ttl=-1)  # сервер «ожил»
+    assert any(b["file_id"] == item["file_id"] for b in uw.take_batch(1, size=10))
+
+
+def test_persistent_500_on_file_defers_instead_of_burning(db, quiet_worker, dirs):
+    import requests
+    w = quiet_worker
+    alive = "s5nrg.storage.yandex.net"
+
+    class Broken(_StorageDirectSession):
+        def get(self, url, stream=False, timeout=None, allow_redirects=True):
+            if url.split("/")[2] == alive:
+                self.hits.append(alive)
+                raise requests.exceptions.HTTPError("500", response=type("R", (), {"status_code": 500})())
+            return super().get(url, stream, timeout, allow_redirects)
+
+    w.session = Broken({}, {"1": alive, "2": alive})
+    w._process(uw.take_batch(1, size=10))
     assert status_of(db, "1") == ("pending", 0)
     assert status_of(db, "2") == ("pending", 0)
+    assert w.session.hits.count(alive) == 4  # по одному повтору на файл
+    assert w._fail_streak == 0  # не «отказ Яндекса в целом»

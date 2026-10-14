@@ -461,8 +461,11 @@ def _download_with_retry(client: yadisk.Client, remote: str, local: str,
     """
     size = job.size if job else None
     md5 = job.md5 if job else None
+    # Уже отложенный файл в новом раунде пробуем один раз: не ожил — ждёт следующего
+    was_deferred = bool(job and (job.error or "").startswith(DEFERRED_MARKER))
+    tries = 1 if was_deferred else FRESH_LINK_RETRIES + 1
     failure: FetchFailure | None = None
-    for attempt in range(FRESH_LINK_RETRIES + 1):
+    for attempt in range(tries):
         link = _download_link(client, remote)
         _written, _host, failure = fetch_to_file(
             _thread_http(), link, to_long_path(local),
@@ -477,13 +480,24 @@ def _download_with_retry(client: yadisk.Client, remote: str, local: str,
             raise StorageUnavailable(failure)
         if failure.is_local:
             break
+        if attempt + 1 >= tries:
+            break
         if failure.kind == "rate_limit":
             time.sleep(RATE_LIMIT_WAIT_SEC)
         elif failure.kind in ("server_50x", "timeout", "connection", "refused", "bad_file"):
             time.sleep(2 * (attempt + 1))
         else:
             break
+    if failure is not None and failure.kind in _DEFER_AFTER_RETRIES:
+        # Яндекс стабильно не отдаёт файл («no more reliable hosts», обрывы) — это не
+        # вина файла: откладываем до следующего раунда, а не пишем «ошибка»
+        raise StorageUnavailable(FetchFailure(
+            "storage_down", f"Яндекс не отдал файл после {tries} попыток: {failure}", failure.host))
     raise FetchError(failure)
+
+
+# Эти сбои после всех повторов откладывают файл, остальные — ошибка файла
+_DEFER_AFTER_RETRIES = ("server_50x", "timeout", "connection", "rate_limit")
 
 
 # Категория сбоя скачивания → префикс ошибки, который читает диагностика Web UI
