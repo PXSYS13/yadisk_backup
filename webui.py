@@ -1617,6 +1617,248 @@ def donate():
     return RedirectResponse(url="/?tab=donate", status_code=307)
 
 
+# ── Сводка «Режима спасения» для интерфейса ────────────────────────────────
+
+RESCUE_SCHEMA = 1
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def _files(n: int) -> str:
+    return f"{n:,}".replace(",", " ") + " " + _plural(n, "файл", "файла", "файлов")
+
+
+def _ru_bytes(n: float) -> str:
+    n = float(n or 0)
+    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+        if n < 1024 or unit == "ТБ":
+            return (f"{n:.0f} {unit}" if unit in ("Б", "КБ") else f"{n:.1f} {unit}").replace(".", ",")
+        n /= 1024
+    return f"{n:.1f} ТБ"
+
+
+# Действия, которых ждёт программа от человека (id → тексты; кнопку рисует интерфейс)
+_RESCUE_ACTIONS = {
+    "setup": ("Сохраните свои файлы с Яндекс.Диска на компьютер",
+              "Один раз дайте программе доступ к Диску и выберите папку — это 3–5 минут.",
+              "Начать настройку"),
+    "token": ("Яндекс перестал принимать ключ доступа к Диску",
+              "Получите новый ключ — это минута. Скачанное не пропадёт, Безлимит продолжает качаться.",
+              "Получить новый ключ"),
+    "cookies": ("Нужно обновить доступ к Безлимиту",
+                "Яндекс завершил вход, которым пользуется программа. Откройте disk.yandex.ru и "
+                "скопируйте данные входа заново, как при настройке.",
+                "Обновить доступ"),
+    "free_space": ("На диске закончилось место",
+                   "Освободите место или выберите папку на другом диске — продолжим с того же места.",
+                   "Я освободил место — продолжить"),
+    "send_logs": ("Что-то пошло не так",
+                  "Скачайте отчёт для поддержки и пришлите его в Telegram — в нём нет ключа и паролей.",
+                  "Скачать отчёт"),
+}
+
+# Спокойные пояснения: ничего делать не нужно
+_RESCUE_NOTICES = {
+    "storage_down": ("Часть файлов лежит на серверах Яндекса, которые сейчас не отвечают",
+                     "Они не потеряны: программа повторяет их сама. Не удаляйте эти файлы с Диска и "
+                     "не нажимайте в приложении Яндекса «Освободить место»."),
+    "rate_limit": ("Яндекс просит обращаться реже",
+                   "Программа делает паузы и продолжает сама. Ничего делать не нужно."),
+    "server_50x": ("Яндекс отвечает с перебоями",
+                   "Программа повторяет запросы сама. Ничего делать не нужно."),
+    "timeout": ("Яндекс отвечает медленно",
+                "Программа подождёт и повторит. Ничего делать не нужно."),
+    "bulk_disabled": ("Яндекс сейчас отказывает в скачивании части файлов",
+                      "Программа ждёт с паузами и продолжит сама."),
+}
+
+
+def _source_block(name: str, db: dict, branch: dict | None, configured: bool, folder: str,
+                  local: dict | None, window_sec: float | None) -> dict:
+    db = db or {}
+    total = int(db.get("total") or 0)
+    excluded = int(db.get("category_skipped") or 0)
+    deferred = int(db.get("deferred") or 0)
+    pending_all = int(db.get("pending") or 0)
+    files = {
+        "total": total,
+        "selected": max(0, total - excluded),
+        "done": int(db.get("downloaded") or 0) + max(0, int(db.get("skipped") or 0) - excluded),
+        "pending": max(0, pending_all - deferred),
+        "in_progress": int(db.get("in_progress") or 0),
+        "deferred": deferred,
+        "failed": int(db.get("failed") or 0),
+        "excluded": excluded,
+    }
+    bytes_ = {
+        "total": int(db.get("bytes_total") or 0),
+        "selected": int(db.get("bytes_selected_total") or 0),
+        "done": int(db.get("bytes_done") or 0),
+        "pending": max(0, int(db.get("bytes_pending") or 0) - int(db.get("bytes_deferred") or 0)),
+        "in_progress": int(db.get("bytes_in_progress") or 0),
+        "deferred": int(db.get("bytes_deferred") or 0),
+        "failed": int(db.get("bytes_failed") or 0),
+        "excluded": int(db.get("category_skipped_bytes") or 0),
+    }
+    speed = None
+    if window_sec and window_sec >= 30 and db.get("bytes_10m"):
+        speed = float(db["bytes_10m"]) / min(600.0, window_sec)
+    left = bytes_["pending"] + bytes_["in_progress"]
+    branch = branch or {}
+    state = branch.get("state") or ("idle" if configured else "off")
+    if state == "off" and configured:
+        state = "idle"
+    return {
+        "configured": configured,
+        "enabled": configured and branch.get("state") != "off",
+        "state": state,
+        "activity": branch.get("activity") or "",
+        "reason": branch.get("reason") or "",
+        "action": branch.get("action"),
+        "round": branch.get("round") or 0,
+        "next_retry_at": branch.get("next_retry_at"),
+        "last_exit": branch.get("last_exit"),
+        "files": files,
+        "bytes": bytes_,
+        "storage_hosts_down": int(db.get("deferred_hosts") or 0),
+        "speed_bps": speed,
+        "eta_sec": (left / speed) if speed and left else None,
+        "folder": {"path": folder, "size_bytes": int((local or {}).get("bytes") or 0)},
+    }
+
+
+def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: dict, cookies: dict,
+                        cfg: dict, diag: dict | None = None, free_space: dict | None = None,
+                        disk_local: dict | None = None, unlim_local: dict | None = None,
+                        now: float | None = None) -> dict:
+    """Всё, что нужно главному экрану, одним объектом: без разбора логов во фронтенде.
+
+    Чистая функция от уже собранных данных — её легко проверить тестом.
+    """
+    now = now or time.time()
+    branches = rescue_st.get("branches") or {}
+    running = bool(rescue_st.get("running"))
+    started = rescue_st.get("started_at")
+    window = (now - started) if (running and started) else None
+    download_dir = cfg.get("download_dir", "")
+    token_ok = bool(token.get("ok") or token.get("unreachable"))
+    sources = {
+        "disk": _source_block("disk", disk_db, branches.get("disk") if started else None, token_ok,
+                              download_dir, disk_local, window),
+        "unlim": _source_block("unlim", unlim_db, branches.get("unlim") if started else None,
+                               bool(cookies.get("ok")), os.path.join(download_dir, "_unlim") if download_dir else "",
+                               unlim_local, window),
+    }
+    active = [s for s in sources.values() if s["enabled"]]
+
+    # Состояние главного экрана
+    branch_states = {s["state"] for s in active}
+    if running:
+        if "needs_action" in branch_states or "error" in branch_states:
+            state = "needs_action"
+        elif branch_states and branch_states <= {"waiting", "done", "off"} and "waiting" in branch_states:
+            state = "waiting"
+        else:
+            state = "running"
+    elif not started:
+        state = "idle"
+    else:
+        state = {"done": "done", "failed": "needs_action", "stopped": "stopped"}.get(rescue_st.get("state"), "idle")
+
+    # Что нужно от человека
+    action_id, action_source = None, None
+    for name in ("disk", "unlim"):
+        a = sources[name].get("action")
+        if a and sources[name]["state"] in ("needs_action", "error"):
+            action_id, action_source = a, name
+            break
+    if action_id is None and state == "needs_action":
+        action_id, action_source = "send_logs", "all"
+    if not running and not (token_ok or cookies.get("ok")):
+        action_id, action_source = "setup", "all"
+    action = None
+    if action_id in _RESCUE_ACTIONS:
+        title, text, button = _RESCUE_ACTIONS[action_id]
+        if action_id == "free_space" and free_space:
+            text = f"Свободно {_ru_bytes(free_space.get('free', 0))}. {text}"
+        action = {"id": action_id, "source": action_source, "title": title, "text": text, "button": button}
+
+    # Спокойное пояснение
+    notice = None
+    if not action:
+        kind = "storage_down" if any(s["files"]["deferred"] for s in active) else (diag or {}).get("kind")
+        if kind in _RESCUE_NOTICES:
+            title, text = _RESCUE_NOTICES[kind]
+            notice = {"kind": kind, "title": title, "text": text}
+
+    totals = {k: sum(s["files"][k] for s in active) for k in
+              ("selected", "done", "pending", "in_progress", "deferred", "failed")}
+    done_bytes = sum(s["bytes"]["done"] for s in active)
+    next_retry = rescue_st.get("next_retry_at")
+    complete = bool(active) and not (totals["pending"] or totals["in_progress"]
+                                     or totals["deferred"] or totals["failed"])
+
+    if action and action_id == "setup":
+        headline, subline = action["title"], action["text"]
+    elif state == "idle":
+        what = [n for n, s in (("Диск", sources["disk"]), ("Безлимит", sources["unlim"])) if s["configured"]]
+        headline = "Всё готово к скачиванию"
+        subline = f"Скачаем {' и '.join(what) or 'ваши файлы'} в папку {download_dir}"
+    elif state == "running":
+        headline = "Скачиваем ваши файлы"
+        subline = (f"Готово {totals['done']:,} из {_files(totals['selected'])}".replace(",", " ")
+                   + ". Не закрывайте чёрное окно программы и не усыпляйте компьютер.")
+    elif state == "waiting":
+        headline = "Всё, что Яндекс отдаёт сейчас, уже скачано"
+        subline = (f"Ждут Яндекса: {_files(totals['deferred'])}. Следующая попытка в {_hhmm(next_retry)}. "
+                   "Оставьте программу открытой.")
+    elif state == "needs_action" and action:
+        headline, subline = action["title"], action["text"]
+    elif state == "done":
+        if complete:
+            headline = "Готово! Все ваши файлы сохранены"
+            subline = f"{_files(totals['done'])}, {_ru_bytes(done_bytes)} — в папке {download_dir}"
+        else:
+            headline = "Скачано почти всё"
+            subline = (f"Сохранено {_files(totals['done'])}. Не скачались: {_files(totals['failed'])}"
+                       + (f", ждут Яндекса: {_files(totals['deferred'])}" if totals["deferred"] else ""))
+    elif state == "stopped":
+        headline = "Скачивание на паузе"
+        subline = "Уже скачанное сохранено. «Продолжить» докачает остальное без повторов."
+    else:
+        headline, subline = "Скачиваем ваши файлы", ""
+
+    return {
+        "schema": RESCUE_SCHEMA,
+        "state": state,
+        "headline": headline,
+        "subline": subline,
+        "started_at": started,
+        "finished_at": None if running else rescue_st.get("finished_at"),
+        "next_retry_at": next_retry,
+        "can_retry_now": any(s["state"] == "waiting" for s in active),
+        "action": action,
+        "notice": notice,
+        "sources": sources,
+        "summary": {
+            "complete": complete,
+            "downloaded_files": totals["done"],
+            "downloaded_bytes": done_bytes,
+            "deferred_files": totals["deferred"],
+            "failed_files": totals["failed"],
+            "skipped_sources": [n for n, s in sources.items() if not s["configured"]],
+            "photo_unlim_bytes": int((token.get("account") or {}).get("photo_unlim") or 0),
+        },
+    }
+
+
 @app.get("/api/status")
 def api_status():
     cfg = get_config()
@@ -1630,6 +1872,11 @@ def api_status():
     cookies = check_cookies()
     disk_db = db_stats(DB_FILE, "files", "remote_path")
     unlim_db = db_stats(UNLIM_DB_FILE, "unlim_files", "file_id")
+    pipe_st = pipeline.status()
+    diag = diagnose_tasks()
+    free = _free_space(cfg["download_dir"])
+    disk_local = local_size(cfg["download_dir"])
+    unlim_local = local_size(os.path.join(cfg["download_dir"], "_unlim"))
     return {
         "app_version": APP_VERSION,
         "donation_url": DONATION_URL,
@@ -1642,17 +1889,19 @@ def api_status():
         "onboarding": onboarding_state(cfg, token, cookies, disk_db, unlim_db),
         "disk": {
             "db": disk_db,
-            "local": local_size(cfg["download_dir"]),
+            "local": disk_local,
         },
         "unlim": {
             "db": unlim_db,
-            "local": local_size(os.path.join(cfg["download_dir"], "_unlim")),
+            "local": unlim_local,
         },
         "tasks": tm.status(),
-        "pipeline": pipeline.status(),
-        "diagnostics": diagnose_tasks(),
+        "pipeline": pipe_st,
+        "rescue": build_rescue_status(pipe_st, disk_db, unlim_db, token, cookies, cfg, diag,
+                                      free, disk_local, unlim_local),
+        "diagnostics": diag,
         "yandex_health": health_monitor.snapshot() if health_monitor else None,
-        "free_space": _free_space(cfg["download_dir"]),
+        "free_space": free,
         "news": NEWS_LINKS,
         "exit_codes": {str(code): text for code, text in _EXIT_EXPLAIN.items()},
     }
