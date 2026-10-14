@@ -13,7 +13,7 @@
         <p class="sub">Программа бесплатная и открытая. Её делают в свободное время, чтобы люди не потеряли свои фото и файлы.
         Если она помогла — можно поддержать автора или просто рассказать о ней знакомым.</p>
         <div class="row actions">
-          <a class="btn primary big" id="support-donate" href="https://www.donationalerts.com/r/davronsvv" target="_blank" rel="noopener">${I('heart')}Поддержать на DonationAlerts</a>
+          <a class="btn primary big" id="support-donate" href="https://dalink.to/davronsvv" target="_blank" rel="noopener">${I('heart')}Поддержать на DonationAlerts</a>
           <a class="btn" id="support-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">${I('send')}Канал в Telegram</a>
           <a class="btn" href="https://github.com/PXSYS13/yadisk_backup" target="_blank" rel="noopener">${I('external')}Проект на GitHub</a>
         </div>

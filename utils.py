@@ -557,7 +557,7 @@ def ensure_utf8_stdio() -> None:
 TELEGRAM_CHANNEL = "https://t.me/davronsv"
 TELEGRAM_HANDLE = "@davronsv"
 YOUTUBE_VIDEO_URL = "https://www.youtube.com/watch?v=XAiJxqHkEUA"
-DONATION_URL = "https://www.donationalerts.com/r/davronsvv"
+DONATION_URL = "https://dalink.to/davronsvv"
 
 
 def classify_yandex_error(exc: BaseException | str | None) -> dict:

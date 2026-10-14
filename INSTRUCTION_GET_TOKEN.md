@@ -227,4 +227,4 @@ Cookies живут от нескольких дней до нескольких 
 - **Telegram-канал:** [t.me/davronsv](https://t.me/davronsv) — новости, статус серверов Яндекса, ответы на вопросы.
 - **Видео:** [разбор на YouTube](https://www.youtube.com/watch?v=XAiJxqHkEUA).
 - **Если просите помощи**, приложите отчёт: в программе вкладка «Помощь», кнопка **«Скачать отчёт для поддержки»**. В нём нет токена и cookies.
-- **Поддержать проект:** [donationalerts.com/r/davronsvv](https://www.donationalerts.com/r/davronsvv).
+- **Поддержать проект:** [dalink.to/davronsvv](https://dalink.to/davronsvv).

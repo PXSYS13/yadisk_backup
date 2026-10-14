@@ -187,7 +187,7 @@ def test_donate_redirect():
 
 
 def test_donation_url_constant():
-    assert webui.DONATION_URL == "https://www.donationalerts.com/r/davronsvv"
+    assert webui.DONATION_URL == "https://dalink.to/davronsvv"
 
 
 def test_api_status_does_not_leak_raw_token(monkeypatch):

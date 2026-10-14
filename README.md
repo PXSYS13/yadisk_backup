@@ -2,7 +2,7 @@
 
 > **Готовый инструмент для миграции с Яндекс.Диска.** Скачивает обычные файлы через официальный REST API и скрытый безлимит (Photoslice — фото с телефонов) через куки браузера. Дедупликация по MD5, сортировка по полочкам, веб-интерфейс. Запуск одним кликом — зависимости ставятся сами.
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue) ![uv](https://img.shields.io/badge/managed%20by-uv-DE5FE9?logo=uv&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688) [![Telegram](https://img.shields.io/badge/Telegram-Канал_проекта-2CA5E0?logo=telegram&logoColor=white)](https://t.me/davronsv) [![YouTube](https://img.shields.io/badge/YouTube-Видеоинструкция-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=XAiJxqHkEUA) ![License](https://img.shields.io/badge/license-MIT-green) [![DonationAlerts](https://img.shields.io/badge/DonationAlerts-Поддержать-ff375f?logo=heart&logoColor=white)](https://www.donationalerts.com/r/davronsvv)
+![Python](https://img.shields.io/badge/Python-3.10+-blue) ![uv](https://img.shields.io/badge/managed%20by-uv-DE5FE9?logo=uv&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688) [![Telegram](https://img.shields.io/badge/Telegram-Канал_проекта-2CA5E0?logo=telegram&logoColor=white)](https://t.me/davronsv) [![YouTube](https://img.shields.io/badge/YouTube-Видеоинструкция-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/watch?v=XAiJxqHkEUA) ![License](https://img.shields.io/badge/license-MIT-green) [![DonationAlerts](https://img.shields.io/badge/DonationAlerts-Поддержать-ff375f?logo=heart&logoColor=white)](https://dalink.to/davronsvv)
 
 **Ключевые сценарии:**
 скачать всё с Яндекс.Диска · скачать безлимит Яндекс.Фото · бэкап перед отменой подписки · миграция с Yandex Disk на Google Drive / OneDrive / локальный NAS · экспорт фото с телефона из Яндекс.Диска · download Yandex.Disk Photoslice · Yandex Disk full backup tool
@@ -314,9 +314,9 @@ uv run ruff check .  # линтер
 
 Проект развивается и поддерживается на чистом энтузиазме. Если инструмент помог спасти ваши фотографии, сэкономил гигабайты трафика или освободил время — вы можете поддержать автора любой комфортной суммой:
 
-[![DonationAlerts](https://img.shields.io/badge/DonationAlerts-Поддержать%20разработку-ff375f?style=for-the-badge&logo=heart&logoColor=white)](https://www.donationalerts.com/r/davronsvv)
+[![DonationAlerts](https://img.shields.io/badge/DonationAlerts-Поддержать%20разработку-ff375f?style=for-the-badge&logo=heart&logoColor=white)](https://dalink.to/davronsvv)
 
-👉 **Прямая ссылка:** [donationalerts.com/r/davronsvv](https://www.donationalerts.com/r/davronsvv)  
+👉 **Прямая ссылка:** [dalink.to/davronsvv](https://dalink.to/davronsvv)  
 Поддерживаются банковские карты (МИР, Visa, Mastercard), СБП и электронные кошельки.  
 В веб-интерфейсе также доступна интерактивная вкладка **«❤️ Поддержать»** (или по адресу `http://localhost:8000/donate`).
 
