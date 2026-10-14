@@ -33,10 +33,13 @@ from tenacity import (
 from tqdm import tqdm
 
 from state import DEFERRED_MARKER, State
-from storage_fetch import DeadHosts, FetchFailure, fetch_to_file
+from storage_fetch import DeadHosts, FetchFailure, fetch_preview, fetch_to_file
 from utils import (
     APP_VERSION,
     MAX_DISK_WORKERS,
+    categorize,
+    preview_path_for,
+    previews_enabled,
     TELEGRAM_CHANNEL,
     avoid_case_collision,
     classify_yandex_error,
@@ -398,6 +401,7 @@ class DownloadJob:
     local_path: str | None = None
     error: str | None = None          # последняя ошибка из БД (для отложенных — маркер)
     storage_host: str | None = None   # сервер хранения, на котором файл был отложен
+    preview_path: str | None = None   # уже сохранённое страховочное превью
 
 
 @dataclass
@@ -409,6 +413,7 @@ class DownloadResult:
     error: str | None
     duration_ms: int
     storage_host: str = ""
+    preview_path: str = ""  # превью, сохранённое для отложенного фото
 
 
 class StorageUnavailable(Exception):
@@ -437,6 +442,47 @@ def _ensure_local_dirs(local_path: str) -> None:
 def _download_link(client: yadisk.Client, remote: str) -> str:
     """Ссылка на скачивание с повторами API (429, 50x, таймауты)."""
     return client.get_download_link(remote)
+
+
+def _save_preview(client: yadisk.Client, job: DownloadJob, local_path: str, download_dir: str) -> str:
+    """Страховочное превью отложенного фото. Возвращает путь или "" — никогда не бросает.
+
+    Превью отдаёт отдельный сервис Яндекса, оно доступно и при молчащем сервере
+    оригинала. Ссылка на него требует токена, в отличие от ссылки на сам файл.
+    """
+    if not previews_enabled() or categorize(job.remote_path) != "photos":
+        return ""
+    dst = preview_path_for(download_dir, local_path)
+    if job.preview_path and os.path.exists(to_long_path(job.preview_path)):
+        return ""  # уже есть — базу не трогаем
+    try:
+        meta = client.get_meta(job.remote_path, preview_size="XXXL", preview_crop=False, fields=["preview"])
+        url = getattr(meta, "preview", None)
+        if not url:
+            return ""
+        failure = fetch_preview(_thread_preview_http(getattr(client, "token", "")), url, to_long_path(dst))
+    except Exception as e:  # noqa: BLE001 — превью — бонус, скачивание не должно падать из-за него
+        log.warning("превью %s: %s", job.remote_path, e)
+        return ""
+    if failure is not None:
+        log.warning("превью %s: %s", job.remote_path, failure)
+        return ""
+    log.info("PREVIEW | %s | %s", job.remote_path, dst)
+    return dst
+
+
+def _thread_preview_http(token: str) -> requests.Session:
+    """Сессия потока для превью: им, в отличие от ссылок на файлы, нужен токен."""
+    http = getattr(_thread_local, "preview_http", None)
+    if http is None:
+        http = requests.Session()
+        http.headers["User-Agent"] = f"yadisk-backup/{APP_VERSION}"
+        _thread_local.preview_http = http
+        with _all_clients_lock:
+            _all_clients.append(http)
+    if token:
+        http.headers["Authorization"] = f"OAuth {token}"
+    return http
 
 
 def _thread_http() -> requests.Session:
@@ -586,7 +632,9 @@ def _download_one(
     except StorageUnavailable as e:
         if part_path:
             remove_quiet(part_path)
-        return finish("deferred", error=str(e.failure), storage_host=e.failure.host)
+        res = finish("deferred", error=str(e.failure), storage_host=e.failure.host)
+        res.preview_path = _save_preview(client, job, local_path, download_dir)
+        return res
     except Exception as e:
         # Любая ошибка (сеть, Яндекс, локальный диск, makedirs) — это failed-результат,
         # а не исключение: один битый файл не должен ронять весь download_all.
@@ -638,6 +686,7 @@ def _jobs_from_state(state: State) -> Iterator[DownloadJob]:
             local_path=row["local_path"] if "local_path" in keys else None,
             error=row["error"] if "error" in keys else None,
             storage_host=row["storage_host"] if "storage_host" in keys else None,
+            preview_path=row["preview_path"] if "preview_path" in keys else None,
         )
 
 
@@ -858,9 +907,12 @@ def _apply_result(
     elif res.status == "deferred":
         already = (res.job.storage_host == res.storage_host
                    and (res.job.error or "").startswith(DEFERRED_MARKER))
-        if not already:  # тот же сервер уже записан — базу лишний раз не трогаем
-            state.mark_deferred(res.job.remote_path, res.storage_host, res.error or "")
+        if not already or res.preview_path:  # тот же сервер уже записан — базу лишний раз не трогаем
+            state.mark_deferred(res.job.remote_path, res.storage_host, res.error or "",
+                                preview_path=res.preview_path or None)
         counters["deferred"] += 1
+        if res.preview_path:
+            counters["previews"] = counters.get("previews", 0) + 1
         log.info("DEFER | %s | %s", res.storage_host or "?", res.job.remote_path)
     else:
         state.mark_failed(res.job.remote_path, res.error or "unknown")

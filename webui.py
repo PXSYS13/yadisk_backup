@@ -70,6 +70,7 @@ from utils import (
     ensure_utf8_stdio,
     is_safe_dir,
     is_safe_download_dir,
+    keep_awake,
     safe_int,
     sqlite_ro_uri,
     sqlite_tx,
@@ -855,6 +856,11 @@ class Rescue:
     # ── главный поток и ветки ──
 
     def _run(self) -> None:
+        # Поток живёт всё время спасения — на Windows флаг «не спать» привязан к нему
+        with keep_awake():
+            self._run_awake()
+
+    def _run_awake(self) -> None:
         try:
             cfg = get_config()
             tok: dict = {"ok": False}
@@ -1150,6 +1156,8 @@ def _empty_db_stats() -> dict:
         "done_10m": 0, "bytes_10m": 0,
         # Отложенные (сервер хранения молчит) — часть pending
         "deferred": 0, "bytes_deferred": 0, "deferred_hosts": 0,
+        # Страховочные превью у ещё не скачанных оригиналов
+        "previews": 0,
     }
 
 
@@ -1207,6 +1215,12 @@ def db_stats(db_file: Path, table: str = "files",
                 ).fetchone()[0]
             except sqlite3.OperationalError:  # старая БД без колонки storage_host
                 pass
+        try:
+            out["previews"] = c.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE preview_path IS NOT NULL AND status <> 'downloaded'"
+            ).fetchone()[0]
+        except sqlite3.OperationalError:  # старая БД без колонки preview_path
+            pass
         # Скорость за последние 10 минут — для оценки времени в мастере плана.
         # files пишет downloaded_at как 'YYYY-MM-DDTHH:MM:SS', unlim — 'YYYY-MM-DD HH:MM:SS' (оба UTC)
         rate = c.execute(
@@ -1696,6 +1710,7 @@ def _source_block(name: str, db: dict, branch: dict | None, configured: bool, fo
         "deferred": deferred,
         "failed": int(db.get("failed") or 0),
         "excluded": excluded,
+        "preview_only": int(db.get("previews") or 0),
     }
     bytes_ = {
         "total": int(db.get("bytes_total") or 0),
@@ -1799,7 +1814,7 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
             notice = {"kind": kind, "title": title, "text": text}
 
     totals = {k: sum(s["files"][k] for s in active) for k in
-              ("selected", "done", "pending", "in_progress", "deferred", "failed")}
+              ("selected", "done", "pending", "in_progress", "deferred", "failed", "preview_only")}
     done_bytes = sum(s["bytes"]["done"] for s in active)
     next_retry = rescue_st.get("next_retry_at")
     complete = bool(active) and not (totals["pending"] or totals["in_progress"]
@@ -1814,11 +1829,13 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
     elif state == "running":
         headline = "Скачиваем ваши файлы"
         subline = (f"Готово {totals['done']:,} из {_files(totals['selected'])}".replace(",", " ")
-                   + ". Не закрывайте чёрное окно программы и не усыпляйте компьютер.")
+                   + ". Не закрывайте чёрное окно программы — компьютер сам не уснёт, пока идёт скачивание.")
     elif state == "waiting":
         headline = "Всё, что Яндекс отдаёт сейчас, уже скачано"
-        subline = (f"Ждут Яндекса: {_files(totals['deferred'])}. Следующая попытка в {_hhmm(next_retry)}. "
-                   "Оставьте программу открытой.")
+        previews = (f" Для {_files(totals['preview_only'])} уже сохранены превью — уменьшенные копии."
+                    if totals["preview_only"] else "")
+        subline = (f"Ждут Яндекса: {_files(totals['deferred'])}. Следующая попытка в {_hhmm(next_retry)}."
+                   f"{previews} Оставьте программу открытой.")
     elif state == "needs_action" and action:
         headline, subline = action["title"], action["text"]
     elif state == "done":
@@ -1853,6 +1870,7 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
             "downloaded_bytes": done_bytes,
             "deferred_files": totals["deferred"],
             "failed_files": totals["failed"],
+            "preview_only_files": totals["preview_only"],
             "skipped_sources": [n for n, s in sources.items() if not s["configured"]],
             "photo_unlim_bytes": int((token.get("account") or {}).get("photo_unlim") or 0),
         },

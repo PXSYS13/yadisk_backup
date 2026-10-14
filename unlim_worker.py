@@ -40,7 +40,7 @@ from typing import NamedTuple
 
 import requests
 
-from storage_fetch import FetchFailure, fetch_to_file
+from storage_fetch import FetchFailure, fetch_preview, fetch_to_file
 
 from unlim_common import (
     BASE,
@@ -69,9 +69,12 @@ from utils import (
     EXIT_DISK_FULL,
     EXIT_OUTAGE,
     TELEGRAM_CHANNEL,
+    categorize,
     ensure_utf8_stdio,
     human_bytes,
     is_local_disk_error,
+    preview_path_for,
+    previews_enabled,
     remove_quiet,
     sanitize_component,
 )
@@ -180,6 +183,7 @@ def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATC
 
         att_col = "COALESCE(attempts, 0) AS attempts" if has_attempts else "0 AS attempts"
         md5_col = "md5" if "md5" in cols else "NULL AS md5"
+        md5_col += ", preview_path" if "preview_path" in cols else ", NULL AS preview_path"
         # Файлы молчащих серверов хранения не берём: зря спросили бы ссылку у Яндекса
         dead_filter = ""
         if "storage_host" in cols and _has_meta(c):
@@ -209,7 +213,7 @@ def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATC
             file_size = int(r["size"] or 0)
             attempts = int(r["attempts"] or 0)
             item = {"file_id": r["file_id"], "name": r["name"], "size": file_size,
-                    "md5": r["md5"], "attempts": attempts}
+                    "md5": r["md5"], "attempts": attempts, "preview_path": r["preview_path"]}
             # Если первый же файл тяжёлый или уже имел сбои — качаем соло (1 файл)
             if not items and (file_size >= LARGE_FILE_THRESHOLD or attempts > 0):
                 items.append(item)
@@ -286,6 +290,13 @@ def mark_deferred(file_ids: list[str], host: str, error: str, worker_id: int | N
             f"WHERE file_id=? AND status='in_progress'{clause}",
             [(text[:500], *host_arg, i, *extra) for i in file_ids],
         )
+
+
+def set_preview_path(file_id: str, path: str) -> None:
+    """Запоминает, что для файла сохранено страховочное превью."""
+    with _tx() as c:
+        if "preview_path" in _columns(c):
+            c.execute("UPDATE unlim_files SET preview_path=? WHERE file_id=?", (path, file_id))
 
 
 def mark_pending(file_ids: list[str], error: str, worker_id: int | None = None) -> None:
@@ -509,6 +520,28 @@ def _prepare_http_error(r, op: str = "prepare") -> PrepareError:
         err = PrepareError("prepare_failed", f"HTTP {code}: {r.text[:200]}{trace}", code)
     log.warning(f"{op} {err}")
     return err
+
+
+def get_preview_url(s, sk, uid, path: str) -> str | None:
+    """Свежая ссылка на самое большое превью файла (XXXL, до 1280 px) или None.
+
+    Ссылки в ответе подписаны и живут недолго, поэтому берём их прямо перед скачиванием.
+    """
+    body = {"sk": sk, "connection_id": make_cid(uid), "apiMethod": "mpfs/info",
+            "requestParams": {"path": path, "meta": "sizes"}}
+    try:
+        r = s.post(f"{BASE}/models-v2", params={"m": "mpfs/info"}, json=body, timeout=(30, 60))
+        if r.status_code != 200:
+            return None
+        data = r.json()
+    except Exception:  # noqa: BLE001 — превью необязательно
+        return None
+    sizes = ((data or {}).get("meta") or {}).get("sizes") if isinstance(data, dict) else None
+    by_name = {x.get("name"): x.get("url") for x in sizes or [] if isinstance(x, dict)}
+    url = by_name.get("XXXL") or by_name.get("XXL") or by_name.get("XL")
+    if not isinstance(url, str) or not url:
+        return None
+    return "https:" + url if url.startswith("//") else url
 
 
 def get_file_url(s, sk, uid, path: str) -> tuple[str | None, PrepareError | None]:
@@ -1024,6 +1057,7 @@ class Worker:
         self._last_success_at = time.monotonic()
         self._disk_full_streak = 0
         self._deferred_streak = 0  # пачки подряд, целиком отложенные (direct)
+        self.previews = 0  # сохранено страховочных превью за запуск
         self._last_heartbeat = 0.0
         self._current_ids: list[str] = []
 
@@ -1199,6 +1233,7 @@ class Worker:
             failure = FetchFailure("storage_down", f"Яндекс не отдал файл после повтора: {failure}", failure.host)
             mark_deferred([fid], failure.host, str(failure), self.id)
             self.say(f"batch {self.batch_idx}: ⏳ Файл {name} отложен: {failure}")
+            self._save_preview(item, name)
             return "deferred"
         if failure is not None and failure.is_storage:
             mark_deferred([fid], failure.host, str(failure), self.id)
@@ -1206,6 +1241,7 @@ class Worker:
                 mark_host_dead(failure.host)
                 self.say(f"storage_down | Сервер хранения Яндекса {failure.host} не отвечает (файл {name}). "
                          f"Его файлы откладываю на {DEAD_HOST_TTL_SEC // 60} мин, попытки не сжигаю.")
+            self._save_preview(item, name)
             return "deferred"
         if failure is not None:
             _release_to_pending(rest, self.id)
@@ -1220,6 +1256,30 @@ class Worker:
         mark_done([fid], {fid: path})
         self._on_file_done(fid, size)
         return "done"
+
+    def _save_preview(self, item: dict, name: str) -> None:
+        """Страховочное превью отложенного фото (до 1280 px) в <папка>/_превью/_unlim/.
+
+        Никогда не прерывает скачивание: превью — бонус, оригинал всё равно докачаем.
+        """
+        if not previews_enabled() or categorize(name) != "photos":
+            return
+        old = item.get("preview_path")
+        if old and os.path.exists(old):
+            return
+        fid = str(item["file_id"])
+        url = get_preview_url(self.session, self.sk, self.uid, fid)
+        if not url:
+            return
+        # Корень — папка над _unlim (так тесты, подменяя EXTRACT_DIR, не пишут в настоящую)
+        dst = preview_path_for(os.path.dirname(EXTRACT_DIR), os.path.join(EXTRACT_DIR, name))
+        failure = fetch_preview(self.session, url, dst)
+        if failure is not None:
+            log.warning("w%d превью %s: %s", self.id, name, failure)
+            return
+        set_preview_path(fid, dst)
+        self.previews += 1
+        log.info("w%d превью %s сохранено", self.id, name)
 
     def _on_all_deferred(self, deferred: int) -> None:
         """Вся пачка — файлы на недоступных серверах хранения. Скорее всего, доступные

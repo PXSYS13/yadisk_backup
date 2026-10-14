@@ -83,9 +83,11 @@ class State:
             conn = self._conn()
             conn.executescript(SCHEMA)
             cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
-            if "storage_host" not in cols:
+            for col in ("storage_host", "preview_path"):
+                if col in cols:
+                    continue
                 try:
-                    conn.execute("ALTER TABLE files ADD COLUMN storage_host TEXT")
+                    conn.execute(f"ALTER TABLE files ADD COLUMN {col} TEXT")
                 except sqlite3.OperationalError as e:  # колонку успел добавить другой процесс
                     if "duplicate column" not in str(e).lower():
                         raise
@@ -181,13 +183,18 @@ class State:
                 (error[:2000], remote_path),
             )
 
-    def mark_deferred(self, remote_path: str, host: str, error: str) -> None:
-        """Файл на молчащем сервере хранения: остаётся в очереди, попробуем в следующий раунд."""
+    def mark_deferred(self, remote_path: str, host: str, error: str,
+                      preview_path: str | None = None) -> None:
+        """Файл на молчащем сервере хранения: остаётся в очереди, попробуем в следующий раунд.
+
+        preview_path — куда сохранено страховочное превью (если сохранено).
+        """
         text = error if error.startswith(DEFERRED_MARKER) else DEFERRED_MARKER + error
         with self._tx() as conn:
             conn.execute(
-                "UPDATE files SET status = 'pending', error = ?, storage_host = ? WHERE remote_path = ?",
-                (text[:2000], host or None, remote_path),
+                "UPDATE files SET status = 'pending', error = ?, storage_host = ?, "
+                "preview_path = COALESCE(?, preview_path) WHERE remote_path = ?",
+                (text[:2000], host or None, preview_path or None, remote_path),
             )
 
     def reset_failed_to_pending(self) -> int:
@@ -200,7 +207,7 @@ class State:
     def get_pending(self) -> Iterable[sqlite3.Row]:
         """Возвращает курсор с pending-файлами. Читается лениво, без загрузки всего в RAM."""
         return self._conn().execute(
-            "SELECT remote_path, size, md5, local_path, error, storage_host "
+            "SELECT remote_path, size, md5, local_path, error, storage_host, preview_path "
             "FROM files WHERE status='pending' ORDER BY size ASC"
         )
 

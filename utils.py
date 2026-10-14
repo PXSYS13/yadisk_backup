@@ -8,6 +8,7 @@ import math
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -28,7 +29,7 @@ IS_WINDOWS = sys.platform.startswith("win")
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 
@@ -38,6 +39,61 @@ MAX_DISK_WORKERS = 5
 MAX_UNLIM_WORKERS = 6
 DEFAULT_UNLIM_BATCH = 25
 MAX_UNLIM_BATCH = 80
+
+# ── Страховочные превью ─────────────────────────────────────────────────────
+# Пока оригинал фото лежит на молчащем сервере Яндекса, сохраняем его превью
+# (JPEG до 1280 px) — чтобы у человека было хоть что-то уже сейчас.
+PREVIEW_DIRNAME = "_превью"
+
+
+def previews_enabled() -> bool:
+    """Превью включены, пока YADISK_PREVIEWS не выключен явно (0/false/no/off)."""
+    return os.environ.get("YADISK_PREVIEWS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def preview_path_for(download_dir: str, original_path: str) -> str:
+    """<папка>/_превью/<путь оригинала относительно папки>.jpg — рядом не перепутать с оригиналом."""
+    try:
+        rel = os.path.relpath(original_path, download_dir)
+    except ValueError:  # другой диск на Windows
+        rel = os.path.basename(original_path)
+    if rel.startswith(".."):
+        rel = os.path.basename(original_path)
+    return os.path.join(download_dir, PREVIEW_DIRNAME, rel + ".jpg")
+
+
+@contextmanager
+def keep_awake() -> Iterator[None]:
+    """Не даёт компьютеру уснуть, пока идёт скачивание (Windows и macOS).
+
+    На Windows флаг действует для вызывающего потока — звать из потока, который живёт
+    всё время скачивания. Экран при этом гаснуть может, засыпать система — нет.
+    """
+    caffeinate = None
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)  # CONTINUOUS | SYSTEM
+        except Exception:  # noqa: BLE001 — не получилось — просто качаем дальше
+            pass
+    elif sys.platform == "darwin":
+        try:
+            caffeinate = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:  # noqa: BLE001
+            caffeinate = None
+    try:
+        yield
+    finally:
+        if IS_WINDOWS:
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
+            except Exception:  # noqa: BLE001
+                pass
+        if caffeinate is not None:
+            caffeinate.terminate()
+
 
 # ── Коды выхода скриптов (их читают Rescue в webui.py и фронтенд) ──────────
 EXIT_OK = 0

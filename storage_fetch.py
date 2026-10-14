@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import threading
 import time
@@ -208,3 +209,26 @@ def fetch_to_file(
     if md5 is not None and md5.hexdigest() != expected_md5.lower():
         return written, host, FetchFailure("bad_file", f"MD5 не совпал с файлом на Диске{trace}", host)
     return written, host, None
+
+
+def fetch_preview(session, url: str, dst: str) -> FetchFailure | None:
+    """Скачивает превью (JPEG) в dst атомарно. None — успех.
+
+    Превью отдаёт отдельный сервис Яндекса: оно доступно и тогда, когда сервер
+    хранения оригинала молчит.
+    """
+    tmp = dst + ".part"
+    try:
+        os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+        _written, _host, failure = fetch_to_file(session, url, tmp, expected_size=None, reject_pages=True)
+        if failure is None:
+            os.replace(tmp, dst)
+        return failure
+    except OSError as e:
+        kind = "local_disk" if is_local_disk_error(e) else "connection"
+        return FetchFailure(kind, f"ошибка записи превью: {e}")
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass

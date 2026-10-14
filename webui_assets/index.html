@@ -3595,8 +3595,10 @@ async function _refreshInner(){
       if(pl.next_retry_at){
         const at = new Date(pl.next_retry_at * 1000).toLocaleTimeString('ru', {hour:'2-digit', minute:'2-digit'});
         const left = (s.disk.db.deferred || 0) + (s.unlim.db.deferred || 0);
+        const previews = (s.disk.db.previews || 0) + (s.unlim.db.previews || 0);
         document.getElementById('pipeline-retry-text').textContent =
-          (left ? `Ждут Яндекса: ${left.toLocaleString('ru')} файлов. ` : '') + `Следующая попытка в ${at}.`;
+          (left ? `Ждут Яндекса: ${left.toLocaleString('ru')} файлов. ` : '') + `Следующая попытка в ${at}.`
+          + (previews ? ` Для ${previews.toLocaleString('ru')} фото уже сохранены превью (папка «_превью»).` : '');
       }
     }
     if(s.exit_codes){

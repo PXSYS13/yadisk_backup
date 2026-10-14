@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS unlim_files (
     worker_id INTEGER,
     assigned_at TIMESTAMP,
     downloaded_at TIMESTAMP,
-    storage_host TEXT
+    storage_host TEXT,
+    preview_path TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_unlim_status ON unlim_files(status);
 CREATE TABLE IF NOT EXISTS unlim_clusters (
@@ -282,6 +283,8 @@ def ensure_unlim_schema(db_path: str | None = None) -> None:
             cols.add("attempts")
         if cols and "storage_host" not in cols:
             _add_column(c, "ALTER TABLE unlim_files ADD COLUMN storage_host TEXT")
+        if cols and "preview_path" not in cols:
+            _add_column(c, "ALTER TABLE unlim_files ADD COLUMN preview_path TEXT")
         if {"status", "attempts", "assigned_at"}.issubset(cols):
             c.execute("CREATE INDEX IF NOT EXISTS idx_unlim_pending ON unlim_files(status, attempts, assigned_at)")
         # Общие для всех воркеров значения: пауза по 429, молчащие серверы хранения

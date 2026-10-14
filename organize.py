@@ -38,6 +38,7 @@ from utils import (
     DIR_PHOTO,
     DIR_PROGRAM,
     DIR_VIDEO,
+    PREVIEW_DIRNAME,
     classify_dir,
     compute_md5,
     ensure_utf8_stdio,
@@ -46,7 +47,7 @@ from utils import (
 )
 
 SKIP_DIRS = {DIR_PHOTO, DIR_VIDEO, DIR_DOC, DIR_ARCHIVE, DIR_PROGRAM,
-             DIR_AUDIO, DIR_OTHER, DIR_DUP, ".sync", "_unlim_tmp_zips"}
+             DIR_AUDIO, DIR_OTHER, DIR_DUP, ".sync", "_unlim_tmp_zips", PREVIEW_DIRNAME}
 # Недокачанные файлы и БД состояния — не трогаем
 SKIP_SUFFIXES = (".part", ".db", ".db-wal", ".db-shm")
 
