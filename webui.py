@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
 import platform
 import re
@@ -62,6 +63,8 @@ from utils import (
     MAX_DISK_WORKERS,
     MAX_UNLIM_BATCH,
     MAX_UNLIM_WORKERS,
+    IS_WINDOWS,
+    PREVIEW_DIRNAME,
     TELEGRAM_CHANNEL,
     TELEGRAM_HANDLE,
     YOUTUBE_VIDEO_URL,
@@ -71,6 +74,7 @@ from utils import (
     is_safe_dir,
     is_safe_download_dir,
     keep_awake,
+    previews_enabled,
     safe_int,
     sqlite_ro_uri,
     sqlite_tx,
@@ -1531,12 +1535,19 @@ def diagnose_tasks() -> dict:
 # ── Endpoints: статус и конфиг ──────────────────────────────────────────────
 
 
+# Какой интерфейс открывать по «/»: new — версия 2.0, old — прежний (?ui=old)
+UI_DEFAULT = "new"
+
+
 @app.get("/", response_class=HTMLResponse)
-def index():
-    html_path = TEMPLATES_DIR / "index.html"
+def index(ui: str | None = None):
+    use_new = (ui or UI_DEFAULT) == "new" and (TEMPLATES_DIR / "app.html").exists()
+    html_path = TEMPLATES_DIR / ("app.html" if use_new else "index.html")
     if not html_path.exists():
         return HTMLResponse("<h1>UI не установлен</h1>")
-    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    html = html_path.read_text(encoding="utf-8")
+    # ?v=версия у статики — после обновления браузер не возьмёт старый JS из кэша
+    return HTMLResponse(html.replace("__APP_VERSION__", APP_VERSION))
 
 
 GUIDE_FILE = PROJECT / "INSTRUCTION_GET_TOKEN.md"
@@ -1722,10 +1733,15 @@ def _source_block(name: str, db: dict, branch: dict | None, configured: bool, fo
         "failed": int(db.get("bytes_failed") or 0),
         "excluded": int(db.get("category_skipped_bytes") or 0),
     }
+    # Скорость и «осталось» — только по честной выборке: первые минуты Диск качает
+    # крошечные файлы (очередь идёт от маленьких к большим), и прогноз был бы бредом
     speed = None
-    if window_sec and window_sec >= 30 and db.get("bytes_10m"):
+    if window_sec and window_sec >= 120 and (db.get("bytes_10m") or 0) >= 20 * 1024 * 1024:
         speed = float(db["bytes_10m"]) / min(600.0, window_sec)
     left = bytes_["pending"] + bytes_["in_progress"]
+    eta = (left / speed) if speed and left else None
+    if eta is not None and eta > 14 * 86400:
+        eta = None
     branch = branch or {}
     state = branch.get("state") or ("idle" if configured else "off")
     if state == "off" and configured:
@@ -1744,7 +1760,7 @@ def _source_block(name: str, db: dict, branch: dict | None, configured: bool, fo
         "bytes": bytes_,
         "storage_hosts_down": int(db.get("deferred_hosts") or 0),
         "speed_bps": speed,
-        "eta_sec": (left / speed) if speed and left else None,
+        "eta_sec": eta,
         "folder": {"path": folder, "size_bytes": int((local or {}).get("bytes") or 0)},
     }
 
@@ -1836,6 +1852,11 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
                     if totals["preview_only"] else "")
         subline = (f"Ждут Яндекса: {_files(totals['deferred'])}. Следующая попытка в {_hhmm(next_retry)}."
                    f"{previews} Оставьте программу открытой.")
+    elif state == "needs_action" and action and running:
+        # Действие — в баннере над карточкой; здесь — что продолжает качаться
+        headline = "Скачиваем ваши файлы"
+        subline = (f"Готово {totals['done']:,} из {_files(totals['selected'])}".replace(",", " ")
+                   + ". Чтобы скачать всё, нужно ваше действие — подробности выше.")
     elif state == "needs_action" and action:
         headline, subline = action["title"], action["text"]
     elif state == "done":
@@ -1855,6 +1876,7 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
     return {
         "schema": RESCUE_SCHEMA,
         "state": state,
+        "running": running,
         "headline": headline,
         "subline": subline,
         "started_at": started,
@@ -1878,7 +1900,7 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
 
 
 @app.get("/api/status")
-def api_status():
+def api_status(demo: str | None = None):
     cfg = get_config()
     safe_config = {
         "download_dir": cfg.get("download_dir", ""),
@@ -1886,13 +1908,18 @@ def api_status():
         "max_workers": cfg.get("max_workers", 4),
         "token_masked": mask_token(cfg.get("token", "")),
     }
-    token = check_token(cfg["token"])
+    token = token_snapshot(cfg["token"])
     cookies = check_cookies()
     disk_db = db_stats(DB_FILE, "files", "remote_path")
     unlim_db = db_stats(UNLIM_DB_FILE, "unlim_files", "file_id")
     pipe_st = pipeline.status()
-    diag = diagnose_tasks()
     free = _free_space(cfg["download_dir"])
+    demo_data = demo_rescue(demo, cfg) if demo in DEMO_STATES and os.environ.get("YADISK_DEMO") == "1" else None
+    if demo_data:
+        token, cookies = demo_data["token"], demo_data["cookies"]
+        disk_db, unlim_db = demo_data["disk_db"], demo_data["unlim_db"]
+        free = demo_data["free_space"]
+    diag = diagnose_tasks()
     disk_local = local_size(cfg["download_dir"])
     unlim_local = local_size(os.path.join(cfg["download_dir"], "_unlim"))
     return {
@@ -1915,14 +1942,329 @@ def api_status():
         },
         "tasks": tm.status(),
         "pipeline": pipe_st,
-        "rescue": build_rescue_status(pipe_st, disk_db, unlim_db, token, cookies, cfg, diag,
-                                      free, disk_local, unlim_local),
+        "rescue": demo_data["rescue"] if demo_data else build_rescue_status(
+            pipe_st, disk_db, unlim_db, token, cookies, cfg, diag, free, disk_local, unlim_local),
+        "settings": get_settings(),
+        "demo": demo if demo_data else None,
         "diagnostics": diag,
         "yandex_health": health_monitor.snapshot() if health_monitor else None,
         "free_space": free,
         "news": NEWS_LINKS,
         "exit_codes": {str(code): text for code, text in _EXIT_EXPLAIN.items()},
     }
+
+
+# ── Интерфейс 2.0: настройки, запуск, списки, папки, демо ──────────────────
+
+_SOURCES = ("disk", "unlim")
+# Почему файл не скачан — простыми словами (по префиксу ошибки «kind | …»)
+_REASON_TEXT = (
+    ("storage_down |", "Сервер Яндекса с этим файлом не отвечает — программа повторит сама"),
+    ("server_50x |", "Сбой серверов Яндекса"),
+    ("download_timeout |", "Яндекс отвечал слишком долго"),
+    ("timeout |", "Яндекс отвечал слишком долго"),
+    ("rate_limit |", "Яндекс просил обращаться реже"),
+    ("auth_expired |", "Доступ устарел — обновите ключ или доступ к Безлимиту"),
+    ("local_disk |", "Не удалось записать файл на ваш диск"),
+    ("bad_file |", "Файл пришёл повреждённым"),
+    ("http_error |", "Яндекс отказал в скачивании"),
+    ("refused |", "Яндекс отказал в скачивании"),
+    ("prepare_failed |", "Яндекс не выдал ссылку на файл"),
+    ("pathnotfound", "Файла больше нет на Диске"),
+)
+
+
+def reason_text(error: str | None) -> str:
+    low = (error or "").lower()
+    for prefix, text in _REASON_TEXT:
+        if low.startswith(prefix.lower()) or prefix.lower() in low[:40]:
+            return text
+    return "Другая ошибка — подробности в отчёте для поддержки" if low else ""
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = (os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+def get_settings() -> dict:
+    """Что и как качать — живёт в .env, чтобы пережить перезапуск программы."""
+    get_config()  # перечитать .env
+    raw_sources = (os.getenv("BACKUP_SOURCES", "") or "disk,unlim").split(",")
+    sources = [s for s in _SOURCES if s in {x.strip() for x in raw_sources}] or list(_SOURCES)
+    raw_cats = (os.getenv("BACKUP_CATEGORIES", "") or "").strip()
+    categories = [c for c in (x.strip() for x in raw_cats.split(",")) if c in CATEGORY_LABELS] or None
+    return {
+        "sources": sources,
+        "categories": categories,          # None — всё
+        "gentle": _env_flag("GENTLE_MODE", False),
+        "previews": previews_enabled(),
+        "category_labels": dict(CATEGORY_LABELS),
+    }
+
+
+class SettingsPayload(BaseModel):
+    sources: list[str] | None = None
+    categories: list[str] | None = None
+    all_categories: bool = False
+    gentle: bool | None = None
+    previews: bool | None = None
+
+
+@app.get("/api/settings")
+def api_get_settings():
+    return get_settings()
+
+
+@app.post("/api/settings")
+def api_set_settings(p: SettingsPayload):
+    changes_what = p.sources is not None or p.categories is not None or p.all_categories
+    if changes_what and pipeline.is_running():
+        raise HTTPException(409, "Сначала остановите скачивание — потом можно изменить, что качать")
+    updates: dict[str, str] = {}
+    if p.sources is not None:
+        sources = [s for s in _SOURCES if s in p.sources]
+        if not sources:
+            raise HTTPException(400, "Выберите хотя бы одно: Диск или Безлимит")
+        updates["BACKUP_SOURCES"] = ",".join(sources)
+    if p.all_categories:
+        updates["BACKUP_CATEGORIES"] = ""
+    elif p.categories is not None:
+        cats = [c for c in p.categories if c in CATEGORY_LABELS]
+        if not cats:
+            raise HTTPException(400, "Выберите хотя бы один тип файлов")
+        updates["BACKUP_CATEGORIES"] = "" if set(cats) == set(CATEGORY_LABELS) else ",".join(cats)
+    if p.gentle is not None:
+        updates["GENTLE_MODE"] = "1" if p.gentle else "0"
+    if p.previews is not None:
+        updates["YADISK_PREVIEWS"] = "1" if p.previews else "0"
+    _ensure_env_file()
+    for key, value in updates.items():
+        set_key(str(ENV_FILE), key, value, quote_mode="always")
+        os.environ[key] = value
+    log.info("настройки сохранены: %s", ", ".join(f"{k}={v}" for k, v in updates.items()) or "без изменений")
+    return {"ok": True, "settings": get_settings()}
+
+
+def _rescue_workers(settings: dict) -> tuple[int, int]:
+    """Бережный режим — вдвое меньше одновременных скачиваний."""
+    return (2, DEFAULT_UNLIM_BATCH) if settings.get("gentle") else (4, DEFAULT_UNLIM_BATCH)
+
+
+@app.post("/api/rescue/start")
+def api_rescue_start():
+    """Главная кнопка «Сохранить мои файлы»: всё по сохранённым настройкам."""
+    st = get_settings()
+    do_disk, do_unlim = "disk" in st["sources"], "unlim" in st["sources"]
+    if pipeline.is_running():
+        return _resp(pipeline.start())  # идёт — значит «попробовать отложенные сейчас»
+    src = preflight_sources(do_disk, do_unlim)
+    if src["error"]:
+        return {"ok": False, "msg": src["error"]}
+    workers, batch = _rescue_workers(st)
+    ok, msg = pipeline.start(workers=workers, batch=batch, do_disk=do_disk, do_unlim=do_unlim,
+                             disk_categories=st["categories"], unlim_categories=st["categories"])
+    return {"ok": ok, "msg": msg, "notes": src["notes"] if ok else []}
+
+
+class RetryFailedPayload(BaseModel):
+    source: str = "all"  # disk | unlim | all
+
+
+@app.post("/api/rescue/retry_failed")
+def api_rescue_retry_failed(p: RetryFailedPayload):
+    """«Повторить для N файлов»: упавшие — снова в очередь, и сразу качать."""
+    n = 0
+    if p.source in ("disk", "all") and DB_FILE.exists():
+        c = sqlite3.connect(DB_FILE, timeout=30)
+        try:
+            with sqlite_tx(c):
+                n += c.execute("UPDATE files SET status='pending', error=NULL WHERE status='failed'").rowcount
+        except sqlite3.Error as e:
+            return {"ok": False, "msg": f"База Диска занята: {e}"}
+        finally:
+            c.close()
+    if p.source in ("unlim", "all") and UNLIM_DB_FILE.exists():
+        n += reset_failed_files(str(UNLIM_DB_FILE))
+    if pipeline.is_running():
+        pipeline.retry_now()
+        return {"ok": True, "msg": f"Вернул в очередь {n} файлов — уже качаю", "count": n}
+    res = api_rescue_start()
+    res["count"] = n
+    if res.get("ok"):
+        res["msg"] = f"Вернул в очередь {n} файлов и запустил скачивание"
+    return res
+
+
+def _list_problem_files(db_file: Path, table: str, id_col: str, limit: int) -> dict:
+    """Нескачанные файлы: упавшие и отложенные, с причиной простыми словами."""
+    table = _validate_sql_ident(table, _ALLOWED_TABLES, "table")
+    id_col = _validate_sql_ident(id_col, _ALLOWED_COLUMNS, "column")
+    out: dict = {"items": [], "reasons": {}, "total": 0}
+    if not db_file.exists():
+        return out
+    c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
+    c.row_factory = sqlite3.Row
+    try:
+        cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+        preview_col = "preview_path" if "preview_path" in cols else "NULL AS preview_path"
+        where = ("status='failed' OR (status='pending' AND COALESCE(error, '') LIKE ?)")
+        for r in c.execute(f"SELECT error, COUNT(*) AS n FROM {table} WHERE {where} GROUP BY substr(error, 1, 20)",
+                           (DEFERRED_MARKER + "%",)):
+            text = reason_text(r["error"])
+            out["reasons"][text] = out["reasons"].get(text, 0) + r["n"]
+            out["total"] += r["n"]
+        for r in c.execute(
+            f"SELECT {id_col} AS path, size, status, error, {preview_col} FROM {table} WHERE {where} "
+            f"ORDER BY status DESC, {id_col} LIMIT ?",
+            (DEFERRED_MARKER + "%", limit),
+        ):
+            out["items"].append({
+                "path": r["path"], "name": os.path.basename(str(r["path"]).rstrip("/")),
+                "size": r["size"] or 0,
+                "state": "deferred" if r["status"] == "pending" else "failed",
+                "reason": reason_text(r["error"]),
+                "preview": bool(r["preview_path"]),
+            })
+    except sqlite3.Error as e:
+        out["error"] = str(e)
+    finally:
+        c.close()
+    return out
+
+
+@app.get("/api/{source}/failed")
+def api_problem_files(source: str, limit: int = 200):
+    limit = max(1, min(limit, 2000))
+    if source == "disk":
+        return _list_problem_files(DB_FILE, "files", "remote_path", limit)
+    if source == "unlim":
+        return _list_problem_files(UNLIM_DB_FILE, "unlim_files", "file_id", limit)
+    raise HTTPException(404, "Нет такого источника")
+
+
+class OpenFolderPayload(BaseModel):
+    which: str = "download"  # download | unlim | previews
+
+
+@app.post("/api/open_folder")
+def api_open_folder(p: OpenFolderPayload):
+    """Открывает папку скачивания в проводнике. Только настроенную — никаких чужих путей."""
+    base = Path(get_config()["download_dir"])
+    sub = {"download": "", "unlim": "_unlim", "previews": PREVIEW_DIRNAME}.get(p.which)
+    if sub is None:
+        raise HTTPException(400, "Неизвестная папка")
+    path = base / sub if sub else base
+    if not path.exists():
+        return {"ok": False, "msg": "Папки пока нет — в ней ещё ничего не скачано"}
+    try:
+        if IS_WINDOWS:
+            os.startfile(str(path))  # noqa: S606 — только папка из настроек
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": f"Не получилось открыть папку: {e}. Путь: {path}"}
+    return {"ok": True, "msg": "Открыл папку", "path": str(path)}
+
+
+# ── Демо-режим: пройти все состояния главного экрана без настоящего Яндекса ──
+
+DEMO_STATES = ("setup", "ready", "downloading", "waiting", "token", "cookies",
+               "disk_full", "done", "done_partial", "stopped")
+
+
+def demo_rescue(kind: str, cfg: dict) -> dict:
+    gb = 1024 ** 3
+
+    def db(total, done, pending=0, deferred=0, failed=0, previews=0, size=6 * gb, speed=0):
+        st = _empty_db_stats()
+        st.update(total=total, downloaded=done, pending=pending + deferred, deferred=deferred,
+                  failed=failed, previews=previews, bytes_total=size,
+                  bytes_done=int(size * done / max(total, 1)),
+                  bytes_pending=int(size * (pending + deferred) / max(total, 1)),
+                  bytes_deferred=int(size * deferred / max(total, 1)),
+                  bytes_selected_total=size, bytes_10m=speed, deferred_hosts=deferred // 40)
+        return st
+
+    now = time.time()
+    tok = {"ok": True, "login": "demo", "account": {"photo_unlim": 69 * gb}}
+    coo = {"ok": True}
+    st: dict = {"running": False, "started_at": None, "state": "idle", "next_retry_at": None,
+                "branches": {"disk": {"state": "off"}, "unlim": {"state": "off"}}}
+    disk, unlim = db(6015, 0, pending=6015), db(13602, 0, pending=13602, size=69 * gb)
+    free = {"free": 120 * gb}
+
+    def run(d, u, state="running", running=True, next_retry=None):
+        return {"running": running, "started_at": now - 1800, "finished_at": None if running else now,
+                "state": state, "next_retry_at": next_retry, "branches": {"disk": d, "unlim": u}}
+
+    if kind == "setup":
+        tok, coo = {"ok": False}, {"ok": False}
+    elif kind == "downloading":
+        st = run({"state": "downloading", "activity": "скачиваю файлы"},
+                 {"state": "downloading", "activity": "скачиваю файлы"})
+        disk = db(6015, 2100, pending=3500, deferred=415, speed=420 * 1024 ** 2)
+        unlim = db(13602, 1900, pending=10900, deferred=802, previews=650, size=69 * gb, speed=380 * 1024 ** 2)
+    elif kind == "waiting":
+        st = run({"state": "waiting", "next_retry_at": now + 1500}, {"state": "waiting", "next_retry_at": now + 1500},
+                 next_retry=now + 1500)
+        disk = db(6015, 1203, deferred=4812, previews=4100)
+        unlim = db(13602, 2721, deferred=10881, previews=9500, size=69 * gb)
+    elif kind == "token":
+        st = run({"state": "needs_action", "action": "token"}, {"state": "downloading", "activity": "скачиваю файлы"})
+        disk, unlim = db(6015, 800, pending=5215), db(13602, 3000, pending=10602, size=69 * gb)
+    elif kind == "cookies":
+        st = run({"state": "downloading", "activity": "скачиваю файлы"}, {"state": "needs_action", "action": "cookies"})
+        disk, unlim = db(6015, 2500, pending=3515), db(13602, 400, pending=13202, size=69 * gb)
+    elif kind == "disk_full":
+        st = run({"state": "needs_action", "action": "free_space"}, {"state": "needs_action", "action": "free_space"},
+                 state="failed", running=False)
+        free = {"free": 120 * 1024 ** 2}
+        disk, unlim = db(6015, 3000, pending=3015), db(13602, 5000, pending=8602, size=69 * gb)
+    elif kind == "done":
+        st = run({"state": "done"}, {"state": "done"}, state="done", running=False)
+        disk, unlim = db(6015, 6015), db(13602, 13602, size=69 * gb)
+    elif kind == "done_partial":
+        st = run({"state": "done"}, {"state": "done"}, state="done", running=False)
+        disk, unlim = db(6015, 5995, failed=20), db(13602, 13590, failed=12, size=69 * gb)
+    elif kind == "stopped":
+        st = run({"state": "stopped"}, {"state": "stopped"}, state="stopped", running=False)
+        disk, unlim = db(6015, 1500, pending=4515), db(13602, 2000, pending=11602, size=69 * gb)
+    rescue_st = build_rescue_status(st, disk, unlim, tok, coo, cfg, {"kind": None}, free,
+                                    {"bytes": 31 * gb}, {"bytes": 12 * gb})
+    return {"rescue": rescue_st, "token": tok, "cookies": coo, "disk_db": disk, "unlim_db": unlim,
+            "free_space": dict(free, total=2048 * gb, path=cfg.get("download_dir", ""))}
+
+
+# ── Проверка токена без блокировки /api/status ─────────────────────────────
+
+_token_refreshing = threading.Event()
+
+
+def token_snapshot(token: str) -> dict:
+    """Последняя проверка токена сразу, свежая — в фоне.
+
+    /api/status опрашивается раз в 1,5 с: ждать ответа Яндекса там нельзя — во время
+    сбоев проверка висит минутами, и весь интерфейс замирает.
+    """
+    cached = _token_check_cache
+    if cached["token"] == token and cached["data"] is not None:
+        if time.time() - cached["at"] >= _TOKEN_TTL and not _token_refreshing.is_set():
+            _token_refreshing.set()
+
+            def refresh():
+                try:
+                    check_token(token)
+                finally:
+                    _token_refreshing.clear()
+
+            threading.Thread(target=refresh, daemon=True).start()
+        return cached["data"]
+    return check_token(token)  # первый раз — синхронно
 
 
 # ── Логи: просмотр и архив для поддержки ────────────────────────────────────
@@ -2515,7 +2857,9 @@ def organize(payload: OrganizePayload):
         return {"ok": False, "msg": msg}
     if payload.action not in ("report-only", "move"):
         return {"ok": False, "msg": "Неизвестное действие"}
-    if payload.action == "move" and (tm.any_alive(SLOT_DISK) or tm.any_alive(UNLIM_SLOT_PREFIX)):
+    # И во время ожидания раунда: следующий раунд скачал бы разложенные файлы заново
+    if payload.action == "move" and (pipeline.is_running() or tm.any_alive(SLOT_DISK)
+                                     or tm.any_alive(UNLIM_SLOT_PREFIX)):
         return {"ok": False, "msg": "Сначала остановите скачивание: сортировка во время загрузки перепутает файлы"}
     return _resp(tm.start(SLOT_ORGANIZE, "organize.py",
                           ["--input", payload.input,
@@ -2538,6 +2882,9 @@ def clear_task_log(slot: str):
     return {"ok": True, "cleared": tm.clear_logs(slot)}
 
 
+# Windows берёт MIME из реестра, и там .js бывает text/plain — браузер такой скрипт не выполнит
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
 if (TEMPLATES_DIR / "static").exists():
     app.mount("/static",
               StaticFiles(directory=str(TEMPLATES_DIR / "static")),

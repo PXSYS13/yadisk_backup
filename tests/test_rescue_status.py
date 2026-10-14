@@ -51,6 +51,12 @@ def test_files_math_separates_deferred_from_available():
     assert r["sources"]["disk"]["bytes"]["pending"] == 200
 
 
+def test_no_speed_or_eta_from_a_tiny_sample():
+    disk = db(total=100, pending=60, downloaded=40, bytes_10m=900, bytes_pending=50 * 10**9)
+    r = build(rescue_st(running=True, started=100.0, disk={"state": "downloading"}), disk_db=disk, now=100.0 + 600)
+    assert r["sources"]["disk"]["speed_bps"] is None and r["sources"]["disk"]["eta_sec"] is None
+
+
 def test_running_shows_progress_and_speed():
     disk = db(total=100, pending=60, downloaded=40, bytes_10m=600 * 10**6, bytes_pending=6 * 10**9)
     r = build(rescue_st(running=True, started=100.0, disk={"state": "downloading", "activity": "скачиваю файлы"}),

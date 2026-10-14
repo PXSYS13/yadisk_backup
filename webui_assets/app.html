@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Бэкап Яндекс.Диска</title>
+<link rel="stylesheet" href="/static/app.css?v=__APP_VERSION__">
+<script defer src="/static/js/core.js?v=__APP_VERSION__"></script>
+<script defer src="/static/js/components.js?v=__APP_VERSION__"></script>
+<script defer src="/static/js/screens/home.js?v=__APP_VERSION__"></script>
+<script defer src="/static/js/screens/setup.js?v=__APP_VERSION__"></script>
+<script defer src="/static/js/screens/settings.js?v=__APP_VERSION__"></script>
+<script defer src="/static/js/screens/details.js?v=__APP_VERSION__"></script>
+<script defer src="/static/js/screens/sort.js?v=__APP_VERSION__"></script>
+<script defer src="/static/js/screens/help.js?v=__APP_VERSION__"></script>
+<script defer src="/static/js/screens/support.js?v=__APP_VERSION__"></script>
+<script defer src="/static/js/main.js?v=__APP_VERSION__"></script>
+</head>
+<body>
+<div class="container">
+  <header class="topbar">
+    <a class="brand" href="#/home" aria-label="На главную">
+      <span class="brand-logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></span>
+      <span>
+        <span class="brand-name">Бэкап Яндекс.Диска</span>
+        <span class="brand-sub" id="brand-version">версия __APP_VERSION__</span>
+      </span>
+    </a>
+    <div class="chips" id="chips"></div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <a href="#/home" data-route="home">Главная</a>
+    <a href="#/settings" data-route="settings">Настройки</a>
+    <a href="#/sort" data-route="sort">Сортировка</a>
+    <a href="#/help" data-route="help">Помощь</a>
+    <a href="#/support" data-route="support">Поддержать</a>
+  </nav>
+
+  <main>
+    <section id="screen-home" class="screen hidden"></section>
+    <section id="screen-setup" class="screen hidden"></section>
+    <section id="screen-settings" class="screen hidden"></section>
+    <section id="screen-details" class="screen hidden"></section>
+    <section id="screen-sort" class="screen hidden"></section>
+    <section id="screen-help" class="screen hidden"></section>
+    <section id="screen-support" class="screen hidden"></section>
+  </main>
+
+  <footer>
+    <span id="footer-text">Бэкап Яндекс.Диска</span> ·
+    <a href="/guide" target="_blank" rel="noopener">Инструкция</a> ·
+    <a id="footer-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">Telegram</a> ·
+    <a href="/?ui=old">Прежний интерфейс</a>
+  </footer>
+</div>
+<div id="dialog-root"></div>
+<div id="toast" class="hidden" role="status" aria-live="polite"></div>
+<noscript>Для работы программы нужен JavaScript.</noscript>
+</body>
+</html>

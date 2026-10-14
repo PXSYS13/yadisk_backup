@@ -29,7 +29,7 @@ IS_WINDOWS = sys.platform.startswith("win")
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "2.0.0"
 
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 

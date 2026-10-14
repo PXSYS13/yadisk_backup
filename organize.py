@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -307,9 +308,17 @@ def main():
         if cat_n[cat]:
             print(f"    {cat:<12} {cat_n[cat]:>6} файлов ({human_bytes(cat_b[cat])})")
     print(f"\n  Скан: {time.time() - t0:.0f} сек")
+    # Итог одной строкой для Web UI («Посмотреть, что получится»)
+    shelves = {cat: {"count": cat_n[cat], "bytes": cat_b[cat]}
+               for cat in [DIR_PHOTO, DIR_VIDEO, DIR_AUDIO, DIR_DOC, DIR_ARCHIVE, DIR_PROGRAM, DIR_OTHER]
+               if cat_n[cat]}
+    print("organize_summary | " + json.dumps({
+        "action": args.action, "root": root, "total": len(files), "total_bytes": total_b,
+        "duplicates": len(dups), "duplicates_bytes": dup_b, "shelves": shelves,
+    }, ensure_ascii=False), flush=True)
 
     if args.action == "report-only":
-        print("\n[INFO] Отчёт. Запусти --action move чтобы реально сделать.")
+        print("\n[INFO] Это только отчёт: файлы не перемещались.")
         return 0
 
     print(f"\nПеремещаю {len(plan)}...")
@@ -351,6 +360,7 @@ def main():
     print(f"  Перемещено: {moved}")
     print(f"  Ошибок:     {err}")
     print(f"  Удалено пустых папок: {cleaned}")
+    print("organize_result | " + json.dumps({"moved": moved, "errors": err, "cleaned": cleaned}), flush=True)
     return 0
 
 
