@@ -508,6 +508,12 @@ def test_disk_clear_waits_for_task_stop(tmp_path, monkeypatch):
         def stop(self):
             calls.append("stop")
 
+        def terminate(self):
+            calls.append("stop")
+
+        def wait_or_kill(self, timeout=5.0):
+            pass
+
         def join(self, timeout=2.0):
             calls.append("join")
 
@@ -558,6 +564,12 @@ def test_task_manager_prefix_helpers(monkeypatch):
 
         def stop(self):
             self.stopped = True
+
+        def terminate(self):
+            self.stopped = True
+
+        def wait_or_kill(self, timeout=5.0):
+            pass
 
     w1, w2, collect = AliveTask(), AliveTask(), AliveTask()
     monkeypatch.setitem(webui.tm._tasks, "unlim_w1", w1)
@@ -616,8 +628,10 @@ def test_organize_move_refused_while_downloading(tmp_path, monkeypatch):
 
 
 class _LogOnlyTask:
-    def __init__(self, lines):
+    def __init__(self, lines, finished_ago=0.0):
+        import time
         self.log = list(lines)
+        self.finished_at = time.time() - finished_ago
 
     def alive(self):
         return False

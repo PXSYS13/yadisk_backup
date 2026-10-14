@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field
 
 from downloader import account_info, api_error_details, make_client
 from unlim_common import (
+    DEFERRED_MARKER,
     RELEASE_IN_PROGRESS_SQL,
     missing_required_cookies,
     reset_failed_files,
@@ -199,6 +200,24 @@ async def csrf_guard(request, call_next):
 # ── Менеджер фоновых процессов ──────────────────────────────────────────────
 
 
+# Диагностика смотрит только задачи, которые идут или закончились за последние 10 минут
+DIAG_RECENT_SEC = 600
+
+
+def task_kind(cmd: list[str]) -> str:
+    """Что делает задача — по её команде (слот disk делят scan и download)."""
+    script = os.path.basename(cmd[0]) if cmd else ""
+    first = cmd[1] if len(cmd) > 1 else ""
+    if script == "main.py":
+        return "disk_scan" if first == "scan" else "disk_download" if first in (
+            "download", "retry-failed") else f"disk_{first or 'other'}"
+    return {
+        "unlim_download.py": "unlim_collect",
+        "unlim_worker.py": "unlim_worker",
+        "organize.py": "organize",
+    }.get(script, script.removesuffix(".py") or "other")
+
+
 class Task:
     """Один фоновый процесс + поток, читающий его stdout в кольцевой буфер и в файл.
 
@@ -212,7 +231,9 @@ class Task:
         self.proc = proc
         self.cmd = list(cmd or [])
         self.log_file = log_file
+        self.kind = task_kind(self.cmd)
         self.started_at = time.time()
+        self.finished_at: float | None = None
         self.was_stopped = False
         self.log: deque[str] = deque(maxlen=300)
         self.thread = threading.Thread(target=self._read, daemon=True)
@@ -254,6 +275,7 @@ class Task:
                 self.proc.wait(timeout=10)
             except Exception:
                 pass
+            self.finished_at = time.time()
             if f is not None:
                 try:
                     f.write(f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} конец: exit={self.proc.poll()}"
@@ -265,14 +287,21 @@ class Task:
     def alive(self) -> bool:
         return self.proc.poll() is None
 
-    def stop(self):
+    def terminate(self) -> None:
+        """Просит процесс завершиться и не ждёт — можно звать под блокировкой."""
         self.was_stopped = True
         if self.alive():
             self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+
+    def wait_or_kill(self, timeout: float = 5.0) -> None:
+        try:
+            self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
+    def stop(self):
+        self.terminate()
+        self.wait_or_kill()
 
     def join(self, timeout: float = 2.0) -> None:
         """Дожидается выхода процесса и reader-потока (вызывать после stop)."""
@@ -297,6 +326,8 @@ class Task:
             "elapsed": time.time() - self.started_at,
             "exit_code": self.proc.poll(),
             "was_stopped": self.was_stopped,
+            "kind": self.kind,
+            "finished_at": self.finished_at,
             "log_tail": list(self.log)[-80:],
             "log_file": self.log_file.name if self.log_file else None,
         }
@@ -346,19 +377,27 @@ class TaskManager:
             t = self._tasks.get(slot)
             if not t or not t.alive():
                 return False, f"Нет активной задачи {slot}"
-            t.stop()
-            log.info("задача %s остановлена пользователем", slot)
-            return True, f"Остановлено: {slot}"
+            t.terminate()
+        # Ждём уже без блокировки: иначе /api/status замирает, пока процесс выходит
+        t.wait_or_kill()
+        log.info("задача %s остановлена пользователем", slot)
+        return True, f"Остановлено: {slot}"
 
     def stop_matching(self, prefix: str) -> list[Task]:
-        """Останавливает все живые задачи, чей слот начинается с prefix. Возвращает их."""
+        """Останавливает все живые задачи, чей слот начинается с prefix. Возвращает их.
+
+        Сначала всем шлём terminate, потом ждём каждую — вне блокировки: шесть
+        воркеров раньше держали /api/status до 30 секунд.
+        """
         stopped: list[Task] = []
         with self._lock:
             for slot, t in self._tasks.items():
                 if slot.startswith(prefix) and t.alive():
-                    t.stop()
+                    t.terminate()
                     stopped.append(t)
                     log.info("задача %s остановлена (по префиксу %r)", slot, prefix)
+        for t in stopped:
+            t.wait_or_kill()
         return stopped
 
     def stop_all(self) -> int:
@@ -372,11 +411,17 @@ class TaskManager:
         with self._lock:
             return {slot: t.snapshot() for slot, t in self._tasks.items()}
 
-    def recent_log_lines(self, per_task: int = 40) -> list[str]:
+    def recent_log_lines(self, per_task: int = 40, recent_sec: float = DIAG_RECENT_SEC) -> list[str]:
+        """Хвосты логов живых задач и задач, закончившихся не раньше recent_sec назад.
+
+        Старые задачи не учитываем: исправленная проблема не должна висеть баннером.
+        """
+        now = time.time()
         with self._lock:
             lines: list[str] = []
             for t in self._tasks.values():
-                lines.extend(list(t.log)[-per_task:])
+                if t.alive() or (t.finished_at is not None and now - t.finished_at <= recent_sec):
+                    lines.extend(list(t.log)[-per_task:])
             return lines
 
     def clear_logs(self, pattern: str) -> int:
@@ -811,6 +856,8 @@ def _empty_db_stats() -> dict:
         "bytes_in_progress": 0, "bytes_failed": 0,
         "bytes_selected_total": 0,
         "done_10m": 0, "bytes_10m": 0,
+        # Отложенные (сервер хранения молчит) — часть pending
+        "deferred": 0, "bytes_deferred": 0, "deferred_hosts": 0,
     }
 
 
@@ -827,9 +874,10 @@ def db_stats(db_file: Path, table: str = "files",
         c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
         c.row_factory = sqlite3.Row
         for r in c.execute(
-            f"SELECT status, error, COUNT(*) AS n, COALESCE(SUM(size),0) AS b "
-            f"FROM {table} GROUP BY status, (COALESCE(error,'') = ?)",
-            (CATEGORY_SKIP_MARKER,),
+            f"SELECT status, error, (COALESCE(error, '') LIKE ?) AS deferred, "
+            f"COUNT(*) AS n, COALESCE(SUM(size),0) AS b "
+            f"FROM {table} GROUP BY status, (COALESCE(error,'') = ?), (COALESCE(error, '') LIKE ?)",
+            (DEFERRED_MARKER + "%", CATEGORY_SKIP_MARKER, DEFERRED_MARKER + "%"),
         ):
             st = r["status"]
             err = r["error"] or ""
@@ -840,6 +888,9 @@ def db_stats(db_file: Path, table: str = "files",
             out["bytes_total"] += b
             if st == "pending":
                 out["bytes_pending"] += b
+                if r["deferred"]:
+                    out["deferred"] += n
+                    out["bytes_deferred"] += b
             elif st == "in_progress":
                 out["bytes_in_progress"] += b
             elif st == "failed":
@@ -855,6 +906,15 @@ def db_stats(db_file: Path, table: str = "files",
                     out["bytes_done"] += b
 
         out["bytes_selected_total"] = max(0, out["bytes_total"] - out["category_skipped_bytes"])
+        if out["deferred"]:
+            try:
+                out["deferred_hosts"] = c.execute(
+                    f"SELECT COUNT(DISTINCT storage_host) FROM {table} "
+                    f"WHERE status='pending' AND error LIKE ? AND storage_host IS NOT NULL",
+                    (DEFERRED_MARKER + "%",),
+                ).fetchone()[0]
+            except sqlite3.OperationalError:  # старая БД без колонки storage_host
+                pass
         # Скорость за последние 10 минут — для оценки времени в мастере плана.
         # files пишет downloaded_at как 'YYYY-MM-DDTHH:MM:SS', unlim — 'YYYY-MM-DD HH:MM:SS' (оба UTC)
         rate = c.execute(
@@ -1053,6 +1113,9 @@ _DIAG_RULES: list[dict] = [
     {
         "kind": "bulk_disabled",
         "markers": ("bulk_unavailable", "not_zip |", "refused |"),
+        # Один отказ на один файл — не повод кричать «Яндекс отказывает»
+        "min_lines": 3,
+        "strong_markers": ("bulk_unavailable",),
         "title": "Яндекс отказывает в скачивании безлимита",
         "message": "Воркер безлимита раз за разом получает от Яндекса отказ вместо файлов.",
         "explain": "С 11 октября 2026 после атак на дата-центры Яндекс отключил массовое скачивание "
@@ -1141,8 +1204,15 @@ def diagnose_tasks() -> dict:
         "kind": None, "title": None, "message": None, "explain": None,
         "recommendation": None, "affects": [], "counts": counts, "links": NEWS_LINKS,
     })
+    def fired(rule: dict) -> bool:
+        n = counts[rule["kind"]]
+        if n >= rule.get("min_lines", 1):
+            return True
+        strong = rule.get("strong_markers", ())
+        return bool(n) and any(m in ln for ln in lines for m in strong)
+
     for rule in _DIAG_RULES:
-        if counts[rule["kind"]]:
+        if fired(rule):
             diag["kind"] = rule["kind"]
             for key in ("title", "message", "explain", "recommendation", "affects"):
                 diag[key] = rule[key]
@@ -1292,6 +1362,7 @@ def api_status():
         "yandex_health": health_monitor.snapshot() if health_monitor else None,
         "free_space": _free_space(cfg["download_dir"]),
         "news": NEWS_LINKS,
+        "exit_codes": {str(code): text for code, text in _EXIT_EXPLAIN.items()},
     }
 
 
