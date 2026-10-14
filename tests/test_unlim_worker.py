@@ -1176,6 +1176,6 @@ def test_direct_all_deferred_pauses_then_gives_up(db, quiet_worker, dirs, sleeps
     w._last_success_at -= uw.OUTAGE_GIVE_UP_SEC + 1
     with pytest.raises(SystemExit) as e:
         w._process(uw.take_batch(1, size=10))
-    assert e.value.code == uw.EXIT_OUTAGE
+    assert e.value.code == uw.EXIT_DEFERRED
     assert status_of(db, "1") == ("pending", 0)
     assert status_of(db, "2") == ("pending", 0)

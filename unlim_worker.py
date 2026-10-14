@@ -49,6 +49,7 @@ from unlim_common import (
     LOG_DIR,
     UNLIM_DB_FILE,
     AuthExpiredError,
+    YandexUnavailableError,
     connect_unlim_db,
     ensure_attempts_column as common_ensure_attempts,
     get_sk_uid,
@@ -61,6 +62,10 @@ from unlim_common import (
 from utils import (
     APP_VERSION,
     DEFAULT_UNLIM_BATCH,
+    EXIT_AUTH,
+    EXIT_DEFERRED,
+    EXIT_DISK_FULL,
+    EXIT_OUTAGE,
     TELEGRAM_CHANNEL,
     ensure_utf8_stdio,
     human_bytes,
@@ -116,9 +121,6 @@ EMPTY_POLLS_BEFORE_EXIT = 3
 HEARTBEAT_EVERY_SEC = 60
 STUCK_TIMEOUT_SEC = 900
 
-EXIT_AUTH = 2
-EXIT_OUTAGE = 3
-EXIT_DISK_FULL = 4
 
 log = logging.getLogger("unlim_worker")
 
@@ -993,6 +995,9 @@ class Worker:
             self.say(f"auth_expired | КРИТИЧЕСКАЯ ОШИБКА: {e}")
             self.say("Куки устарели. Обновите cookies.json в Web UI или браузере.")
             sys.exit(EXIT_AUTH)
+        except YandexUnavailableError as e:
+            self.say(f"server_50x | Яндекс не отвечает, вход проверить не удалось: {e}. Повторю позже.")
+            sys.exit(EXIT_OUTAGE)
         self.say(f"авторизован uid={self.uid}")
 
     def _refresh_auth(self) -> bool:
@@ -1163,8 +1168,8 @@ class Worker:
         if without_success >= OUTAGE_GIVE_UP_SEC:
             self.say("storage_down | Выход: больше часа доступных файлов нет — оставшиеся лежат на серверах "
                      "хранения Яндекса, которые не отвечают (пострадавшие дата-центры). Попытки не сожжены: "
-                     f"запустите скачивание позже. Новости: {TELEGRAM_CHANNEL}")
-            self._exit(EXIT_OUTAGE)
+                     f"программа повторит их позже. Новости: {TELEGRAM_CHANNEL}")
+            self._exit(EXIT_DEFERRED)
         self.say(f"batch {self.batch_idx}: все {deferred} файлов пачки на серверах хранения, которые не отвечают. "
                  f"Пауза {pause} с (без успеха {int(without_success // 60)} мин)")
         time.sleep(pause)
@@ -1183,16 +1188,15 @@ class Worker:
     def _on_prepare_failed(self, batch: list[dict], err: PrepareError, headline: str = "") -> None:
         """Яндекс не собрал архив (zip) или не выдал ссылку на файл (direct)."""
         self.say(headline or f"batch {self.batch_idx}: ⚠️ Сбой подготовки архива Яндексом ({len(batch)} файлов)")
-        print(f"             Причина: {err}")
-        print(f"             (Статус серверов Яндекса: {TELEGRAM_CHANNEL})")
 
         if err.is_auth:
             # 401/403 бывает и при живых куках — когда Яндекс отключил функцию
-            # (так было с массовым скачиванием). Проверяем сессию отдельно.
+            # (так было с массовым скачиванием). Проверяем сессию отдельно и только
+            # потом печатаем причину: строку «auth_expired |» Web UI показывает как
+            # «доступ устарел», и при живых куках она людей обманывает.
             if self._refresh_auth():
                 err = PrepareError("refused", f"Яндекс отклонил запрос (HTTP {err.status}), "
                                               f"хотя сессия жива: скачивание ограничено на стороне Яндекса", err.status)
-                self.say(f"             Уточнение: {err}")
             else:
                 _release_to_pending([it["file_id"] for it in batch], self.id)
                 self.say("auth_expired | КРИТИЧЕСКАЯ ОШИБКА: Авторизация отклонена Яндексом (401/403).")
@@ -1200,6 +1204,8 @@ class Worker:
                 self._exit(EXIT_AUTH)
         else:
             self._refresh_auth()
+        print(f"             Причина: {err}")
+        print(f"             (Статус серверов Яндекса: {TELEGRAM_CHANNEL})")
 
         self._on_batch_failed(batch, str(err), err.is_server_issue, err.retry_delay, err.kind)
 

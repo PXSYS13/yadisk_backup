@@ -718,8 +718,18 @@ def _apply_result(
 
 def check_token(token: str) -> tuple[bool, str]:
     """Проверяет, валиден ли токен. Возвращает (ok, message)."""
+    state, msg = token_state(token)
+    return state == "ok", msg
+
+
+def token_state(token: str) -> tuple[str, str]:
+    """Состояние токена: ('ok' | 'invalid' | 'unreachable', сообщение).
+
+    unreachable — Яндекс не ответил на проверку (сеть, 50x, таймаут). Это не повод
+    просить у человека новый токен: во время сбоев Яндекса старый токен жив.
+    """
     if not token or token.strip() == "" or token.startswith("AQAAA_paste"):
-        return False, (
+        return "invalid", (
             "Токен не задан. Открой https://yandex.ru/dev/disk/poligon/, "
             "получи OAuth-токен по кнопке справа вверху и положи его в .env "
             "как YA_DISK_TOKEN=..."
@@ -728,20 +738,23 @@ def check_token(token: str) -> tuple[bool, str]:
     try:
         cli = make_client(token)
         if not cli.check_token():
-            return False, (
+            return "invalid", (
                 "Токен невалиден (Яндекс ответил, что он не работает). "
                 "Получи новый на https://yandex.ru/dev/disk/poligon/"
             )
         acc = account_info(cli)
         log.info("Токен OK. %s", describe_account(acc))
-        return True, f"Токен OK. {describe_account(acc)}."
-    except yadisk.exceptions.UnauthorizedError as e:
-        return False, (
-            "Токен не принят (401 Unauthorized). Получи новый на "
+        return "ok", f"Токен OK. {describe_account(acc)}."
+    except (yadisk.exceptions.UnauthorizedError, yadisk.exceptions.ForbiddenError) as e:
+        return "invalid", (
+            f"Токен не принят ({type(e).__name__}). Получи новый на "
             f"https://yandex.ru/dev/disk/poligon/{api_error_details(e)}"
         )
     except Exception as e:
-        return False, f"Не удалось проверить токен: {type(e).__name__}: {e}{api_error_details(e)}"
+        return "unreachable", (
+            f"server_50x | Яндекс не ответил на проверку токена: {type(e).__name__}: {e}"
+            f"{api_error_details(e)}. Токен, скорее всего, в порядке — повторите позже."
+        )
     finally:
         if cli is not None:
             try:

@@ -26,15 +26,19 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from downloader import (
-    check_token,
     download_all,
     make_client,
     scan_media,
     scan_tree,
+    token_state,
 )
 from state import State
 from utils import (
     APP_VERSION,
+    EXIT_AUTH,
+    EXIT_OK,
+    EXIT_OUTAGE,
+    EXIT_PARTIAL,
     MAX_DISK_WORKERS,
     TELEGRAM_CHANNEL,
     YOUTUBE_VIDEO_URL,
@@ -118,12 +122,17 @@ def load_config(require_token: bool = True) -> dict:
 # ── общие шаги команд ───────────────────────────────────────────────────────
 
 
+def _token_exit_code(state: str) -> int:
+    """Недействительный токен — код 2 (нужен новый), недоступный Яндекс — код 3 (повторить позже)."""
+    return EXIT_OK if state == "ok" else EXIT_AUTH if state == "invalid" else EXIT_OUTAGE
+
+
 def _require_token(cfg: dict) -> int | None:
     """Проверяет токен и печатает результат. Возвращает код выхода при ошибке, иначе None."""
-    ok, msg = check_token(cfg["token"])
-    if not ok:
+    state, msg = token_state(cfg["token"])
+    if state != "ok":
         print(msg, file=sys.stderr)
-        return 2
+        return _token_exit_code(state)
     print(msg)
     return None
 
@@ -149,7 +158,7 @@ def _run_download(cfg: dict, state: State, workers: int) -> int:
         logging.shutdown()
         os._exit(130)
     _print_summary(counters, time.time() - t0)
-    return 0 if counters["failed"] == 0 else 1
+    return EXIT_OK if counters["failed"] == 0 else EXIT_PARTIAL
 
 
 class _ScanProgress:
@@ -194,9 +203,9 @@ def _print_summary(counters: dict, elapsed: float) -> None:
 
 
 def cmd_check(cfg: dict, args: argparse.Namespace) -> int:
-    ok, msg = check_token(cfg["token"])
+    state, msg = token_state(cfg["token"])
     print(msg)
-    return 0 if ok else 2
+    return _token_exit_code(state)
 
 
 def cmd_scan(cfg: dict, args: argparse.Namespace) -> int:

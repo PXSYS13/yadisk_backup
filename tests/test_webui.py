@@ -718,7 +718,7 @@ def test_pipeline_fails_when_workers_exit_with_auth_error(monkeypatch):
     monkeypatch.setattr(pipe, "_wait_task", lambda slot, on_finish_msg="": 0)
     pipe._run()
     assert pipe.state == "failed"
-    assert any("куки" in line for line in pipe.log)
+    assert any("доступ" in line and "устарел" in line for line in pipe.log)
 
 
 def test_pipeline_unlim_only_skips_token_check(monkeypatch):

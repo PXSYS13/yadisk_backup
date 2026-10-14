@@ -74,6 +74,10 @@ class AuthExpiredError(UnlimError):
     """Срок действия сессии или кук истёк (401/403/passport redirect)."""
 
 
+class YandexUnavailableError(UnlimError):
+    """Яндекс не ответил или ответил ошибкой сервера — куки при этом могут быть живы."""
+
+
 class CookiesFormatError(SystemExit, UnlimError):
     """Неверный формат или отсутствие файла cookies.json."""
 
@@ -134,10 +138,20 @@ def make_session(cookies: dict[str, str] | None = None,
 
 
 def get_sk_uid(s: requests.Session) -> tuple[str, str]:
-    """Извлекает sk и uid из HTML-страницы диска."""
-    r = s.get(f"{BASE}/client/disk", timeout=30)
-    if "passport.yandex" in r.url or r.status_code != 200:
+    """Извлекает sk и uid из HTML-страницы диска.
+
+    AuthExpiredError — только когда Яндекс явно не пускает (редирект на вход, 401/403).
+    Сеть, 50x и 429 дают YandexUnavailableError: во время сбоев Яндекса куки живы,
+    и просить человека обновить их — значит гонять его по кругу.
+    """
+    try:
+        r = s.get(f"{BASE}/client/disk", timeout=30)
+    except requests.exceptions.RequestException as e:
+        raise YandexUnavailableError(f"Яндекс не ответил ({type(e).__name__})") from e
+    if "passport.yandex" in r.url or r.status_code in (401, 403):
         raise AuthExpiredError("Куки невалидны — нужно обновить cookies.json")
+    if r.status_code != 200:
+        raise YandexUnavailableError(f"Яндекс ответил HTTP {r.status_code} — сбой на его стороне")
     sk = re.search(r'"sk"\s*:\s*"([^"]+)"', r.text)
     uid = re.search(r'"uid"\s*:\s*"?(\d+)"?', r.text)
     if not sk or not uid:

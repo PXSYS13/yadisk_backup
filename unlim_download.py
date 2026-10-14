@@ -30,6 +30,7 @@ from unlim_common import (
     UNLIM_DB_FILE as DB_FILE,
     UNLIM_SCHEMA as SCHEMA,
     AuthExpiredError,
+    YandexUnavailableError,
     api_call,
     ensure_attempts_column,
     get_sk_uid,
@@ -37,7 +38,7 @@ from unlim_common import (
     make_session,
     reset_failed_files,
 )
-from utils import ensure_utf8_stdio, human_bytes, sqlite_tx
+from utils import EXIT_AUTH, EXIT_OUTAGE, ensure_utf8_stdio, human_bytes, sqlite_tx
 
 LOG_FILE = os.path.join(LOG_DIR, "unlim.log")
 # Сколько кластеров (дней) запрашиваем одним вызовом API
@@ -273,6 +274,17 @@ def collect_via_photoslice(s, sk, uid) -> int | None:
     return None
 
 
+def _session_alive(s) -> bool:
+    """True, если Яндекс по-прежнему пускает по этим кукам (сбой связи — не повод их менять)."""
+    try:
+        get_sk_uid(s)
+        return True
+    except AuthExpiredError:
+        return False
+    except Exception:
+        return True
+
+
 def cmd_collect():
     db_init()
     s = make_session(load_cookies())
@@ -280,27 +292,46 @@ def cmd_collect():
         try:
             sk, uid = get_sk_uid(s)
         except AuthExpiredError as e:
-            print(f"❌ Ошибка авторизации: {e}")
+            print(f"❌ auth_expired | Ошибка авторизации: {e}")
             print("   Обновите cookies.json в Web UI или браузере.")
-            return 2
+            return EXIT_AUTH
+        except YandexUnavailableError as e:
+            print(f"❌ server_50x | Яндекс не отвечает: {e}. Список соберу при следующей попытке.")
+            return EXIT_OUTAGE
         print(f"  ✓ uid={uid}, sk OK")
 
+        list_error = None
         try:
             listed = collect_via_list(s, sk, uid)
         except AuthExpiredError as e:
-            print(f"\n❌ auth_expired | Ошибка авторизации: {e}")
-            print("   Обновите cookies.json в Web UI или браузере и запустите сбор заново.")
-            return 2
-        except Exception as e:
-            log.error(f"mpfs/list: {e}")
-            print(f"  ⚠️ Список через mpfs/list не получен ({e}) — пробую фотосрез")
+            # 401/403 на внутренний метод бывает и при живых куках — перепроверяем вход
+            if not _session_alive(s):
+                print(f"\n❌ auth_expired | Ошибка авторизации: {e}")
+                print("   Обновите cookies.json в Web UI или браузере и запустите сбор заново.")
+                return EXIT_AUTH
+            list_error = f"Яндекс отклонил запрос списка ({e}), хотя вход действует"
             listed = 0
+        except Exception as e:
+            list_error = str(e)
+            listed = 0
+        if list_error:
+            log.error(f"mpfs/list: {list_error}")
+            print(f"  ⚠️ Список через mpfs/list не получен ({list_error}) — пробую фотосрез")
         if not listed:
-            code = collect_via_photoslice(s, sk, uid)
+            try:
+                code = collect_via_photoslice(s, sk, uid)
+            except Exception as e:  # noqa: BLE001 — запасной путь не должен ронять сбор
+                log.error(f"photoslice: {e}")
+                list_error = list_error or str(e)
+                code = None
             if code:
                 return code
 
         stats = status_counts()
+        if not stats and list_error:
+            print(f"❌ server_50x | Яндекс не отдал список файлов безлимита: {list_error}. "
+                  f"Повторю позже — уже собранное не теряется.")
+            return EXIT_OUTAGE
         print(f"\n  ✓ Файлов в БД: {sum(stats.values())}")
         for k, v in stats.items():
             print(f"     {k}: {v}")

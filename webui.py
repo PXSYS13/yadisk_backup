@@ -35,6 +35,7 @@ from pathlib import Path
 from dotenv import dotenv_values, load_dotenv, set_key
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+import yadisk
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -50,6 +51,12 @@ from utils import (
     CATEGORY_LABELS,
     DEFAULT_UNLIM_BATCH,
     DONATION_URL,
+    EXIT_AUTH,
+    EXIT_DEFERRED,
+    EXIT_DISK_FULL,
+    EXIT_INTERRUPTED,
+    EXIT_OUTAGE,
+    EXIT_PARTIAL,
     MAX_DISK_WORKERS,
     MAX_UNLIM_BATCH,
     MAX_UNLIM_WORKERS,
@@ -109,16 +116,14 @@ NEWS_LINKS = [
     {"title": "Новости и статус серверов в Telegram", "url": TELEGRAM_CHANNEL},
 ]
 
-# Коды выхода дочерних скриптов (см. main.py и unlim_worker.py)
-EXIT_PARTIAL = 1       # main.py download: часть файлов упала, остальное скачано
-EXIT_AUTH = 2
-EXIT_OUTAGE = 3
-EXIT_DISK_FULL = 4
-EXIT_INTERRUPTED = 130
+# Коды выхода дочерних скриптов (константы — в utils.py). Это же объяснение уходит во
+# фронтенд через /api/status.exit_codes, своей копии у фронтенда нет.
 _EXIT_EXPLAIN = {
-    EXIT_AUTH: "куки или токен устарели — обновите их в настройках",
-    EXIT_OUTAGE: "Яндекс больше часа не отдаёт файлы безлимита (отказ, лимит запросов или сбой серверов) — запустите позже",
+    EXIT_PARTIAL: "часть файлов не скачалась — их можно повторить",
+    EXIT_AUTH: "ключ доступа к Диску или доступ к Безлимиту устарел — обновите его в настройках",
+    EXIT_OUTAGE: "Яндекс временно не отвечает или отказывает — программа повторит позже",
     EXIT_DISK_FULL: "на локальном диске нет места — освободите место и запустите снова",
+    EXIT_DEFERRED: "всё доступное скачано, остальные файлы ждут, когда серверы Яндекса оживут",
 }
 
 # Монитор состояния серверов Яндекса; стартует в main(), в тестах остаётся None
@@ -601,6 +606,9 @@ class Pipeline:
             return False
         if code == 0:
             return True
+        if code == EXIT_DEFERRED:
+            self._log(f"⏳ {fail_msg}: всё доступное скачано, часть файлов ждёт, когда серверы Яндекса оживут")
+            return True
         if code == EXIT_PARTIAL and tolerate_partial:
             self._log(f"⚠️ {fail_msg}: часть файлов упала — продолжаю. "
                       f"Упавшие можно повторить кнопкой «Повторить ошибки».")
@@ -627,7 +635,7 @@ class Pipeline:
             if t.was_stopped:
                 return "stopped"
             codes.append(t.proc.poll())
-        bad = [c for c in codes if c not in (0, None)]
+        bad = [c for c in codes if c not in (0, None, EXIT_DEFERRED)]
         if not bad:
             return "done"
         for c in bad:
@@ -952,9 +960,14 @@ def check_token(token: str) -> dict:
                 "photo_unlim": acc["photo_unlim"], "login": acc["login"], "account": acc}
         log.info("токен проверен: %s, занято %s из %s, безлимит %s", acc["login"],
                  acc["used"], acc["total"], acc["photo_unlim"])
+    except (yadisk.exceptions.UnauthorizedError, yadisk.exceptions.ForbiddenError) as e:
+        data = {"ok": False, "msg": f"Токен не принят Яндексом: {type(e).__name__}{api_error_details(e)}"}
+        log.warning("токен отклонён: %s", data["msg"])
     except Exception as e:
-        data = {"ok": False, "msg": f"{type(e).__name__}: {e}{api_error_details(e)}"}
-        log.warning("проверка токена не удалась: %s", data["msg"])
+        # Сеть, 50x, таймаут: Яндекс не ответил — это не значит, что токен плохой
+        data = {"ok": False, "unreachable": True,
+                "msg": f"Яндекс не ответил на проверку токена ({type(e).__name__}). Повторю позже."}
+        log.warning("проверка токена не удалась: %s: %s%s", type(e).__name__, e, api_error_details(e))
     _token_check_cache.update({"token": token, "at": now, "data": data})
     return data
 
