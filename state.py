@@ -3,6 +3,10 @@
 Каждый файл с Яндекс.Диска регистрируется в таблице `files` с одним из статусов:
 pending / downloaded / failed / skipped. WAL-режим позволяет писать из нескольких
 потоков без блокировок.
+
+Отложенный файл (его сервер хранения Яндекса молчит) остаётся pending с ошибкой
+`storage_down | …` и именем сервера в storage_host — отдельного статуса нет, чтобы
+retry-failed, фильтр категорий и Web UI работали как раньше.
 """
 
 from __future__ import annotations
@@ -34,6 +38,9 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS idx_status ON files(status);
 """
+
+# Маркер отложенного файла в колонке error (его же считает db_stats в webui.py)
+DEFERRED_MARKER = "storage_down | "
 
 
 class State:
@@ -73,7 +80,15 @@ class State:
 
     def _init_schema(self) -> None:
         with self._lock:
-            self._conn().executescript(SCHEMA)
+            conn = self._conn()
+            conn.executescript(SCHEMA)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+            if "storage_host" not in cols:
+                try:
+                    conn.execute("ALTER TABLE files ADD COLUMN storage_host TEXT")
+                except sqlite3.OperationalError as e:  # колонку успел добавить другой процесс
+                    if "duplicate column" not in str(e).lower():
+                        raise
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
@@ -132,6 +147,7 @@ class State:
                    SET status = 'downloaded',
                        local_path = ?,
                        error = NULL,
+                       storage_host = NULL,
                        downloaded_at = ?
                  WHERE remote_path = ?
                 """,
@@ -146,6 +162,7 @@ class State:
                    SET status = 'skipped',
                        local_path = ?,
                        error = NULL,
+                       storage_host = NULL,
                        downloaded_at = ?
                  WHERE remote_path = ?
                 """,
@@ -164,6 +181,15 @@ class State:
                 (error[:2000], remote_path),
             )
 
+    def mark_deferred(self, remote_path: str, host: str, error: str) -> None:
+        """Файл на молчащем сервере хранения: остаётся в очереди, попробуем в следующий раунд."""
+        text = error if error.startswith(DEFERRED_MARKER) else DEFERRED_MARKER + error
+        with self._tx() as conn:
+            conn.execute(
+                "UPDATE files SET status = 'pending', error = ?, storage_host = ? WHERE remote_path = ?",
+                (text[:2000], host or None, remote_path),
+            )
+
     def reset_failed_to_pending(self) -> int:
         with self._tx() as conn:
             cur = conn.execute(
@@ -174,7 +200,8 @@ class State:
     def get_pending(self) -> Iterable[sqlite3.Row]:
         """Возвращает курсор с pending-файлами. Читается лениво, без загрузки всего в RAM."""
         return self._conn().execute(
-            "SELECT remote_path, size, md5, local_path FROM files WHERE status='pending' ORDER BY size ASC"
+            "SELECT remote_path, size, md5, local_path, error, storage_host "
+            "FROM files WHERE status='pending' ORDER BY size ASC"
         )
 
     def get_pending_stats(self) -> dict[str, int]:

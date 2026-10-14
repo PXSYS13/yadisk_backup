@@ -36,6 +36,8 @@ from state import State
 from utils import (
     APP_VERSION,
     EXIT_AUTH,
+    EXIT_DEFERRED,
+    EXIT_DISK_FULL,
     EXIT_OK,
     EXIT_OUTAGE,
     EXIT_PARTIAL,
@@ -56,7 +58,7 @@ LOG_DIR = PROJECT_DIR / "logs"
 LOG_FILE = LOG_DIR / "backup.log"
 DB_FILE = PROJECT_DIR / "state.db"
 
-EMPTY_COUNTERS = {"downloaded": 0, "skipped": 0, "failed": 0, "bytes": 0}
+EMPTY_COUNTERS = {"downloaded": 0, "skipped": 0, "failed": 0, "deferred": 0, "bytes": 0}
 
 log = logging.getLogger("yadisk_backup")
 
@@ -137,8 +139,24 @@ def _require_token(cfg: dict) -> int | None:
     return None
 
 
+def _download_exit_code(counters: dict) -> int:
+    """Код выхода по итогам download_all (см. EXIT_* в utils.py).
+
+    Отложенные файлы важнее упавших: их Rescue повторит сам в следующий раунд,
+    а упавшие видны в статистике и повторяются кнопкой.
+    """
+    aborted = counters.get("aborted")
+    if aborted == "local_disk":
+        return EXIT_DISK_FULL
+    if aborted == "auth":
+        return EXIT_AUTH
+    if counters.get("deferred", 0) > 0:
+        return EXIT_DEFERRED
+    return EXIT_OK if counters.get("failed", 0) == 0 else EXIT_PARTIAL
+
+
 def _run_download(cfg: dict, state: State, workers: int) -> int:
-    """Запускает download_all и печатает итог. Код выхода: 0 — всё ок, 1 — были ошибки, 130 — Ctrl+C."""
+    """Запускает download_all и печатает итог. Коды выхода — _download_exit_code, 130 — Ctrl+C."""
     print(f"Старт скачивания в {workers} потоков → {cfg['download_dir']}")
     t0 = time.time()
     counters = dict(EMPTY_COUNTERS)
@@ -158,7 +176,16 @@ def _run_download(cfg: dict, state: State, workers: int) -> int:
         logging.shutdown()
         os._exit(130)
     _print_summary(counters, time.time() - t0)
-    return EXIT_OK if counters["failed"] == 0 else EXIT_PARTIAL
+    aborted = counters.get("aborted")
+    if aborted == "local_disk":
+        print("local_disk | Остановлено: локальный диск не принимает файлы (нет места, нет прав "
+              "или диск отключён). Освободите место или выберите другую папку.", flush=True)
+    elif aborted == "auth":
+        print("auth_expired | Остановлено: Яндекс перестал принимать токен. Получите новый.", flush=True)
+    elif counters.get("deferred", 0) > 0:
+        print(f"storage_down | Отложено {counters['deferred']} файлов: их серверы хранения Яндекса "
+              f"сейчас не отвечают. Программа повторит их позже.", flush=True)
+    return _download_exit_code(counters)
 
 
 class _ScanProgress:
@@ -192,7 +219,7 @@ def _print_summary(counters: dict, elapsed: float) -> None:
     print(
         f"\nИтого: скачано {counters['downloaded']} ({human_bytes(counters['bytes'])}) | "
         f"пропущено {counters['skipped']} | упало {counters['failed']} | "
-        f"время {human_duration(elapsed)}"
+        f"отложено {counters.get('deferred', 0)} | время {human_duration(elapsed)}"
     )
     if counters.get("failed", 0) > 0:
         print("  💡 Если файлы упали из-за сбоев серверов Яндекса (50x/429) — запустите: python main.py retry-failed")
