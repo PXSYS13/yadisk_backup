@@ -1105,8 +1105,8 @@
 
   <div class="grid-2">
     <div class="card">
-      <div class="card-title" style="font-size:16px">Массовое скачивание (ZIP)</div>
-      <div class="card-sub" style="margin-bottom:10px">Так работает безлимит: Яндекс собирает архив из пачки файлов.</div>
+      <div class="card-title" style="font-size:16px">Скачивание безлимита</div>
+      <div class="card-sub" style="margin-bottom:10px">Безлимит качается через веб-версию Диска по одному файлу, как кнопка «Скачать».</div>
       <div id="yx-bulk-state" class="badge">нет данных</div>
       <div id="yx-bulk-sub" style="font-size:12.5px;color:var(--text-secondary);margin-top:10px;line-height:1.45">Станет известно после первого запуска воркеров безлимита.</div>
     </div>
@@ -1397,7 +1397,7 @@
         <svg class="ico-sm"><use href="#i-refresh"/></svg>Повторить ошибки
       </button>
       <span class="muted" style="font-size:13px">Воркеров: <input type="number" id="unlim-workers" value="4" min="1" max="6" style="width:45px;text-align:center;padding:4px;background:var(--surface2);color:var(--text);border:0.5px solid var(--hairline-strong);border-radius:6px"></span>
-      <span class="muted" style="font-size:13px;margin-left:6px">Пачка: <input type="number" id="unlim-batch" value="25" min="1" max="80" style="width:45px;text-align:center;padding:4px;background:var(--surface2);color:var(--text);border:0.5px solid var(--hairline-strong);border-radius:6px" title="Количество файлов в одном архиве Яндекса. Рекомендуется 15–25 при сбоях"></span>
+      <span class="muted" style="font-size:13px;margin-left:6px">Пачка: <input type="number" id="unlim-batch" value="25" min="1" max="80" style="width:45px;text-align:center;padding:4px;background:var(--surface2);color:var(--text);border:0.5px solid var(--hairline-strong);border-radius:6px" title="Сколько файлов воркер берёт из очереди за раз. Рекомендуется 10–25"></span>
       <button class="danger" onclick="clearDb('unlim')" style="margin-left:auto">
         <svg class="ico-sm"><use href="#i-stop"/></svg>Очистить и заново
       </button>
@@ -1439,7 +1439,7 @@
       </div>
       <div class="console" id="unlim-console"><div class="console-empty">жду запуска…</div></div>
       <div style="margin-top:6px;font-size:11px;color:var(--text-tertiary);display:flex;justify-content:space-between;align-items:center">
-        <span>Перегрузка архивации — на стороне серверов Яндекса. Инфо:</span>
+        <span>Ошибки 50x и отказы — на стороне серверов Яндекса. Инфо:</span>
         <a href="https://t.me/davronsv" target="_blank" rel="noopener" style="color:var(--link);text-decoration:none">t.me/davronsv</a>
       </div>
     </div>
@@ -1905,7 +1905,7 @@ async function postJSON(url, body){
 // Коды выхода дочерних скриптов (см. unlim_worker.py / main.py)
 const EXIT_EXPLAIN = {
   2: 'куки или токен устарели — обновите их в настройках',
-  3: 'Яндекс больше часа не отдаёт ZIP-архивы (отказ, лимит запросов или сбой серверов) — запустите позже',
+  3: 'Яндекс больше часа не отдаёт файлы безлимита (отказ, лимит запросов или сбой серверов) — запустите позже',
   4: 'на локальном диске нет места',
 };
 function taskStopped(task){ return !!task && (task.was_stopped || isStopped(task.exit_code)) }
@@ -2650,7 +2650,7 @@ function renderProbes(health){
   }).join('');
 }
 
-const COUNTER_LABELS = {bulk_disabled:'отказ архива', server_50x:'50x', rate_limit:'429', timeout:'таймауты', auth_expired:'401/403', local_disk:'локальный диск', prepare_failed:'сборка ZIP'};
+const COUNTER_LABELS = {bulk_disabled:'отказ Яндекса', storage_down:'серверы хранения',server_50x:'50x', rate_limit:'429', timeout:'таймауты', auth_expired:'401/403', local_disk:'локальный диск', prepare_failed:'ошибка ссылки'};
 
 function updateYandexStatus(s){
   const diag = s.diagnostics || {};
@@ -2711,10 +2711,12 @@ function updateYandexStatus(s){
     const lastOk = Object.keys(tasks).filter(k=>k.startsWith('unlim_w')).some(k => (tasks[k].log_tail||[]).some(l => /✓\s*\d+(?:\/\d+)?\s*files/.test(l)));
     if(diag.kind === 'bulk_disabled' || counts.bulk_disabled){
       bulk.className = 'badge err'; bulk.textContent = 'Отключено Яндексом';
-      document.getElementById('yx-bulk-sub').textContent = 'Яндекс не отдаёт архивы. Воркер ждёт растущими паузами и не сжигает попытки файлов; обычный диск через REST API работает.';
+      document.getElementById('yx-bulk-sub').textContent = 'Яндекс отказывает в скачивании безлимита. Воркер ждёт растущими паузами и не сжигает попытки файлов; обычный диск через REST API работает.';
     } else if(lastOk){
       bulk.className = 'badge ok'; bulk.textContent = 'Работает';
-      document.getElementById('yx-bulk-sub').textContent = 'Архивы собираются и скачиваются.';
+      document.getElementById('yx-bulk-sub').textContent = counts.storage_down
+        ? 'Файлы безлимита скачиваются. Часть лежит на серверах Яндекса, которые не отвечают: они отложены и будут повторены.'
+        : 'Файлы безлимита скачиваются.';
     } else if(workersAlive){
       bulk.className = 'badge run'; bulk.textContent = 'Проверяется';
       document.getElementById('yx-bulk-sub').textContent = 'Воркеры запущены, первая пачка ещё не завершилась.';
@@ -3125,7 +3127,7 @@ function renderEstimate(){
   const free = p.free_space ? p.free_space.free : null;
   const risks = [];
   if(p.recommended && p.recommended.gentle) risks.push('Серверы Яндекса сейчас деградированы — рекомендуем щадящий режим (2 потока, пачка 10).');
-  if(p.diagnostics && p.diagnostics.kind === 'bulk_disabled') risks.push('Безлимит сейчас не отдаётся Яндексом (ZIP-архивы отключены): воркеры будут ждать с паузами и продолжат автоматически.');
+  if(p.diagnostics && p.diagnostics.kind === 'bulk_disabled') risks.push('Яндекс сейчас отказывает в скачивании безлимита: воркеры будут ждать с паузами и продолжат автоматически.');
   if(free != null && left > free) risks.push(`На диске свободно ${human(free)}, а нужно ~${human(left)} — выберите меньше категорий или другую папку.`);
   if(!d.count && !u.count) risks.push('Список файлов ещё не собран: оценка появится после сканирования, мастер запустит его сам.');
   if(!rate) risks.push('Скорость неизвестна — покажется через 10 минут после старта.');
@@ -3311,12 +3313,13 @@ function updateUnlimBanner(tasks){
         const m = /batch\s+(\d+):\s*✓\s*(\d+)(?:\/\d+)?\s*files\s*\/\s*([\d.]+)\s*GB/i.exec(l);
         if(m){last = `последний batch w${w.replace('unlim_w','')}: ${m[2]} файлов, ${m[3]} ГБ`; break}
         if(!waiting && /rate_limit \| /.test(l)) waiting = 'Яндекс просит реже обращаться (429): общая пауза для всех воркеров, продолжу сам';
-        if(!waiting && /bulk_unavailable/.test(l)) waiting = 'Яндекс не отдаёт архивы: жду с паузами, попытки не сжигаю';
-        if(!waiting && /server_50x \| Яндекс \d+ пачек/.test(l)) waiting = 'Серверы Яндекса сбоят: жду с паузами, попытки не сжигаю';
+        if(!waiting && /bulk_unavailable/.test(l)) waiting = 'Яндекс отказывает в скачивании: жду с паузами, попытки не сжигаю';
+        if(!waiting && /storage_down \| /.test(l)) waiting = 'Часть файлов на серверах Яндекса, которые не отвечают: откладываю их и качаю остальные';
+        if(!waiting && /server_50x \| Яндекс \d+ (пачек|раз) подряд/.test(l)) waiting = 'Серверы Яндекса сбоят: жду с паузами, попытки не сжигаю';
       }
       if(last) break;
     }
-    sub.textContent = last || waiting || 'идёт скачивание архивов…';
+    sub.textContent = last || waiting || 'идёт скачивание…';
     const maxElapsed = Math.max(...aliveWorkers.map(w=>tasks[w].elapsed||0));
     time.textContent = dur(maxElapsed);
   } else {
@@ -3338,7 +3341,7 @@ function updateUnlimBanner(tasks){
     } else if(known === 3){
       banner.style.display = 'flex';
       banner.className = 'task-banner';
-      title.innerHTML = '<span style="color:var(--orange)">Пауза: Яндекс не отдаёт архивы</span>';
+      title.innerHTML = '<span style="color:var(--orange)">Пауза: Яндекс не отдаёт файлы</span>';
       sub.innerHTML = `${esc(EXIT_EXPLAIN[3])} · <button class="btn btn-sm" onclick="retryUnlim(this)" style="padding:2px 8px;font-size:11px;margin-left:6px;color:var(--yellow);border-color:rgba(255,159,10,.4)">Запустить снова</button>`;
     } else {
       banner.style.display = 'flex';

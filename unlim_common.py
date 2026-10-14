@@ -183,7 +183,8 @@ def api_call(s: requests.Session, sk: str, uid: str, method: str,
                     data = r.json()
                 except Exception:
                     raise RuntimeError(f"{method}: ответ не JSON: {r.text[:200]}")
-                if not isinstance(data, dict):
+                # mpfs/list отвечает списком, остальные методы — объектом
+                if not isinstance(data, (dict, list)):
                     raise RuntimeError(f"{method}: неожиданный формат ответа: {type(data).__name__}")
                 return data
             if r.status_code in (401, 403):

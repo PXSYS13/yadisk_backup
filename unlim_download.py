@@ -1,11 +1,14 @@
-"""Сборка списка файлов безлимитного фото-хранилища (photoslice) через web API.
+"""Сборка списка файлов безлимитного фото-хранилища через web API Диска.
 
 Использует cookies.json (экспортированные из браузера расширением Cookie-Editor).
 Запоминает все файлы в unlim_state.db со статусом 'pending'. Само скачивание —
 в unlim_worker.py (можно запускать несколько параллельно).
 
+Список берётся постранично из папки /photounlim (mpfs/list) — с размерами и MD5.
+Фотосрез (photoslice) — запасной путь: с октября 2026 Яндекс отдаёт его пустым.
+
 CLI:
-  python unlim_download.py --collect       # собрать список из photoslice
+  python unlim_download.py --collect       # собрать список безлимита
   python unlim_download.py --status        # показать статус БД
   python unlim_download.py --retry-failed  # вернуть упавшие и зависшие в очередь
 """
@@ -34,11 +37,15 @@ from unlim_common import (
     make_session,
     reset_failed_files,
 )
-from utils import ensure_utf8_stdio, sqlite_tx
+from utils import ensure_utf8_stdio, human_bytes, sqlite_tx
 
 LOG_FILE = os.path.join(LOG_DIR, "unlim.log")
 # Сколько кластеров (дней) запрашиваем одним вызовом API
 CLUSTER_BATCH = 15
+# Безлимит во внутреннем API Диска (mpfs); фотосрез называет те же файлы «photounlim:/имя»
+UNLIM_ROOT = "/photounlim"
+LIST_PAGE = 1000
+LIST_META = "size,md5,mimetype,mediatype"
 
 log = logging.getLogger("unlim")
 
@@ -76,6 +83,76 @@ def status_counts() -> dict[str, int]:
     return {r["status"]: r["n"] for r in db().execute(
         "SELECT status, COUNT(*) AS n FROM unlim_files GROUP BY status"
     )}
+
+
+# ── Сбор через mpfs/list ────────────────────────────────────────────────────
+
+
+def list_unlim_page(s, sk, uid, offset: int, amount: int = LIST_PAGE) -> list[dict]:
+    """Одна страница /photounlim. Первый элемент ответа — сама папка."""
+    data = api_call(s, sk, uid, "mpfs/list",
+                    {"path": UNLIM_ROOT, "amount": amount, "offset": offset, "meta": LIST_META})
+    if not isinstance(data, list):
+        raise RuntimeError(f"mpfs/list: ожидался список, пришёл {type(data).__name__}: {str(data)[:200]}")
+    return data
+
+
+def save_listed_files(items: list[dict]) -> int:
+    """Добавляет файлы из mpfs/list, возвращает число новых.
+
+    Уже известный файл (в том числе собранный фотосрезом как 'photounlim:/имя') не
+    дублируется — ему только записываются размер и MD5 из mpfs, они точнее.
+    """
+    added = 0
+    with sqlite_tx(db()) as c:
+        for f in items:
+            path = f.get("path") or ""
+            if not path.startswith(UNLIM_ROOT + "/"):
+                continue
+            meta = f.get("meta") or {}
+            size = int(meta.get("size") or 0)
+            md5 = meta.get("md5") or None
+            mime = meta.get("mimetype") or meta.get("mediatype")
+            alt = "photounlim:" + path[len(UNLIM_ROOT):]
+            known = c.execute(
+                "UPDATE unlim_files SET size = COALESCE(NULLIF(?, 0), size), md5 = COALESCE(?, md5), "
+                "mime = COALESCE(mime, ?) WHERE file_id IN (?, ?)",
+                (size, md5, mime, path, alt),
+            ).rowcount
+            if known:
+                continue
+            c.execute(
+                "INSERT INTO unlim_files (file_id, name, size, md5, mime, status) "
+                "VALUES (?, ?, ?, ?, ?, 'pending')",
+                (path, f.get("name") or path.rsplit("/", 1)[-1], size, md5, mime),
+            )
+            added += 1
+    return added
+
+
+def collect_via_list(s, sk, uid) -> int:
+    """Весь безлимит постранично. Возвращает, сколько файлов увидели."""
+    print("\nЧитаю список безлимита (mpfs/list)...", flush=True)
+    seen = added = 0
+    total_bytes = 0
+    dirs = 0
+    offset = 0
+    while True:
+        page = list_unlim_page(s, sk, uid, offset)
+        children = [x for x in page if (x.get("path") or "").rstrip("/") != UNLIM_ROOT]
+        files = [x for x in children if x.get("type") == "file"]
+        dirs += len(children) - len(files)
+        added += save_listed_files(files)
+        seen += len(files)
+        total_bytes += sum(int((x.get("meta") or {}).get("size") or 0) for x in files)
+        print(f"  Найдено: {seen} файлов ({human_bytes(total_bytes)}), новых {added}", flush=True)
+        if len(children) < LIST_PAGE:
+            break
+        offset += len(children)
+    if dirs:
+        log.warning("mpfs/list: в %s есть вложенные папки (%d) — их содержимое не собрано", UNLIM_ROOT, dirs)
+    log.info("mpfs/list: %d файлов, %s, новых %d", seen, human_bytes(total_bytes), added)
+    return seen
 
 
 # ── Логика сбора photoslice ─────────────────────────────────────────────────
@@ -161,6 +238,41 @@ def fetch_cluster_resources(s, sk, uid, psid, cluster_rows: list[dict]) -> int:
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 
+def collect_via_photoslice(s, sk, uid) -> int | None:
+    """Запасной сбор через фотосрез. Возвращает 2, если куки протухли."""
+    psid = init_snapshot(s, sk, uid)
+    print("  ✓ photoslice_id получен")
+
+    clusters = get_all_clusters(s, sk, uid, psid)
+    print(f"  ✓ кластеров (дней с фото): {len(clusters)}")
+    save_clusters(clusters)
+
+    todo = [dict(r) for r in db().execute(
+        "SELECT cluster_id, size FROM unlim_clusters WHERE fetched=0"
+    )]
+    print(f"\nЗапрашиваю файлы для {len(todo)} кластеров...")
+    bar = tqdm(total=len(todo), unit="cluster", disable=not sys.stderr.isatty())
+    added_total = 0
+    try:
+        for i in range(0, len(todo), CLUSTER_BATCH):
+            batch = todo[i:i + CLUSTER_BATCH]
+            try:
+                added_total += fetch_cluster_resources(s, sk, uid, psid, batch)
+            except AuthExpiredError as e:
+                # Куки протухли посреди сбора — дальше бессмысленно, и это не «успех»
+                print(f"\n❌ auth_expired | Ошибка авторизации: {e}")
+                print("   Обновите cookies.json в Web UI или браузере и запустите сбор заново.")
+                return 2
+            except Exception as e:
+                log.error(f"batch {i}: {e}")
+                time.sleep(2)
+            bar.update(len(batch))
+            bar.set_postfix(files=added_total)
+    finally:
+        bar.close()
+    return None
+
+
 def cmd_collect():
     db_init()
     s = make_session(load_cookies())
@@ -173,41 +285,28 @@ def cmd_collect():
             return 2
         print(f"  ✓ uid={uid}, sk OK")
 
-        psid = init_snapshot(s, sk, uid)
-        print("  ✓ photoslice_id получен")
-
-        clusters = get_all_clusters(s, sk, uid, psid)
-        print(f"  ✓ кластеров (дней с фото): {len(clusters)}")
-        save_clusters(clusters)
-
-        todo = [dict(r) for r in db().execute(
-            "SELECT cluster_id, size FROM unlim_clusters WHERE fetched=0"
-        )]
-        print(f"\nЗапрашиваю файлы для {len(todo)} кластеров...")
-        bar = tqdm(total=len(todo), unit="cluster", disable=not sys.stderr.isatty())
-        added_total = 0
         try:
-            for i in range(0, len(todo), CLUSTER_BATCH):
-                batch = todo[i:i + CLUSTER_BATCH]
-                try:
-                    added_total += fetch_cluster_resources(s, sk, uid, psid, batch)
-                except AuthExpiredError as e:
-                    # Куки протухли посреди сбора — дальше бессмысленно, и это не «успех»
-                    print(f"\n❌ auth_expired | Ошибка авторизации: {e}")
-                    print("   Обновите cookies.json в Web UI или браузере и запустите сбор заново.")
-                    return 2
-                except Exception as e:
-                    log.error(f"batch {i}: {e}")
-                    time.sleep(2)
-                bar.update(len(batch))
-                bar.set_postfix(files=added_total)
-        finally:
-            bar.close()
+            listed = collect_via_list(s, sk, uid)
+        except AuthExpiredError as e:
+            print(f"\n❌ auth_expired | Ошибка авторизации: {e}")
+            print("   Обновите cookies.json в Web UI или браузере и запустите сбор заново.")
+            return 2
+        except Exception as e:
+            log.error(f"mpfs/list: {e}")
+            print(f"  ⚠️ Список через mpfs/list не получен ({e}) — пробую фотосрез")
+            listed = 0
+        if not listed:
+            code = collect_via_photoslice(s, sk, uid)
+            if code:
+                return code
 
         stats = status_counts()
         print(f"\n  ✓ Файлов в БД: {sum(stats.values())}")
         for k, v in stats.items():
             print(f"     {k}: {v}")
+        if not stats:
+            print("  ⚠️ Яндекс не вернул ни одного файла безлимита. Если в веб-версии Диска фото есть — "
+                  "обновите cookies.json и запустите сбор ещё раз.")
     finally:
         try:
             s.close()
@@ -241,7 +340,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--collect", action="store_true",
-                    help="Собрать список файлов из photoslice")
+                    help="Собрать список файлов безлимита")
     ap.add_argument("--status", action="store_true",
                     help="Показать статус БД")
     ap.add_argument("--retry-failed", action="store_true",
