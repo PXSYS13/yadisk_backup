@@ -383,7 +383,8 @@ def test_full_local_disk_stops_the_round_with_code_4(db, net, tmp_path):
     _add(db)
     dl = tmp_path / "dl"
     (dl / LINKS_DIRNAME).mkdir(parents=True)
-    (dl / LINKS_DIRNAME / "Свадьба").write_text("файл на месте папки")  # папку не создать
+    # Кодировка явно: у Windows-машин GitHub по умолчанию cp1252, кириллицу она не пишет
+    (dl / LINKS_DIRNAME / "Свадьба").write_text("файл на месте папки", encoding="utf-8")  # папку не создать
     assert pd.run(db, str(dl), workers=1) == EXIT_DISK_FULL
 
 
