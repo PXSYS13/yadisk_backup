@@ -73,6 +73,14 @@ def test_single_refusal_does_not_claim_yandex_refuses(monkeypatch):
     assert _diag(monkeypatch, {"unlim_w1": _Task(strong)})["kind"] == "bulk_disabled"
 
 
+def test_sorting_file_names_do_not_become_yandex_banners(monkeypatch):
+    """Сортировка печатает имена файлов: «timeout_2024.docx» — не таймаут Яндекса."""
+    summary = ('organize_summary | {"folders": 2, "examples": [{"from": "Отчёты/timeout_2024.docx", '
+               '"to": "Документы/timeout_2024.docx"}]}')
+    sorting = _Task([summary, "  err: D:/YAD-bak/local_disk.txt: [Errno 13] Permission denied"], alive=True)
+    assert _diag(monkeypatch, {webui.SLOT_ORGANIZE: sorting})["kind"] is None
+
+
 def test_old_finished_tasks_do_not_keep_banners(monkeypatch):
     old = _Task(["auth_expired | КРИТИЧЕСКАЯ ОШИБКА"], finished_ago=webui.DIAG_RECENT_SEC + 60)
     assert _diag(monkeypatch, {"unlim_w1": old})["kind"] is None

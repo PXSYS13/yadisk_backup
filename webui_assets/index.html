@@ -1457,10 +1457,12 @@
 <div class="panel" data-panel="organize">
 
   <div class="card">
-    <div class="card-title">Финальная сортировка</div>
+    <div class="card-title">Сортировка по типам</div>
     <div class="card-sub">
-      Разложит файлы по полочкам: Фото / Видео / Документы / Архивы / Программы / Аудио / Прочее.
+      Соберёт файлы из всех папок в общие: Фото / Видео / Документы / Архивы / Программы / Аудио / Прочее.
       Внутри Фото и Видео — подпапки по годам и месяцам. Дубликаты переместит в <code>_duplicates/</code>.
+      <b>Папки, как на Яндекс.Диске, исчезнут</b>: опустевшие папки удаляются, сами файлы — нет.
+      Без сортировки файлы лежат так же, как на Диске.
     </div>
 
     <label class="field-label">Папка</label>
@@ -1471,7 +1473,7 @@
         <svg class="ico-sm"><use href="#i-search"/></svg>Только отчёт
       </button>
       <button class="success" onclick="organize('move', this)">
-        <svg class="ico-sm"><use href="#i-check"/></svg>Применить
+        <svg class="ico-sm"><use href="#i-check"/></svg>Разложить файлы
       </button>
       <button class="danger" onclick="action('organize_stop', this)">
         <svg class="ico-sm"><use href="#i-stop"/></svg>Стоп
@@ -2386,6 +2388,7 @@ async function action(name, btn){
 async function organize(actionType, btn){
   const inp=document.getElementById('organize-input').value.trim();
   if(!inp){toast('Укажи папку','err');return}
+  if(actionType==='move' && !confirm(`Разложить файлы в «${inp}» по типам?\n\nФайлы переедут в папки «Фото», «Видео», «Документы» и другие — папок, как на Яндекс.Диске, больше не будет, опустевшие папки удалятся. Сами файлы не удаляются, одинаковые уедут в «_duplicates». Вернуть всё как было автоматически нельзя.\n\nПродолжить?`)) return;
 
   // Сохраняем путь для показа в статусе
   _organizePath = inp;

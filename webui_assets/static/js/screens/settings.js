@@ -209,6 +209,8 @@
           <div id="set-access"></div></div>
         <div class="card">${head('list', 'ok', 'Что скачивать', 'Снимите галочки с того, что не нужно. Остальное программа скачает.')}
           <div id="set-what"></div>
+          <p class="tiny" style="margin-top:8px">Галочки только выбирают, что скачивать: файлы лягут в те же папки, что на Диске.
+            В общие папки «Фото», «Документы» и другие их собирает только «Сортировка» — если вы сами её запустите.</p>
           <div id="set-folders" class="folders">
             <div class="section-title" style="margin-top:18px">Папки Диска</div>
             <fieldset class="bare" data-field="folders-set">

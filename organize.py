@@ -12,7 +12,11 @@
      - Аудио:   Аудио/
      - Прочее:  Прочее/
 
-  Дату берёт из имени файла (YYYY-MM-DD), иначе из mtime.
+  Дату берёт из имени файла (YYYY-MM-DD), затем из EXIF фото, иначе из mtime.
+
+  Внимание: при перемещении папки, как на Диске, пропадают — каждый файл уезжает в общую
+  папку своего типа, опустевшие папки удаляются. Сами файлы не удаляются. Отчёт
+  (report-only) заранее показывает, сколько папок исчезнет, и примеры переносов.
 
 Запуск:
   python organize.py --input "E:/папка" --action report-only
@@ -203,12 +207,15 @@ def unique_path(dst: str) -> str:
         i += 1
 
 
-def scan(root: str) -> list[dict]:
+def scan(root: str, tree: list | None = None) -> list[dict]:
+    """Файлы для сортировки. В tree (если передан) ложится сам обход: (папка, подпапки, файлы)."""
     files = []
     skip = {os.path.join(root, d) for d in SKIP_DIRS}
     print(f"\n[1/4] Сканирую {root}...")
     for dp, dirs, fns in os.walk(root):
         dirs[:] = [d for d in dirs if os.path.join(dp, d) not in skip]
+        if tree is not None:
+            tree.append((dp, list(dirs), list(fns)))
         for fn in fns:
             if fn.lower().endswith(SKIP_SUFFIXES):
                 continue
@@ -252,6 +259,66 @@ def find_dup_paths(files: list[dict]) -> set[str]:
     return out
 
 
+def doomed_dirs(root: str, tree: list, moving: set[str], targets) -> list[str]:
+    """Папки, которые после перемещения опустеют и будут удалены уборкой в конце main().
+
+    Повторяет уборку: корень и отсечённые служебные папки не трогаются; папка уходит, если в ней
+    не осталось ни файла, ни уцелевшей подпапки. Файлы, которые сортировка не берёт (.part, .db),
+    держат папку; папка, куда что-то переедет (на Windows «фото» и «Фото» — одна папка),
+    остаётся. Не угадывает только сбои перемещения и удаления (файл занят, нет прав).
+    """
+    root_key = os.path.normcase(root)
+    alive: set[str] = set()
+    for t in targets:
+        d = os.path.normcase(os.path.dirname(t))
+        while len(d) > len(root_key) and d not in alive:
+            alive.add(d)
+            d = os.path.dirname(d)
+    gone: set[str] = set()
+    # os.walk идёт сверху вниз — задом наперёд подпапки проверяются раньше родителей
+    for dp, dirs, fns in reversed(tree):
+        if dp == root or os.path.normcase(dp) in alive:
+            continue
+        if (all(os.path.join(dp, f) in moving for f in fns)
+                and all(os.path.join(dp, d) in gone for d in dirs)):
+            gone.add(dp)
+    return sorted(gone)
+
+
+# Порядок примеров в отчёте: документы первыми — их раскладка по типам удивляет сильнее всего
+EXAMPLE_ORDER = [DIR_DOC, DIR_PHOTO, DIR_VIDEO, DIR_AUDIO, DIR_ARCHIVE, DIR_PROGRAM, DIR_OTHER]
+
+
+def _printable(text: str) -> str:
+    """Имя с непарным суррогатом уронило бы print: stdout строгий после ensure_utf8_stdio."""
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
+def pick_examples(root: str, plan: list, moving: set[str], limit: int = 3) -> list[dict]:
+    """Примеры переносов для отчёта: по одному на полку, пути относительно root.
+
+    Берёт самый глубоко вложенный файл — он теряет больше всего папок, при равенстве — первый
+    по алфавиту. Если подпапок нет, примеры — из файлов в самой папке. Пути режутся срезом
+    строки, а не relpath: на сотнях тысяч файлов relpath заметно медленнее.
+    """
+    deep: dict[str, tuple] = {}
+    flat: dict[str, tuple] = {}
+    for src, dst, is_dup in plan:
+        if is_dup or src not in moving:
+            continue
+        rel_src = src[len(root):].lstrip("\\/")
+        rel_dst = dst[len(root):].lstrip("\\/")
+        depth = rel_src.count(os.sep)
+        pool = deep if depth else flat
+        shelf = rel_dst.split(os.sep, 1)[0]
+        key = (-depth, rel_src.casefold(), rel_src)
+        if shelf not in pool or key < pool[shelf][0]:
+            pool[shelf] = (key, rel_src, rel_dst)
+    chosen = deep or flat
+    return [{"from": _printable(chosen[s][1]), "to": _printable(chosen[s][2])}
+            for s in EXAMPLE_ORDER if s in chosen][:limit]
+
+
 def main():
     ensure_utf8_stdio()
 
@@ -278,7 +345,8 @@ def main():
     print("=" * 60)
 
     t0 = time.time()
-    files = scan(root)
+    tree: list = []
+    files = scan(root, tree)
     compute_md5_batch(files)
     dups = find_dup_paths(files)
 
@@ -300,15 +368,24 @@ def main():
             cat_b[cat] += f["size"]
 
     total_b = sum(f["size"] for f in files)
+    # Прогноз для отчёта: какие папки опустеют и будут удалены, и пара примеров переносов
+    moving = {src for src, dst, _ in plan if os.path.normcase(src) != os.path.normcase(dst)}
+    gone = doomed_dirs(root, tree, moving, [dst for _, dst, _ in plan])
+    examples = pick_examples(root, plan, moving)
     print("\n[4/4] СТАТИСТИКА:")
     print(f"  Всего:           {len(files)} ({human_bytes(total_b)})")
     print(f"  Дубликатов:      {len(dups)} ({human_bytes(dup_b)})")
     print(f"  Уникальных:      {len(files) - len(dups)}")
+    print(f"  Папок исчезнет:  {len(gone)} (опустеют и будут удалены)")
     print("\n  По полкам:")
     for cat in [DIR_PHOTO, DIR_VIDEO, DIR_AUDIO, DIR_DOC, DIR_ARCHIVE,
                 DIR_PROGRAM, DIR_OTHER]:
         if cat_n[cat]:
             print(f"    {cat:<12} {cat_n[cat]:>6} файлов ({human_bytes(cat_b[cat])})")
+    if examples:
+        print("\n  Например:")
+        for ex in examples:
+            print(f"    {ex['from']}  →  {ex['to']}")
     print(f"\n  Скан: {time.time() - t0:.0f} сек")
     # Итог одной строкой для Web UI («Посмотреть, что получится»)
     shelves = {cat: {"count": cat_n[cat], "bytes": cat_b[cat]}
@@ -317,10 +394,12 @@ def main():
     print("organize_summary | " + json.dumps({
         "action": args.action, "root": root, "total": len(files), "total_bytes": total_b,
         "duplicates": len(dups), "duplicates_bytes": dup_b, "shelves": shelves,
+        "folders": len(gone), "examples": examples,
     }, ensure_ascii=False), flush=True)
 
     if args.action == "report-only":
-        print("\n[INFO] Это только отчёт: файлы не перемещались.")
+        print("\n[INFO] Это только отчёт: файлы не перемещались. При перемещении папки, как на "
+              "Диске, исчезнут: файлы разъедутся по папкам по типам, опустевшие папки удалятся.")
         return 0
 
     print(f"\nПеремещаю {len(plan)}...")
@@ -340,7 +419,7 @@ def main():
         except Exception as e:
             err += 1
             if err <= 5:
-                print(f"  err: {src}: {e}")
+                print(_printable(f"  err: {src}: {e}"))
         if time.time() - last > 5:
             print(f"  progress: {moved}/{len(plan)} (err={err})")
             last = time.time()

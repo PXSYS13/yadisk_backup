@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from utils import (
+    IS_WINDOWS,
     human_bytes,
     human_duration,
     human_duration_ru,
@@ -212,7 +213,8 @@ def test_resolve_local_path_deterministic_collision_resolution(tmp_path):
 
 
 def test_resolve_local_path_windows_case_collision(tmp_path):
-    from utils import IS_WINDOWS, resolve_local_path
+    import utils
+    from utils import resolve_local_path
 
     out_dir = str(tmp_path / "downloads")
     existing: set[str] = set()
@@ -220,12 +222,110 @@ def test_resolve_local_path_windows_case_collision(tmp_path):
     p2 = resolve_local_path(out_dir, "disk:/docs/FILE.txt", existing_paths=existing)
 
     assert p1 != p2
-    if IS_WINDOWS:
-        # NTFS не различает регистр — второй файл обязан получить хеш-суффикс
+    if utils.CASE_INSENSITIVE_PATHS:
+        # NTFS и APFS не различают регистр — второй файл обязан получить хеш-суффикс
         assert p1.lower() != p2.lower()
     else:
         # На case-sensitive ФС это разные файлы, суффикс не нужен
         assert p1.lower() == p2.lower()
+
+
+@pytest.mark.parametrize("folder, local_folder", [
+    ("Встреча: итоги", "Встреча_ итоги"),
+    ("Разное и т.д.", "Разное и т.д"),
+    ("CON", "_CON"),
+])
+def test_cleaned_folder_keeps_file_names(tmp_path, folder, local_folder):
+    """Чистка имени папки не трогает имена файлов внутри — связи между файлами проекта живы."""
+    import os
+    from utils import resolve_local_path
+
+    out_dir = str(tmp_path / "downloads")
+    p = resolve_local_path(out_dir, f"disk:/Загрузки/{folder}/Words/SomeDox.docx", existing_paths=set())
+    assert p == os.path.join(out_dir, "Загрузки", local_folder, "Words", "SomeDox.docx")
+
+
+def test_cleaned_file_name_still_gets_hash(tmp_path):
+    import os
+    from utils import _short_hash, resolve_local_path
+
+    out_dir = str(tmp_path / "downloads")
+    rp = "disk:/Документы/a?b.docx"
+    assert resolve_local_path(out_dir, rp, existing_paths=set()) == \
+        os.path.join(out_dir, "Документы", f"a_b_{_short_hash(rp)}.docx")
+
+
+def test_twin_of_cleaned_folder_gets_hash_only_on_collision(tmp_path):
+    import os
+    from utils import _short_hash, resolve_local_path
+
+    out_dir = str(tmp_path / "downloads")
+    existing: set[str] = set()
+    clean = resolve_local_path(out_dir, "disk:/a_b/x.txt", existing_paths=existing)
+    twin = resolve_local_path(out_dir, "disk:/a:b/x.txt", existing_paths=existing)
+    other = resolve_local_path(out_dir, "disk:/a:b/y.txt", existing_paths=existing)
+    assert clean == os.path.join(out_dir, "a_b", "x.txt")
+    assert twin == os.path.join(out_dir, "a_b", f"x_{_short_hash('disk:/a:b/x.txt')}.txt")
+    assert other == os.path.join(out_dir, "a_b", "y.txt")  # совпадения нет — имя прежнее
+
+
+def test_without_existing_paths_keeps_pre_231_rule(tmp_path):
+    """Без набора занятых путей (ссылки, запасной путь downloader) — хеш при любой чистке, как раньше."""
+    import os
+    from utils import _short_hash, legacy_local_path, resolve_local_path
+
+    out_dir = str(tmp_path / "downloads")
+    rp = "disk:/Встреча: итоги/SomeDox.docx"
+    old = os.path.join(out_dir, "Встреча_ итоги", f"SomeDox_{_short_hash(rp)}.docx")
+    assert resolve_local_path(out_dir, rp) == old
+    assert legacy_local_path(out_dir, rp) == old
+    # Искать нечего: путь чистый или чистили само имя файла — для них правило не менялось
+    assert legacy_local_path(out_dir, "disk:/Загрузки/SomeDox.docx") is None
+    assert legacy_local_path(out_dir, "disk:/Встреча: итоги/a?b.docx") is None
+
+
+def test_taken_hashed_name_gets_a_number(tmp_path):
+    import os
+    from utils import _short_hash, path_key, resolve_local_path
+
+    out_dir = str(tmp_path / "downloads")
+    rp = "disk:/a:b/x.txt"
+    h = _short_hash(rp)
+    existing = {path_key(os.path.join(out_dir, "a_b", "x.txt")),
+                path_key(os.path.join(out_dir, "a_b", f"x_{h}.txt"))}
+    assert resolve_local_path(out_dir, rp, existing_paths=existing) == \
+        os.path.join(out_dir, "a_b", f"x_{h}_2.txt")
+
+
+@pytest.mark.parametrize("path, clean", [
+    ("disk:/Загрузки/Project1/Words/SomeDox.docx", True),
+    ("disk:/Встреча: итоги/SomeDox.docx", False),
+    ("disk:/Разное и т.д./x.txt", False),
+    ("disk:/a/b?.txt", False),
+    ("disk:/CON/x.txt", False),
+])
+def test_remote_path_is_clean(path, clean):
+    from utils import remote_path_is_clean
+
+    assert remote_path_is_clean(path) is clean
+
+
+def test_path_key_folds_case_only_where_fs_ignores_it(monkeypatch):
+    import os
+    import utils
+
+    upper, lower = os.path.join("Out", "Docs", "A.txt"), os.path.join("out", "docs", "a.txt")
+    monkeypatch.setattr(utils, "CASE_INSENSITIVE_PATHS", True)
+    assert utils.path_key(upper) == utils.path_key(lower)
+    monkeypatch.setattr(utils, "CASE_INSENSITIVE_PATHS", False)
+    assert utils.path_key(upper) != utils.path_key(lower)
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="смешанные слеши — один и тот же путь только на Windows")
+def test_path_key_mixed_slashes_on_windows():
+    from utils import path_key
+
+    assert path_key("D:/YAD-bak\\a_b\\x.txt") == path_key("D:\\YAD-bak\\A_B\\x.txt")
 
 
 def test_is_safe_download_dir(tmp_path):

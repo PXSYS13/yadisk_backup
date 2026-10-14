@@ -1,8 +1,11 @@
 """Тесты SQLite-трекера прогресса."""
 
+import os
+
 import pytest
 
 from state import State
+from utils import _short_hash, legacy_local_path
 
 
 @pytest.fixture()
@@ -115,6 +118,69 @@ def test_assign_local_paths_follows_new_download_dir(st, tmp_path):
     rows = {r["remote_path"]: r["local_path"] for r in st._conn().execute("SELECT remote_path, local_path FROM files")}
     assert rows["disk:/b.jpg"].startswith(new_dir)   # pending переназначен в новую папку
     assert rows["disk:/a.jpg"].startswith(old_dir)   # скачанный остаётся где лежит
+
+
+def _local_paths(st):
+    return {r["remote_path"]: r["local_path"]
+            for r in st._conn().execute("SELECT remote_path, local_path FROM files")}
+
+
+def test_assign_keeps_file_names_in_cleaned_folder(st, tmp_path):
+    out = str(tmp_path / "out")
+    rp = "disk:/Встреча: итоги/Words/SomeDox.docx"
+    st.mark_pending(rp, 1, None)
+    st.assign_local_paths(out)
+    assert _local_paths(st)[rp] == os.path.join(out, "Встреча_ итоги", "Words", "SomeDox.docx")
+
+
+@pytest.mark.parametrize("order", [("disk:/a:b/x.txt", "disk:/a_b/x.txt"),
+                                   ("disk:/a_b/x.txt", "disk:/a:b/x.txt")])
+def test_assign_gives_clean_name_to_the_valid_path(st, tmp_path, order):
+    """«a:b/x.txt» и «a_b/x.txt» ложатся в одну папку a_b: чистое имя — у пути, который не чистили,
+    хотя ':' сортируется раньше '_'."""
+    out = str(tmp_path / "out")
+    for rp in order:
+        st.mark_pending(rp, 1, None)
+    st.assign_local_paths(out)
+    rows = _local_paths(st)
+    assert rows["disk:/a_b/x.txt"] == os.path.join(out, "a_b", "x.txt")
+    assert rows["disk:/a:b/x.txt"] == os.path.join(out, "a_b", f"x_{_short_hash('disk:/a:b/x.txt')}.txt")
+
+
+def test_assign_keeps_already_assigned_hashed_path(st, tmp_path):
+    """Путь, назначенный до 2.3.1 (с хешем), не пересчитывается: файл не переедет на новое место."""
+    out = str(tmp_path / "out")
+    rp = "disk:/Встреча: итоги/SomeDox.docx"
+    old = legacy_local_path(out, rp)
+    st.mark_pending(rp, 1, None)
+    st._conn().execute("UPDATE files SET local_path=? WHERE remote_path=?", (old, rp))
+    st.assign_local_paths(out)
+    assert _local_paths(st)[rp] == old
+
+
+def test_assign_downloaded_twin_forces_hash(st, tmp_path):
+    out = str(tmp_path / "out")
+    st.mark_pending("disk:/a_b/x.txt", 1, None)
+    st.mark_downloaded("disk:/a_b/x.txt", os.path.join(out, "a_b", "x.txt"))
+    st.mark_pending("disk:/a:b/x.txt", 1, None)
+    st.assign_local_paths(out)
+    assert _local_paths(st)["disk:/a:b/x.txt"] == \
+        os.path.join(out, "a_b", f"x_{_short_hash('disk:/a:b/x.txt')}.txt")
+
+
+def test_assign_reuses_file_saved_under_old_name(st, tmp_path):
+    """После «Забыть список файлов» файл под именем до 2.3.1 узнаётся, а не качается второй раз."""
+    out = str(tmp_path / "out")
+    saved, fresh = "disk:/Встреча: итоги/SomeDox.docx", "disk:/Встреча: итоги/New.docx"
+    old = legacy_local_path(out, saved)
+    os.makedirs(os.path.dirname(old))
+    with open(old, "wb") as f:
+        f.write(b"x")
+    st.mark_pending_batch([(saved, 1, None), (fresh, 1, None)])
+    st.assign_local_paths(out)
+    rows = _local_paths(st)
+    assert rows[saved] == old
+    assert rows[fresh] == os.path.join(out, "Встреча_ итоги", "New.docx")  # файла нет — новое имя
 
 
 def test_mark_pending_batch(st):

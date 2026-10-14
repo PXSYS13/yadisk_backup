@@ -1,4 +1,5 @@
-/* Сортировка: сначала «Посмотреть, что получится», потом «Разложить файлы» с подтверждением. */
+/* Сортировка: сначала «Посмотреть, что получится» (сколько папок исчезнет, примеры переносов),
+   потом «Разложить файлы» с подтверждением. Тексты честно говорят: папки, как на Диске, пропадут. */
 (function () {
   'use strict';
   const App = window.App;
@@ -23,24 +24,43 @@
     return { summary, result, progress };
   }
 
+  // «Исчезнут 37 папок»
+  const foldersText = (n) =>
+    `${fmt.plural(n, 'Исчезнет', 'Исчезнут', 'Исчезнут')} ${fmt.num(n)} ${fmt.plural(n, 'папка', 'папки', 'папок')}`;
+
   function summaryHtml(sum) {
     const shelves = Object.entries(sum.shelves || {}).map(([name, v]) =>
       `<tr><td>${esc(name)}</td><td>${fmt.files(v.count)}</td><td>${fmt.bytes(v.bytes)}</td></tr>`).join('');
+    const examples = (sum.examples || []).map((e) =>
+      `<tr><td class="name">${esc(e.from)}</td><td class="name">${esc(e.to)}</td></tr>`).join('');
+    const n = sum.folders || 0;
     return `<p>В папке <b>${fmt.files(sum.total)}</b> (${fmt.bytes(sum.total_bytes)}).
-      Дубликатов: <b>${fmt.files(sum.duplicates)}</b>${sum.duplicates ? ` (${fmt.bytes(sum.duplicates_bytes)}) — они уедут в «_duplicates», ничего не удаляется` : ''}.</p>
-      <table class="list" style="margin-top:10px"><thead><tr><th>Папка</th><th>Файлов</th><th>Размер</th></tr></thead><tbody>${shelves}</tbody></table>`;
+      Дубликатов: <b>${fmt.files(sum.duplicates)}</b>${sum.duplicates ? ` (${fmt.bytes(sum.duplicates_bytes)}) — они уедут в папку «_duplicates», а не удалятся` : ''}.</p>
+      ${n ? `<p style="margin-top:8px"><b>${foldersText(n)}</b> — файлы из них переедут в папки по типам, а опустевшие папки программа удалит.</p>` : ''}
+      ${examples ? `<div class="section-title" style="margin-top:18px">Например</div>
+      <table class="list"><thead><tr><th>Сейчас</th><th>После сортировки</th></tr></thead><tbody>${examples}</tbody></table>` : ''}
+      <div class="section-title" style="margin-top:18px">Куда что ляжет</div>
+      <table class="list"><thead><tr><th>Папка</th><th>Файлов</th><th>Размер</th></tr></thead><tbody>${shelves}</tbody></table>`;
   }
 
   App.screens.sort = {
     mount(el) {
       el.innerHTML = `<div class="page-head"><h1>Сортировка</h1>
-          <p>Когда всё скачается, программа может разложить файлы по папкам. Сначала покажет, что получится.</p></div>
+          <p>Файлы Диска уже лежат в тех же папках, что на Яндекс.Диске, — для этого ничего делать не нужно.
+          Сортировка нужна, только если вы хотите собрать все файлы в общие папки по типам. Сначала программа
+          покажет, что получится.</p></div>
         <div class="stack">
         <div class="card"><div class="card-head"><span class="icon-box">${App.icon('grid')}</span>
-          <div class="grow"><h2>Разложить скачанное по папкам</h2></div></div>
-          <p class="lead">Программа разложит файлы по папкам «Фото», «Видео», «Документы», «Архивы» и другим — фото и видео
-          ещё и по годам. Одинаковые файлы уедут в папку «_duplicates». <b>Ничего не удаляется.</b>
-          Превью и служебные папки не трогаются.</p>
+          <div class="grow"><h2>Разложить файлы по типам</h2></div></div>
+          <p class="lead">Программа соберёт файлы из всех папок в общие папки «Фото», «Видео», «Документы», «Архивы»
+          и другие — фото и видео ещё и по годам и месяцам. Одинаковые файлы уедут в папку «_duplicates».
+          Папки «_превью», «_ссылки» и служебные не трогаются.</p>
+          <div class="banner safety" style="margin:14px 0 18px;box-shadow:none"><span class="b-icon">${App.icon('alert')}</span><div>
+            <h3>Папки, как на Диске, исчезнут</h3>
+            <p>Сейчас файлы лежат так же, как на Яндекс.Диске. После сортировки, например, «Отчёт.docx» из папки
+            «Загрузки → Проект» окажется просто в папке «Документы», а картинка из той же папки — в папке «Фото».
+            Опустевшие папки программа удалит. Сами файлы не удаляются, но вернуть всё как было автоматически нельзя.</p>
+          </div></div>
           <label class="field"><span>Какую папку разложить</span>
             <input type="text" id="sort-path" spellcheck="false"></label>
           <div class="row" style="margin-top:6px">
@@ -94,8 +114,11 @@
 
   App.action('sort-apply', async (btn) => {
     const path = byId('sort-path').value.trim();
-    const yes = await App.confirm({ title: 'Разложить файлы по папкам?', ok: 'Разложить',
-      text: `Файлы в «${path}» переедут в папки по типам. Отменить это автоматически нельзя, но ничего не удаляется: дубликаты уедут в «_duplicates».` });
+    const n = (lastSummary && lastSummary.folders) || 0;
+    const yes = await App.confirm({ title: 'Разложить файлы по типам?', ok: 'Разложить файлы', danger: true,
+      text: `Файлы из «${path}» переедут в общие папки «Фото», «Видео», «Документы» и другие — папок, как на Яндекс.Диске, больше не будет.` +
+        (n ? ` ${foldersText(n)}: программа удалит их, когда они опустеют.` : '') +
+        ' Сами файлы не удаляются, одинаковые уедут в «_duplicates». Вернуть всё как было автоматически нельзя.' });
     if (!yes) return;
     lastResult = null;
     clickedAt = Date.now();

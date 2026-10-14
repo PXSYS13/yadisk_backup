@@ -27,10 +27,12 @@ _WIN_RESERVED = {
 }
 
 IS_WINDOWS = sys.platform.startswith("win")
+# Windows и macOS (APFS по умолчанию) не различают регистр: Docs/a.txt и docs/a.txt — один файл
+CASE_INSENSITIVE_PATHS = IS_WINDOWS or sys.platform == "darwin"
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 
@@ -314,6 +316,31 @@ def sanitize_remote_path(remote_path: str) -> str:
     return "/".join(parts)
 
 
+def remote_parts(remote_path: str) -> tuple[list[str], list[str]]:
+    """Части пути на Диске (без 'disk:' и пустых частей): как есть и после санитизации."""
+    raw = [part for part in remote_path.removeprefix("disk:").split("/") if part]
+    return raw, [sanitize_component(part) for part in raw]
+
+
+def remote_path_is_clean(remote_path: str) -> bool:
+    """Путь ложится на диск как есть: ни одну его часть не пришлось чистить."""
+    raw, clean = remote_parts(remote_path)
+    return raw == clean
+
+
+def legacy_local_path(download_dir: str, remote_path: str) -> str | None:
+    """Путь по правилу до 2.3.1 — если он отличается от нынешнего, иначе None.
+
+    Раньше хеш дописывался к имени файла, даже если чистить пришлось только папку
+    («Встреча: итоги/SomeDox.docx» → «Встреча_ итоги/SomeDox_a1b2c3.docx»). Такой файл
+    может уже лежать на диске: его надо узнать, а не скачать второй раз под новым именем.
+    """
+    raw, clean = remote_parts(remote_path)
+    if raw == clean or raw[-1:] != clean[-1:]:
+        return None
+    return resolve_local_path(download_dir, remote_path)  # без набора — прежнее правило
+
+
 def ensure_dir(path: str | os.PathLike) -> None:
     """Создаёт директорию и все родительские, если их нет."""
     os.makedirs(path, exist_ok=True)
@@ -340,6 +367,15 @@ def _short_hash(remote_path: str) -> str:
     return hashlib.sha256(remote_path.encode("utf-8", errors="replace")).hexdigest()[:6]
 
 
+def path_key(path: str) -> str:
+    r"""Ключ занятого пути: пути, которые ФС считает одним файлом, дают один ключ.
+
+    На Windows 'D:/YAD-bak\a_b\x.txt' и 'D:\YAD-bak\A_B\x.txt' — один и тот же файл.
+    """
+    p = os.path.normpath(path)
+    return p.lower() if CASE_INSENSITIVE_PATHS else p
+
+
 def resolve_local_path(
     download_dir: str,
     remote_path: str,
@@ -347,14 +383,22 @@ def resolve_local_path(
 ) -> str:
     """Собирает локальный путь для удалённого файла с санитизацией и поддержкой длинных путей.
 
-    Если при санитизации имя изменилось (были запрещённые символы вроде : ? * или зарезервированные имена),
-    добавляет короткий детерминированный хеш remote_path для исключения коллизий (a:b.jpg vs a?b.jpg vs a_b.jpg).
-    """
-    p = remote_path.removeprefix("disk:").lstrip("/")
-    raw_parts = [part for part in p.split("/") if part]
-    clean_parts = [sanitize_component(part) for part in raw_parts]
+    Если при санитизации изменилось имя самого файла (были запрещённые символы вроде : ? * или
+    зарезервированные имена), добавляет короткий детерминированный хеш remote_path для
+    исключения коллизий (a:b.jpg vs a?b.jpg vs a_b.jpg).
 
-    if clean_parts and raw_parts != clean_parts:
+    С набором занятых путей existing_paths (ключи path_key) хеш получает только такой файл или
+    путь, который уже занят. Если чистить пришлось только папку, имена файлов внутри остаются
+    прежними: «Встреча: итоги/SomeDox.docx» → «Встреча_ итоги/SomeDox.docx» — ссылки между
+    файлами проекта не ломаются. Без набора столкновения не видны, поэтому хеш, как до 2.3.1,
+    добавляется при любой чистке пути (ссылки public_download, запасной путь downloader).
+    """
+    raw_parts, clean_parts = remote_parts(remote_path)
+    if existing_paths is None:
+        changed = raw_parts != clean_parts
+    else:
+        changed = raw_parts[-1:] != clean_parts[-1:]
+    if clean_parts and changed:
         stem, ext = os.path.splitext(clean_parts[-1])
         clean_parts[-1] = f"{stem}_{_short_hash(remote_path)}{ext}"
 
@@ -362,11 +406,14 @@ def resolve_local_path(
     local = os.path.join(download_dir, rel.replace("/", os.sep))
 
     if existing_paths is not None:
-        check_key = local.lower() if IS_WINDOWS else local
-        if check_key in existing_paths:
+        if path_key(local) in existing_paths:
             stem, ext = os.path.splitext(local)
-            local = f"{stem}_{_short_hash(remote_path)}{ext}"
-        existing_paths.add(local.lower() if IS_WINDOWS else local)
+            h = _short_hash(remote_path)
+            local, n = f"{stem}_{h}{ext}", 1
+            while path_key(local) in existing_paths:  # занято и имя с хешем — почти невозможно
+                n += 1
+                local = f"{stem}_{h}_{n}{ext}"
+        existing_paths.add(path_key(local))
 
     return local
 

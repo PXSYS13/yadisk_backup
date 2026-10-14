@@ -68,6 +68,12 @@ def test_no_markdown_file_names_in_ui_text():
     assert not re.findall(r"\b[\w-]+\.md\b", text)
 
 
+def test_sorting_never_promises_that_nothing_is_deleted():
+    # «Разложить файлы» удаляет опустевшие папки и разбирает папки Диска — обещать обратное нельзя
+    text = APP_HTML.read_text(encoding="utf-8") + _all_js() + (ASSETS / "index.html").read_text(encoding="utf-8")
+    assert not re.search(r"ничего не удаля(ется|ет)", text, re.IGNORECASE)
+
+
 def test_index_switches_between_new_and_old_ui(monkeypatch):
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     new = client.get("/?ui=new").text

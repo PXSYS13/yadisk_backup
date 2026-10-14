@@ -1775,8 +1775,9 @@ def diagnose_tasks() -> dict:
     Возвращает и старые поля (*_detected, message, recommendation), и новые:
     kind, title, explain, affects, counts, links.
     """
-    # Строки скачивания по ссылкам объясняет свой экран: здесь они дали бы баннер «Диска»
-    lines = [ln.lower() for ln in tm.recent_log_lines(40, exclude=(SLOT_LINKS,))]
+    # Строки скачивания по ссылкам объясняет свой экран: здесь они дали бы баннер «Диска».
+    # Сортировка печатает имена файлов («timeout_2024.docx») — это не про Яндекс
+    lines = [ln.lower() for ln in tm.recent_log_lines(40, exclude=(SLOT_LINKS, SLOT_ORGANIZE))]
     counts = {
         rule["kind"]: sum(1 for ln in lines if any(m in ln for m in rule["markers"]))
         for rule in _DIAG_RULES

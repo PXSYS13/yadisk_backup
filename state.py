@@ -18,7 +18,14 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from utils import IS_WINDOWS, resolve_local_path, sqlite_tx
+from utils import (
+    legacy_local_path,
+    path_key,
+    remote_path_is_clean,
+    resolve_local_path,
+    sqlite_tx,
+    to_long_path,
+)
 
 
 def _utc_now() -> str:
@@ -229,9 +236,11 @@ class State:
     def assign_local_paths(self, download_dir: str) -> None:
         """Детерминированно назначает и сохраняет local_path для pending/failed файлов.
 
-        Учитывает существующие пути, санитизацию и коллизии регистра на Windows.
+        Учитывает существующие пути, санитизацию и коллизии регистра (Windows, macOS).
         Если пользователь сменил DOWNLOAD_DIR, старые назначения вне новой папки
         пересчитываются — иначе остаток очереди молча уехал бы в прежнюю папку.
+        Назначенные пути внутри папки не пересчитываются; новые строки получают имена
+        по правилу 2.3.1 (см. resolve_local_path).
         """
         root = os.path.normcase(os.path.abspath(download_dir)).rstrip("\\/")
 
@@ -239,13 +248,10 @@ class State:
             n = os.path.normcase(os.path.abspath(path))
             return n == root or n.startswith(root + os.sep)
 
-        def key(path: str) -> str:
-            return path.lower() if IS_WINDOWS else path
-
         with self._tx() as conn:
             # Занятые пути — только у файлов, которые реально лежат на диске
             existing_paths: set[str] = {
-                key(r["local_path"])
+                path_key(r["local_path"])
                 for r in conn.execute(
                     "SELECT local_path FROM files "
                     "WHERE status IN ('downloaded', 'skipped') "
@@ -264,17 +270,33 @@ class State:
             for r in rows:
                 lp = r["local_path"]
                 if lp and under_root(lp):
-                    existing_paths.add(key(lp))
+                    existing_paths.add(path_key(lp))
                 else:
                     to_assign.append(r["remote_path"])
 
             if not to_assign:
                 return
 
-            updates = [
-                (resolve_local_path(download_dir, rp, existing_paths), rp)
-                for rp in to_assign
-            ]
+            # Сначала пути, которые не пришлось чистить: «a_b/x.txt» получит чистое имя,
+            # а «a:b/x.txt» (после чистки тоже a_b/x.txt) — хеш. Сортировка устойчивая:
+            # внутри групп порядок remote_path сохраняется.
+            order = sorted(((not remote_path_is_clean(rp), rp) for rp in to_assign),
+                           key=lambda t: t[0])
+            dir_exists: dict[str, bool] = {}
+            updates: list[tuple[str, str]] = []
+            for dirty, rp in order:
+                old = legacy_local_path(download_dir, rp) if dirty else None
+                if old and path_key(old) not in existing_paths:
+                    folder = os.path.dirname(old)
+                    if folder not in dir_exists:
+                        dir_exists[folder] = os.path.isdir(to_long_path(folder))
+                    # Файл уже лежит под именем до 2.3.1 (например, после «Забыть список
+                    # файлов») — оставляем это имя, а не качаем его второй раз под новым
+                    if dir_exists[folder] and os.path.isfile(to_long_path(old)):
+                        existing_paths.add(path_key(old))
+                        updates.append((old, rp))
+                        continue
+                updates.append((resolve_local_path(download_dir, rp, existing_paths), rp))
             conn.executemany(
                 "UPDATE files SET local_path = ? WHERE remote_path = ?",
                 updates,
