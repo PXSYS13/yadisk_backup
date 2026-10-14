@@ -1,27 +1,40 @@
 # Локальные данные (НИКОГДА не коммитим)
 .env
+.env.*
+!.env.example
 cookies.json
+cookies*.json
 cookies.json.tmp
 
 # БД с локальным состоянием
-state.db
-state.db-wal
-state.db-shm
-unlim_state.db
-unlim_state.db-wal
-unlim_state.db-shm
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
 
-# Логи и временные папки
+# Логи, скачанное и временные файлы
 logs/
 downloads/
 *.log
+*.part
+_unlim_tmp_zips/
+*.zip
+*.bak
+*.tmp
 
-# Локальные заметки, планы и конфиги инструментов разработки — не для репозитория
-PLAN.md
-*.local.md
+# Заметки, планы и конфиги инструментов разработки — не для репозитория
+CLAUDE.md
+AGENTS.md
 .claude/
+.cursor*
+PLAN*.md
+NOTES*
+TODO*
+*.local.md
 support-info.json
 yadisk-logs-*.zip
+/debug_*.py
+/scratch*
 
 # Python кеш
 __pycache__/
@@ -30,6 +43,8 @@ __pycache__/
 *.pyd
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
 
 # Виртуальные окружения
 .venv/
