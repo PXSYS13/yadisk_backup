@@ -43,6 +43,7 @@ from downloader import account_info, api_error_details, make_client
 from unlim_common import (
     DEFERRED_MARKER,
     RELEASE_IN_PROGRESS_SQL,
+    clear_dead_hosts,
     missing_required_cookies,
     reset_failed_files,
     unlim_tx,
@@ -498,8 +499,12 @@ def plan_sources(do_disk: bool, do_unlim: bool, token_ok: bool, cookies_ok: bool
 
 
 def preflight_sources(do_disk: bool, do_unlim: bool) -> dict:
-    """plan_sources по текущим настройкам — до запуска, чтобы ответить пользователю сразу."""
-    token_ok = bool(check_token(get_config()["token"]).get("ok")) if do_disk else False
+    """plan_sources по текущим настройкам — до запуска, чтобы ответить пользователю сразу.
+
+    Яндекс не ответил на проверку токена — это не «нет токена»: Диск всё равно пробуем.
+    """
+    tok = check_token(get_config()["token"]) if do_disk else {}
+    token_ok = bool(tok.get("ok") or tok.get("unreachable"))
     cookies_ok = bool(check_cookies().get("ok")) if do_unlim else False
     return plan_sources(do_disk, do_unlim, token_ok, cookies_ok)
 
@@ -534,45 +539,138 @@ def _free_space(path: str) -> dict | None:
     return {"free": usage.free, "total": usage.total, "path": str(p)}
 
 
-# ── Pipeline ────────────────────────────────────────────────────────────────
+# ── Режим спасения ──────────────────────────────────────────────────────────
+
+# Список файлов, собранный в этом процессе позже этого срока, при новом старте не пересобираем
+RESCUE_RELIST_SEC = 6 * 3600
+# Столько раундов подряд с непонятным кодом выхода — дальше просим прислать отчёт
+RESCUE_STUCK_ROUNDS = 3
+# Временные ошибки Диска: явный старт возвращает такие файлы в очередь
+_DISK_TRANSIENT_ERRORS = ("local_disk |", "auth_expired |", "server_50x |",
+                          "download_timeout |", "rate_limit |")
+_SOURCE_LABEL = {"disk": "Диск", "unlim": "Безлимит"}
+_BRANCH_STATE_TEXT = {
+    "checking": "проверяю доступ", "listing": "получаю список файлов", "downloading": "скачиваю",
+    "waiting": "ждём Яндекса", "done": "готово", "needs_action": "нужно ваше действие",
+    "stopped": "остановлено", "error": "ошибка",
+}
 
 
-class Pipeline:
-    """Автоматическая последовательность: scan → download диска → collect → workers безлимита.
-    Сам мониторит окончание каждого шага и переходит к следующему.
+def _retry_every_sec() -> int:
+    """Пауза между раундами повторов. YADISK_RETRY_EVERY_SEC — для живых проверок."""
+    return safe_int(os.environ.get("YADISK_RETRY_EVERY_SEC"), 1800, 60, 24 * 3600)
+
+
+def _hhmm(ts: float | None) -> str:
+    return time.strftime("%H:%M", time.localtime(ts)) if ts else ""
+
+
+def _db_has_rows(db_file: Path, table: str) -> bool:
+    table = _validate_sql_ident(table, _ALLOWED_TABLES, "table")
+    if not db_file.exists():
+        return False
+    try:
+        c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
+        try:
+            return c.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return False
+
+
+def _reset_transient_disk_failures() -> int:
+    """Явный старт: файлы, упавшие из-за сбоев (а не из-за самих файлов), — снова в очередь."""
+    if not DB_FILE.exists():
+        return 0
+    try:
+        c = sqlite3.connect(DB_FILE, timeout=30)
+    except sqlite3.Error:
+        return 0
+    try:
+        where = " OR ".join("error LIKE ?" for _ in _DISK_TRANSIENT_ERRORS)
+        with sqlite_tx(c):
+            return c.execute(
+                f"UPDATE files SET status='pending', error=NULL WHERE status='failed' AND ({where})",
+                [p + "%" for p in _DISK_TRANSIENT_ERRORS],
+            ).rowcount
+    except sqlite3.Error:
+        return 0
+    finally:
+        c.close()
+
+
+class Branch:
+    """Одна ветка спасения: «disk» (scan → download) или «unlim» (collect → воркеры)."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.thread: threading.Thread | None = None
+        self.wake = threading.Event()
+        self.reset()
+
+    def reset(self) -> None:
+        self.state = "off"  # off|checking|listing|downloading|waiting|done|needs_action|stopped|error
+        self.action: str | None = None  # token | cookies | free_space | send_logs
+        self.reason = ""                # итог простыми словами
+        self.activity = ""              # что делается прямо сейчас
+        self.round = 0
+        self.next_retry_at: float | None = None
+        self.last_exit: dict | None = None
+        self.odd_rounds = 0
+        self.reset_done = False
+        self.wake.clear()
+
+    @property
+    def label(self) -> str:
+        return _SOURCE_LABEL[self.name]
+
+    def alive(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
+    def snapshot(self) -> dict:
+        return {
+            "state": self.state, "action": self.action, "reason": self.reason,
+            "activity": self.activity, "round": self.round,
+            "next_retry_at": self.next_retry_at, "last_exit": self.last_exit,
+            "running": self.alive(),
+        }
+
+
+class Rescue:
+    """«Режим спасения»: Диск и Безлимит качаются параллельно, недоступное — раундами.
+
+    Ветка проходит очередь до конца. Если остались файлы на молчащих серверах Яндекса
+    (код 5) или Яндекс не отвечает (код 3), она ждёт retry_every секунд или кнопку
+    «Попробовать сейчас» и качает снова — без повторного сбора списка. Код 2 ставит
+    ветку в «нужно действие» (новый ключ или доступ), код 4 — обе ветки (нет места).
+
+    status() сохраняет прежний формат Pipeline (state/step/log), чтобы старый
+    интерфейс продолжал работать.
     """
 
     def __init__(self):
-        self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._stop = False
-        self._owned_slots: set[str] = set()  # слоты которые pipeline сам запустил
-        self.state: str = "idle"  # idle | running | done | failed | stopped
-        self.step: str = "—"
-        self.log: deque[str] = deque(maxlen=120)
+        self._stop_evt = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.branches = {"disk": Branch("disk"), "unlim": Branch("unlim")}
+        self.log: deque[str] = deque(maxlen=200)
+        self.state = "idle"  # idle | running | done | failed | stopped
         self.started_at: float | None = None
         self.finished_at: float | None = None
-        self.skip_disk: bool = False
-        self.skip_unlim: bool = False
-        self.workers: int = 4
-        self.batch: int = DEFAULT_UNLIM_BATCH
-        # None — качать всё; список категорий — отфильтровать после scan/collect
+        self.workers = 4
+        self.batch = DEFAULT_UNLIM_BATCH
+        self.skip_disk = False
+        self.skip_unlim = False
         self.disk_categories: list[str] | None = None
         self.unlim_categories: list[str] | None = None
-        # Часть запрошенных источников пропущена (нет токена или cookies)
-        self.partial: bool = False
+        self.partial = False
+        self.retry_every = _retry_every_sec()
+        self._owned_slots: set[str] = set()
+        # Когда список файлов собирался в этом процессе — чтобы не пересобирать на каждый старт
+        self._listed_at: dict[str, float] = {}
 
-    def _own_start(self, slot: str, script: str, args: list[str]) -> tuple[bool, str]:
-        """Запускает задачу через tm и помечает её как принадлежащую pipeline'у."""
-        ok, msg = tm.start(slot, script, args)
-        if ok:
-            self._owned_slots.add(slot)
-        return ok, msg
-
-    def _log(self, msg: str):
-        ts = time.strftime("%H:%M:%S")
-        self.log.append(f"{ts}  {msg}")
-        log.info("pipeline: %s", msg)
+    # ── управление ──
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -583,11 +681,13 @@ class Pipeline:
               unlim_categories: list[str] | None = None) -> tuple[bool, str]:
         with self._lock:
             if self.is_running():
-                return False, "Pipeline уже идёт"
-            self._stop = False
+                # Повторный старт во время ожидания = «Попробовать сейчас»
+                if self._wake_waiting():
+                    return True, "Пробую отложенные файлы прямо сейчас"
+                return False, "Спасение уже идёт"
+            self._stop_evt.clear()
             self._owned_slots.clear()
             self.state = "running"
-            self.step = "старт"
             self.log.clear()
             self.started_at = time.time()
             self.finished_at = None
@@ -598,217 +698,44 @@ class Pipeline:
             self.disk_categories = list(disk_categories) if disk_categories is not None else None
             self.unlim_categories = list(unlim_categories) if unlim_categories is not None else None
             self.partial = False
+            self.retry_every = _retry_every_sec()
+            for b in self.branches.values():
+                b.reset()
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
-            return True, "Pipeline запущен"
+            return True, "Спасение запущено"
+
+    def retry_now(self) -> tuple[bool, str]:
+        if not self.is_running():
+            return False, "Спасение не запущено"
+        if self._wake_waiting():
+            return True, "Пробую отложенные файлы прямо сейчас"
+        return False, "Сейчас нечего повторять — всё и так качается"
+
+    def _wake_waiting(self) -> bool:
+        waiting = [b for b in self.branches.values() if b.state == "waiting"]
+        if waiting:
+            clear_dead_hosts(str(UNLIM_DB_FILE))
+            self._log("🔁 Повторяю отложенные файлы по запросу")
+            for b in waiting:
+                b.wake.set()
+        return bool(waiting)
 
     def stop(self) -> tuple[bool, str]:
         if not self.is_running():
-            return False, "Pipeline не идёт"
-        self._stop = True
-        # Гасим ТОЛЬКО задачи которые pipeline сам запустил
-        for slot in list(self._owned_slots):
-            tm.stop(slot)
+            return False, "Спасение не идёт"
+        self._stop_evt.set()
+        for b in self.branches.values():
+            b.wake.set()
+        # Гасим ВСЕ задачи Диска и Безлимита — в том числе запущенные с вкладок вручную
+        _stop_and_wait(tm.stop_matching(SLOT_DISK) + tm.stop_matching(UNLIM_SLOT_PREFIX))
+        if self._thread is not None:
+            self._thread.join(timeout=10)
+        _release_orphaned_unlim()
         self._log("⏹ остановлено пользователем")
         return True, "Остановлено"
 
-    def _wait_task(self, slot: str, on_finish_msg: str) -> int:
-        """Блокирующее ожидание завершения задачи в слоте."""
-        while not self._stop:
-            t = tm.get(slot)
-            if not t:
-                time.sleep(0.5)
-                continue
-            if not t.alive():
-                code = t.proc.poll()
-                self._log(f"{on_finish_msg} (exit={code})")
-                return code if code is not None else 0
-            time.sleep(1.0)
-        return -1
-
-    def _run_step(self, slot: str, script: str, args: list[str],
-                  start_msg: str, finish_msg: str, fail_msg: str,
-                  tolerate_partial: bool = False) -> bool:
-        """Запускает задачу и ждёт её. False — шаг провалился или pipeline остановлен.
-
-        tolerate_partial — exit=1 («часть файлов упала») не останавливает pipeline:
-        один удалённый с Диска файл не должен отменять скачивание безлимита.
-        """
-        self._log(start_msg)
-        ok, msg = self._own_start(slot, script, args)
-        if not ok:
-            self._log(f"❌ {fail_msg}: {msg}")
-            self.state = "failed"
-            return False
-        code = self._wait_task(slot, finish_msg)
-        if self._stop:
-            self._abort()
-            return False
-        task = tm.get(slot)
-        if (task is not None and task.was_stopped) or code == EXIT_INTERRUPTED:
-            self._log(f"⏹ {fail_msg}: остановлено пользователем")
-            self._abort()
-            return False
-        if code == 0:
-            return True
-        if code == EXIT_DEFERRED:
-            self._log(f"⏳ {fail_msg}: всё доступное скачано, часть файлов ждёт, когда серверы Яндекса оживут")
-            return True
-        if code == EXIT_PARTIAL and tolerate_partial:
-            self._log(f"⚠️ {fail_msg}: часть файлов упала — продолжаю. "
-                      f"Упавшие можно повторить кнопкой «Повторить ошибки».")
-            return True
-        why = _EXIT_EXPLAIN.get(code)
-        self._log(f"❌ {fail_msg} завершился с ошибкой (exit={code}){': ' + why if why else ''}")
-        self.state = "failed"
-        return False
-
-    def _apply_categories(self, db_file: Path, table: str, id_col: str,
-                          categories: list[str], label: str) -> None:
-        unskip_category_marker(db_file, table)
-        skipped, kept = filter_to_categories(db_file, table, id_col, categories)
-        names = ", ".join(CATEGORY_LABELS.get(c, c) for c in categories) or "ничего"
-        self._log(f"🎯 {label}: качаем {names} — в очереди {kept}, пропущено {skipped}")
-
-    def _workers_outcome(self, ids: list[int]) -> str:
-        """done | stopped | failed — по кодам выхода воркеров, а не по факту их завершения."""
-        codes: list[int | None] = []
-        for i in ids:
-            t = tm.get(f"{UNLIM_WORKER_SLOT_PREFIX}{i}")
-            if t is None:
-                continue
-            if t.was_stopped:
-                return "stopped"
-            codes.append(t.proc.poll())
-        bad = [c for c in codes if c not in (0, None, EXIT_DEFERRED)]
-        if not bad:
-            return "done"
-        for c in bad:
-            if c in _EXIT_EXPLAIN:
-                self._log(f"❌ воркеры безлимита остановились: {_EXIT_EXPLAIN[c]}")
-                return "failed"
-        if len(bad) == len(codes):
-            self._log(f"❌ все воркеры безлимита завершились с ошибкой (exit={bad[0]})")
-            return "failed"
-        self._log(f"⚠️ часть воркеров завершилась с ошибкой (exit={sorted(set(bad))}), остальные доработали")
-        return "done"
-
-    def _run(self):
-        try:
-            cfg = get_config()
-
-            # === Что реально можно скачать: без токена — только безлимит, без cookies — только диск ===
-            self.step = "проверка доступа"
-            tok: dict = {"ok": False}
-            if not self.skip_disk:
-                self._log("🔑 Проверяю токен...")
-                tok = check_token(cfg["token"])
-                if tok.get("ok"):
-                    self._log(f"✓ Токен OK: {tok.get('login')}, {tok.get('used', 0) / 1e9:.1f} ГБ занято")
-                else:
-                    self._log(f"✗ Токен: {tok.get('msg')}")
-            cookies: dict = {"ok": False}
-            if not self.skip_unlim:
-                cookies = check_cookies()
-                self._log(f"{'✓' if cookies.get('ok') else '✗'} Cookies: {cookies.get('msg')}")
-            src = plan_sources(not self.skip_disk, not self.skip_unlim,
-                               bool(tok.get("ok")), bool(cookies.get("ok")))
-            for note in src["notes"]:
-                self._log(note)
-            if src["error"]:
-                self._log(f"❌ {src['error']}")
-                self.state = "failed"
-                return
-            self.partial = bool(src["notes"])
-
-            # === ДИСК ===
-            if src["run_disk"]:
-                if self._stop:
-                    self._abort()
-                    return
-                self.step = "сканирую диск"
-                if not self._run_step(SLOT_DISK, "main.py", ["scan"],
-                                      "🔍 Запускаю scan...", "✓ scan завершён", "scan диска"):
-                    return
-                if self.disk_categories is not None:
-                    self._apply_categories(DB_FILE, "files", "remote_path",
-                                           self.disk_categories, "Диск")
-
-                self.step = "качаю диск"
-                if not self._run_step(
-                    SLOT_DISK, "main.py",
-                    ["download", "--workers", str(min(self.workers, MAX_DISK_WORKERS)), "--no-scan"],
-                    f"⬇️ Запускаю download (workers={min(self.workers, MAX_DISK_WORKERS)})...",
-                    "✓ download диска завершён", "download диска",
-                    tolerate_partial=True,
-                ):
-                    return
-            elif self.skip_disk:
-                self._log("⏭ Шаг 'диск' пропущен")
-
-            # === БЕЗЛИМИТ ===
-            if src["run_unlim"]:
-                if self._stop:
-                    self._abort()
-                    return
-                self.step = "собираю список безлимита"
-                if not self._run_step(SLOT_UNLIM_COLLECT, "unlim_download.py", ["--collect"],
-                                      "🗂 Запускаю unlim collect...", "✓ список безлимита собран",
-                                      "сбор списка безлимита"):
-                    return
-                if self.unlim_categories is not None:
-                    self._apply_categories(UNLIM_DB_FILE, "unlim_files", "file_id",
-                                           self.unlim_categories, "Безлимит")
-
-                # workers
-                self.step = f"скачиваю безлимит ({self.workers} воркеров, batch={self.batch})"
-                self._log(f"🚀 Запускаю {self.workers} воркеров (пачка={self.batch})...")
-                res = _launch_unlim_workers(self.workers, self.batch, starter=self._own_start)
-                for i in res["started"]:
-                    self._log(f"  ✓ воркер {i} запущен")
-                for f in res["failed"]:
-                    self._log(f"  ✗ воркер {f['id']}: {f['msg']}")
-
-                # Ждём пока все воркеры закончат
-                while not self._stop and tm.any_alive(UNLIM_WORKER_SLOT_PREFIX):
-                    time.sleep(1.0)
-                if self._stop:
-                    self._abort()
-                    return
-                outcome = self._workers_outcome(res["started"])
-                if outcome == "stopped":
-                    self._log("⏹ воркеры безлимита остановлены пользователем")
-                    self._abort()
-                    return
-                if outcome == "failed":
-                    self.state = "failed"
-                    return
-                self._log("✓ все воркеры безлимита завершили работу")
-            elif self.skip_unlim:
-                self._log("⏭ Шаг 'безлимит' пропущен")
-
-            if self._stop:
-                self._abort()
-                return
-
-            self.state = "done"
-            self.step = "финиш"
-            self._log("🏁 Готово, но часть источников пропущена (см. выше)" if self.partial else "🏆 ВСЁ ГОТОВО!")
-        except Exception as e:
-            diag = classify_yandex_error(e)
-            if diag["is_yandex_server"]:
-                self._log(f"⚠️ Сбой серверов Яндекса: {diag['title']}")
-                self._log(f"   {diag['message']}")
-                self._log(f"   Новости дата-центров Яндекса: {TELEGRAM_CHANNEL}")
-            else:
-                self._log(f"❌ Ошибка pipeline: {e}")
-            self.state = "failed"
-        finally:
-            self.finished_at = time.time()
-
-    def _abort(self):
-        self.state = "stopped"
-        self.step = "остановлено"
+    # ── статус ──
 
     def status(self) -> dict:
         if not self.started_at:
@@ -817,19 +744,384 @@ class Pipeline:
             elapsed = self.finished_at - self.started_at
         else:
             elapsed = time.time() - self.started_at
-
+        retry_at = [b.next_retry_at for b in self.branches.values() if b.next_retry_at]
         return {
             "state": self.state,
             "running": self.is_running(),
-            "step": self.step,
+            "step": self._step_text(),
             "started_at": self.started_at,
             "elapsed": elapsed,
             "partial": self.partial,
             "log": list(self.log),
+            "branches": {name: b.snapshot() for name, b in self.branches.items()},
+            "next_retry_at": min(retry_at) if retry_at else None,
+            "retry_every": self.retry_every,
         }
 
+    def _step_text(self) -> str:
+        parts = []
+        for b in self.branches.values():
+            if b.state == "off":
+                continue
+            text = _BRANCH_STATE_TEXT.get(b.state, b.state)
+            if b.state == "waiting" and b.next_retry_at:
+                text += f" до {_hhmm(b.next_retry_at)}"
+            parts.append(f"{b.label}: {text}")
+        return " · ".join(parts) or "—"
 
-pipeline = Pipeline()
+    # ── внутреннее ──
+
+    def _log(self, msg: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        self.log.append(f"{ts}  {msg}")
+        log.info("rescue: %s", msg)
+
+    def _stopped(self) -> bool:
+        return self._stop_evt.is_set()
+
+    def _own_start(self, slot: str, script: str, args: list[str]) -> tuple[bool, str]:
+        """Запускает задачу через tm и помечает её как свою."""
+        ok, msg = tm.start(slot, script, args)
+        if ok:
+            self._owned_slots.add(slot)
+        return ok, msg
+
+    def _wait_task(self, slot: str, on_finish_msg: str = "") -> int:
+        """Ждёт задачу, которую только что запустили в слоте. -1 — спасение остановлено."""
+        task = tm.get(slot)
+        while not self._stopped():
+            if task is None:
+                task = tm.get(slot)
+            elif not task.alive():
+                code = task.proc.poll()
+                if on_finish_msg:
+                    self._log(f"{on_finish_msg} (код {code})")
+                if task.was_stopped:
+                    return -1
+                return code if code is not None else 0
+            self._stop_evt.wait(0.5)
+        return -1
+
+    def _wait_workers(self, ids: list[int]) -> list[int | None] | None:
+        """Ждёт воркеров безлимита. None — спасение или воркеры остановлены."""
+        tasks = [tm.get(f"{UNLIM_WORKER_SLOT_PREFIX}{i}") for i in ids]
+        while not self._stopped() and any(t is not None and t.alive() for t in tasks):
+            self._stop_evt.wait(1.0)
+        if self._stopped() or any(t is not None and t.was_stopped for t in tasks):
+            return None
+        return [t.proc.poll() for t in tasks if t is not None]
+
+    def _run_step(self, b: Branch, slot: str, script: str, args: list[str], activity: str) -> int:
+        """Запускает задачу ветки и ждёт её. Код выхода; -1 — остановлено."""
+        b.activity = activity
+        while True:
+            if self._stopped():
+                return -1
+            ok, msg = self._own_start(slot, script, args)
+            if ok:
+                break
+            # Слот занят задачей, запущенной вручную, — дождёмся её и запустим свою
+            self._log(f"⏳ {b.label}: {activity} — жду уже запущенную задачу ({msg})")
+            if self._stop_evt.wait(5):
+                return -1
+        code = self._wait_task(slot, f"{b.label}: {activity} — завершено")
+        if code == EXIT_INTERRUPTED:
+            return -1
+        if code != -1:
+            b.last_exit = {"code": code, "at": time.time(), "step": activity}
+        return code
+
+    def _needs_listing(self, name: str) -> bool:
+        at = self._listed_at.get(name)
+        return at is None or time.time() - at > RESCUE_RELIST_SEC
+
+    def _apply_categories(self, db_file: Path, table: str, id_col: str,
+                          categories: list[str], label: str) -> None:
+        unskip_category_marker(db_file, table)
+        skipped, kept = filter_to_categories(db_file, table, id_col, categories)
+        names = ", ".join(CATEGORY_LABELS.get(c, c) for c in categories) or "ничего"
+        self._log(f"🎯 {label}: качаем {names} — в очереди {kept}, пропущено {skipped}")
+
+    def _apply_category_choice(self, db_file: Path, table: str, id_col: str,
+                               categories: list[str] | None, label: str) -> None:
+        if categories is None:
+            # «Всё»: возвращаем то, что сняли прошлым выбором категорий
+            n = unskip_category_marker(db_file, table)
+            if n:
+                self._log(f"↩️ {label}: вернул в очередь {n} файлов, снятых прошлым выбором категорий")
+        else:
+            self._apply_categories(db_file, table, id_col, categories, label)
+
+    # ── главный поток и ветки ──
+
+    def _run(self) -> None:
+        try:
+            cfg = get_config()
+            tok: dict = {"ok": False}
+            if not self.skip_disk:
+                self.branches["disk"].state = "checking"
+                self._log("🔑 Проверяю ключ доступа к Диску...")
+                tok = check_token(cfg["token"])
+                if tok.get("ok"):
+                    self._log(f"✓ Ключ работает: {tok.get('login')}, {tok.get('used', 0) / 1e9:.1f} ГБ занято")
+                elif tok.get("unreachable"):
+                    self._log("⚠️ Яндекс не ответил на проверку ключа — попробую качать, ключ, скорее всего, в порядке")
+                else:
+                    self._log(f"✗ Ключ: {tok.get('msg')}")
+            cookies: dict = {"ok": False}
+            if not self.skip_unlim:
+                cookies = check_cookies()
+                self._log(f"{'✓' if cookies.get('ok') else '✗'} Доступ к Безлимиту: {cookies.get('msg')}")
+            token_usable = bool(tok.get("ok") or tok.get("unreachable"))
+            src = plan_sources(not self.skip_disk, not self.skip_unlim, token_usable, bool(cookies.get("ok")))
+            for note in src["notes"]:
+                self._log(note)
+            if src["error"]:
+                self._log(f"❌ {src['error']}")
+                for b in self.branches.values():
+                    b.state = "off"
+                self.state = "failed"
+                return
+            self.partial = bool(src["notes"])
+
+            threads = []
+            for name, run, target in (("disk", src["run_disk"], self._run_disk),
+                                      ("unlim", src["run_unlim"], self._run_unlim)):
+                b = self.branches[name]
+                if not run:
+                    b.state = "off"
+                    continue
+                b.state = "checking"
+                b.thread = threading.Thread(target=self._branch_main, args=(b, target), daemon=True)
+                b.thread.start()
+                threads.append(b.thread)
+            for t in threads:
+                t.join()
+            self.state = self._final_state()
+            self._log({
+                "done": "🏁 Готово, но часть источников пропущена (см. выше)" if self.partial else "🏆 ВСЁ ГОТОВО!",
+                "failed": "⚠️ Нужно ваше действие — подробности выше",
+                "stopped": "⏹ Спасение остановлено. Уже скачанное сохранено",
+            }.get(self.state, self.state))
+        except Exception as e:
+            diag = classify_yandex_error(e)
+            if diag["is_yandex_server"]:
+                self._log(f"⚠️ Сбой серверов Яндекса: {diag['title']}")
+                self._log(f"   {diag['message']}")
+                self._log(f"   Новости дата-центров Яндекса: {TELEGRAM_CHANNEL}")
+            else:
+                self._log(f"❌ Ошибка: {e}")
+            log.exception("rescue")
+            self.state = "failed"
+        finally:
+            self.finished_at = time.time()
+
+    def _final_state(self) -> str:
+        states = [b.state for b in self.branches.values() if b.state != "off"]
+        if any(s in ("needs_action", "error") for s in states):
+            return "failed"
+        if self._stopped() or any(s == "stopped" for s in states):
+            return "stopped"
+        return "done"
+
+    def _branch_main(self, b: Branch, target: Callable[[Branch], None]) -> None:
+        try:
+            target(b)
+        except Exception as e:  # noqa: BLE001 — ветка не должна ронять соседнюю
+            log.exception("rescue %s", b.name)
+            b.state = "error"
+            b.action = "send_logs"
+            b.reason = f"Внутренняя ошибка программы: {e}"
+            self._log(f"❌ {b.label}: {e}")
+
+    def _drive(self, b: Branch, prepare: Callable[[Branch], int], download: Callable[[Branch], int],
+               db: tuple[Path, str, str]) -> None:
+        """Общий цикл ветки: подготовить список → качать → ждать раунд, пока есть что качать."""
+        ready = False
+        while not self._stopped():
+            b.round += 1
+            if not ready:
+                code = prepare(b)
+                if code == -1:
+                    return self._branch_stopped(b)
+                if code != 0:
+                    if not self._after_exit(b, code, db):
+                        return
+                    continue
+                ready = True
+            code = download(b)
+            if code == -1:
+                return self._branch_stopped(b)
+            if not self._after_exit(b, code, db):
+                return
+        self._branch_stopped(b)
+
+    def _branch_stopped(self, b: Branch) -> None:
+        if b.state not in ("needs_action", "error"):
+            b.state = "stopped"
+        b.activity = ""
+        b.next_retry_at = None
+
+    def _after_exit(self, b: Branch, code: int, db: tuple[Path, str, str]) -> bool:
+        """Что делать после шага с этим кодом. True — раунд отождан, качаем снова."""
+        stats = db_stats(*db)
+        if code == EXIT_AUTH:
+            b.state = "needs_action"
+            b.action = "token" if b.name == "disk" else "cookies"
+            b.reason = ("Яндекс перестал принимать ключ доступа к Диску" if b.name == "disk"
+                        else "Нужно обновить доступ к Безлимиту")
+            self._log(f"🔑 {b.label}: {b.reason}. Остальное продолжает качаться")
+            return False
+        if code == EXIT_DISK_FULL:
+            self._halt_for_disk()
+            return False
+        deferred = int(stats.get("deferred") or 0)
+        if code in (EXIT_OUTAGE, EXIT_DEFERRED) or (code in (0, EXIT_PARTIAL) and deferred):
+            b.odd_rounds = 0
+            return self._wait_round(b, deferred, outage=(code == EXIT_OUTAGE))
+        if code in (0, EXIT_PARTIAL):
+            failed = int(stats.get("failed") or 0)
+            b.state = "done"
+            b.activity = ""
+            b.reason = (f"Скачано почти всё: {failed} файлов не скачались" if failed
+                        else "Все файлы сохранены")
+            self._log(f"✓ {b.label}: {b.reason}")
+            return False
+        b.odd_rounds += 1
+        self._log(f"⚠️ {b.label}: шаг завершился с кодом {code} ({b.odd_rounds}/{RESCUE_STUCK_ROUNDS})")
+        if b.odd_rounds >= RESCUE_STUCK_ROUNDS:
+            b.state = "needs_action"
+            b.action = "send_logs"
+            b.reason = "Что-то пошло не так — отправьте отчёт для поддержки"
+            return False
+        return self._wait_round(b, deferred, outage=True)
+
+    def _wait_round(self, b: Branch, deferred: int, outage: bool) -> bool:
+        b.state = "waiting"
+        b.next_retry_at = time.time() + self.retry_every
+        b.reason = (f"Ждут Яндекса: {deferred} файлов" if deferred and not outage
+                    else "Яндекс сейчас не отвечает")
+        b.activity = f"следующая попытка в {_hhmm(b.next_retry_at)}"
+        self._log(f"⏳ {b.label}: {b.reason}. Следующая попытка в {_hhmm(b.next_retry_at)}")
+        while not self._stopped():
+            remaining = b.next_retry_at - time.time()
+            if remaining <= 0 or b.wake.wait(min(remaining, 1.0)):
+                break
+        b.wake.clear()
+        b.next_retry_at = None
+        if self._stopped():
+            self._branch_stopped(b)
+            return False
+        return True
+
+    def _halt_for_disk(self) -> None:
+        """Нет места — обе ветки ждут человека: скачанное дальше всё равно не ляжет."""
+        for x in self.branches.values():
+            if x.state != "off":
+                x.state = "needs_action"
+                x.action = "free_space"
+                x.reason = "На диске закончилось место"
+                x.activity = ""
+        self._log("💾 На диске закончилось место — останавливаю скачивание. Освободите место и продолжите")
+        self._stop_evt.set()
+        for x in self.branches.values():
+            x.wake.set()
+        _stop_and_wait(tm.stop_matching(SLOT_DISK) + tm.stop_matching(UNLIM_SLOT_PREFIX))
+
+    # ── Диск ──
+
+    def _run_disk(self, b: Branch) -> None:
+        self._drive(b, self._disk_prepare, self._disk_download, (DB_FILE, "files", "remote_path"))
+
+    def _disk_prepare(self, b: Branch) -> int:
+        if not b.reset_done:
+            b.reset_done = True
+            n = _reset_transient_disk_failures()
+            if n:
+                self._log(f"↩️ Диск: {n} файлов с временными ошибками снова в очереди")
+        if self._needs_listing("disk"):
+            b.state = "listing"
+            code = self._run_step(b, SLOT_DISK, "main.py", ["scan"], "получаю список файлов")
+            if code == -1:
+                return -1
+            if code == 0:
+                self._listed_at["disk"] = time.time()
+            elif _db_has_rows(DB_FILE, "files"):
+                self._log(f"⚠️ Диск: список не обновился (код {code}) — качаю по уже собранному")
+            else:
+                return code
+        self._apply_category_choice(DB_FILE, "files", "remote_path", self.disk_categories, "Диск")
+        return 0
+
+    def _disk_download(self, b: Branch) -> int:
+        b.state = "downloading"
+        workers = min(self.workers, MAX_DISK_WORKERS)
+        return self._run_step(b, SLOT_DISK, "main.py", ["download", "--workers", str(workers), "--no-scan"],
+                              "скачиваю файлы")
+
+    # ── Безлимит ──
+
+    def _run_unlim(self, b: Branch) -> None:
+        self._drive(b, self._unlim_prepare, self._unlim_download, (UNLIM_DB_FILE, "unlim_files", "file_id"))
+
+    def _unlim_prepare(self, b: Branch) -> int:
+        if not b.reset_done:
+            b.reset_done = True
+            n = reset_failed_files(str(UNLIM_DB_FILE)) if UNLIM_DB_FILE.exists() else 0
+            if n:
+                self._log(f"↩️ Безлимит: {n} файлов с ошибками снова в очереди")
+        if self._needs_listing("unlim"):
+            b.state = "listing"
+            code = self._run_step(b, SLOT_UNLIM_COLLECT, "unlim_download.py", ["--collect"],
+                                  "получаю список файлов")
+            if code == -1:
+                return -1
+            if code == 0:
+                self._listed_at["unlim"] = time.time()
+            elif _db_has_rows(UNLIM_DB_FILE, "unlim_files"):
+                self._log(f"⚠️ Безлимит: список не обновился (код {code}) — качаю по уже собранному")
+            else:
+                return code
+        self._apply_category_choice(UNLIM_DB_FILE, "unlim_files", "file_id", self.unlim_categories, "Безлимит")
+        return 0
+
+    def _unlim_download(self, b: Branch) -> int:
+        b.state = "downloading"
+        b.activity = "скачиваю файлы"
+        # Каждый раунд даёт молчавшим серверам ещё один шанс
+        clear_dead_hosts(str(UNLIM_DB_FILE))
+        while True:
+            if self._stopped():
+                return -1
+            res = _launch_unlim_workers(self.workers, self.batch, starter=self._own_start)
+            if res["started"]:
+                break
+            # Все слоты заняты воркерами, запущенными вручную, — дождёмся их
+            self._log("⏳ Безлимит: жду уже запущенных воркеров")
+            if self._stop_evt.wait(5):
+                return -1
+        self._log(f"🚀 Безлимит: запущено воркеров — {len(res['started'])}")
+        codes = self._wait_workers(res["started"])
+        if codes is None:
+            return -1
+        code = self._combine_worker_codes(codes)
+        b.last_exit = {"code": code, "at": time.time(), "step": "скачиваю файлы"}
+        return code
+
+    @staticmethod
+    def _combine_worker_codes(codes: list[int | None]) -> int:
+        real = [c for c in codes if c is not None]
+        for important in (EXIT_DISK_FULL, EXIT_AUTH, EXIT_DEFERRED, EXIT_OUTAGE):
+            if important in real:
+                return important
+        bad = [c for c in real if c != 0]
+        return bad[0] if bad else 0
+
+
+# Прежнее имя: эндпоинты и тесты обращаются к pipeline
+Pipeline = Rescue
+pipeline = Rescue()
+rescue = pipeline
 
 
 # ── Чтение состояния ────────────────────────────────────────────────────────
@@ -1559,8 +1851,10 @@ def api_plan():
 class PlanStartPayload(BaseModel):
     do_disk: bool = True
     do_unlim: bool = True
-    disk_categories: list[str] = Field(default_factory=lambda: ["photos", "videos"])
-    unlim_categories: list[str] = Field(default_factory=lambda: ["photos", "videos"])
+    # None — всё. Раньше по умолчанию были только фото и видео, и мастер на пустой базе
+    # молча оставлял за бортом документы
+    disk_categories: list[str] | None = None
+    unlim_categories: list[str] | None = None
     workers: int = Field(default=2, ge=1, le=MAX_UNLIM_WORKERS)
     batch: int = Field(default=10, ge=1, le=MAX_UNLIM_BATCH)
 
@@ -1586,6 +1880,12 @@ def api_plan_start(payload: PlanStartPayload):
 @app.post("/api/start/stop")
 def api_start_stop():
     return _resp(pipeline.stop())
+
+
+@app.post("/api/rescue/retry_now")
+def api_rescue_retry_now():
+    """«Попробовать сейчас»: не ждать раунда, повторить отложенные файлы немедленно."""
+    return _resp(pipeline.retry_now())
 
 
 class TokenPayload(BaseModel):
@@ -1632,6 +1932,9 @@ class DownloadDirPayload(BaseModel):
 @app.post("/api/config/download_dir")
 def api_set_dir(payload: DownloadDirPayload):
     d = (payload.download_dir or "").strip()
+    if pipeline.is_running():
+        # Раунды спасения качают в одну папку; смена посреди них расколола бы бэкап
+        raise HTTPException(409, "Сначала остановите скачивание — потом можно сменить папку")
     ok, msg = is_safe_download_dir(d)
     if not ok:
         log.warning("папка отклонена: %r — %s", d, msg)
