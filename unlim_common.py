@@ -19,6 +19,7 @@ from contextlib import contextmanager
 import requests
 from dotenv import load_dotenv
 
+from storage_fetch import response_trace  # noqa: F401 — заодно реэкспорт для воркера и тестов
 from utils import sqlite_tx
 
 log = logging.getLogger("unlim")
@@ -147,21 +148,6 @@ def get_sk_uid(s: requests.Session) -> tuple[str, str]:
 def make_cid(uid: str) -> str:
     """Генерирует connection_id для API-запроса."""
     return f"{uid}{int(time.time() * 1000)}{random.randint(100, 999)}"
-
-
-def response_trace(r) -> str:
-    """Идентификаторы ответа Яндекса для логов — по ним поддержка Яндекса находит запрос."""
-    headers = getattr(r, "headers", None) or {}
-    parts = []
-    for h in ("x-request-id", "x-yandex-req-id", "yandexuid-req-id"):
-        v = headers.get(h) if hasattr(headers, "get") else None
-        if v:
-            parts.append(f"{h}={v}")
-            break
-    ctype = headers.get("content-type") if hasattr(headers, "get") else None
-    if ctype:
-        parts.append(f"type={str(ctype).split(';')[0]}")
-    return f" ({', '.join(parts)})" if parts else ""
 
 
 def api_call(s: requests.Session, sk: str, uid: str, method: str,

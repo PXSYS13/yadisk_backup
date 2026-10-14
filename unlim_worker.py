@@ -25,7 +25,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import logging
 import os
 import re
@@ -38,9 +37,10 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import NamedTuple
-from urllib.parse import urljoin, urlsplit
 
 import requests
+
+from storage_fetch import FetchFailure, fetch_to_file
 
 from unlim_common import (
     BASE,
@@ -634,32 +634,6 @@ class ExtractedItem(NamedTuple):
     dst: str = ""
 
 
-@dataclass(frozen=True)
-class FetchFailure:
-    """Почему архив или файл не скачался (или архив не распаковался).
-
-    kind: local_disk | not_zip | bad_zip | bad_file | server_50x | rate_limit | refused |
-          timeout | connection | storage_down (сервер хранения не ответил) |
-          storage_skip (он же уже известен как недоступный). str() даёт
-          'категория | текст' для логов и Web UI.
-    """
-
-    kind: str
-    text: str
-    host: str = ""  # сервер хранения — для storage_down / storage_skip
-
-    def __str__(self) -> str:
-        return f"{self.kind} | {self.text}"
-
-    @property
-    def is_local(self) -> bool:
-        return self.kind == "local_disk"
-
-    @property
-    def is_server_issue(self) -> bool:
-        return self.kind in ("not_zip", "server_50x", "rate_limit", "refused", "timeout", "connection")
-
-
 class FetchResult(NamedTuple):
     extracted: list[ExtractedItem]
     total_bytes: int
@@ -811,14 +785,6 @@ def download_and_extract(
         remove_quiet(zip_path)
 
 
-# Оригинал фото или видео никогда не приходит страницей или JSON — это отказ Яндекса
-_NOT_FILE_CONTENT_TYPES = ("text/html", "application/json")
-
-
-def _is_md5(value) -> bool:
-    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value.lower()) is not None
-
-
 def download_file(
     s, url: str, dst: str, expected_size: int = 0, worker_id: int = 0,
     on_progress: Callable[[], None] | None = None,
@@ -829,104 +795,49 @@ def download_file(
 
     Возвращает (итоговый путь, None) или ("", причина сбоя). Итоговый путь получает
     суффикс _1, если файл с таким именем уже лежит в папке: чужой файл не затираем.
-
-    Ссылка Яндекса ведёт редиректом на сервер хранения. Редирект разбираем сами:
-    если host_is_dead говорит, что этот сервер недавно молчал, файл сразу
-    откладывается (storage_skip), а молчание нового сервера даёт storage_down.
+    Редирект на сервер хранения и молчащие серверы разбирает storage_fetch.fetch_to_file.
     """
     os.makedirs(ZIP_TMP_DIR, exist_ok=True)
     tmp = os.path.join(ZIP_TMP_DIR, f"w{worker_id}_file.part")
     name = os.path.basename(dst)
     t0 = time.monotonic()
-    host = ""
-    written = 0
+    last_log = time.monotonic()
+
+    def progress(written: int, total: int) -> None:
+        nonlocal last_log
+        now = time.monotonic()
+        if now - last_log >= 6.0:
+            last_log = now
+            total_str = f" / {human_bytes(total)}" if total > 0 else ""
+            print(f"[w{worker_id}] качаю {name}: {human_bytes(written)}{total_str}...", flush=True)
+            if on_progress:
+                on_progress()
+
     try:
-        r = s.get(url, stream=True, allow_redirects=False, timeout=(30, 60))
-        location = (getattr(r, "headers", None) or {}).get("Location")
-        if r.status_code in (301, 302, 303, 307, 308) and location:
-            r.close()
-            location = urljoin(url, location)
-            host = urlsplit(location).hostname or ""
-            if host and host_is_dead and host_is_dead(host):
-                return "", FetchFailure("storage_skip", f"сервер хранения {host} недавно не отвечал", host)
-            # Готовый файл сервер отдаёт сразу (это не сборка архива): молчание —
-            # сервер в повреждённом дата-центре, ждать его минутами бессмысленно
-            r = s.get(location, stream=True, timeout=(STORAGE_READ_TIMEOUT_SEC, STORAGE_READ_TIMEOUT_SEC))
-        with r:
-            r.raise_for_status()
-            headers = getattr(r, "headers", {}) or {}
-            trace = response_trace(r)
-            ctype = (headers.get("Content-Type") or "").lower()
-            if any(t in ctype for t in _NOT_FILE_CONTENT_TYPES):
-                snippet = next(iter(r.iter_content(512)), b"")[:200]
-                return "", FetchFailure(
-                    "refused",
-                    f"вместо файла пришёл {ctype.split(';')[0]}: {snippet.decode('utf-8', 'replace')!r}{trace}",
-                )
-            content_len = int(headers.get("Content-Length", 0) or 0)
-            md5 = hashlib.md5() if _is_md5(expected_md5) else None
-            last_log = time.monotonic()
-            with open(tmp, "wb") as f:
-                for chunk in r.iter_content(1024 * 1024):
-                    if not chunk:
-                        continue
-                    f.write(chunk)
-                    written += len(chunk)
-                    if md5 is not None:
-                        md5.update(chunk)
-                    now = time.monotonic()
-                    if now - last_log >= 6.0:
-                        last_log = now
-                        total = expected_size or content_len
-                        total_str = f" / {human_bytes(total)}" if total > 0 else ""
-                        print(f"[w{worker_id}] качаю {name}: {human_bytes(written)}{total_str}...", flush=True)
-                        if on_progress:
-                            on_progress()
-        if content_len and written != content_len:
-            return "", FetchFailure(
-                "connection", f"файл оборвался: скачано {written} байт из {content_len}{trace}")
-        if written == 0:
-            return "", FetchFailure("bad_file", f"Яндекс отдал пустой файл{trace}")
-        if expected_size > 0 and written != expected_size:
-            # Не помечаем скачанным то, что не совпало с описанием файла на Диске
-            return "", FetchFailure(
-                "bad_file", f"размер не совпал: скачано {written} байт, на Диске {expected_size}{trace}")
-        if md5 is not None and md5.hexdigest() != expected_md5.lower():
-            return "", FetchFailure("bad_file", f"MD5 не совпал с файлом на Диске{trace}")
-        os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
-        final = _non_colliding_path(dst)
-        shutil.move(tmp, final)
-        dur = max(0.001, time.monotonic() - t0)
-        log.info("w%d: %s скачан %s за %.1f с (%s/с)%s", worker_id, name,
-                 human_bytes(written), dur, human_bytes(written / dur), trace)
-        return final, None
-    except requests.exceptions.HTTPError as e:
-        resp = getattr(e, "response", None)
-        code = getattr(resp, "status_code", None)
-        trace = response_trace(resp) if resp is not None else ""
-        if code == 429:
-            failure = FetchFailure("rate_limit", f"HTTP 429 при скачивании файла: {e}{trace}")
-        elif code is not None and code >= 500:
-            failure = FetchFailure("server_50x", f"HTTP {code} при скачивании файла: {e}{trace}")
-        else:
-            failure = FetchFailure("refused", f"HTTP {code} при скачивании файла: {e}{trace}")
-    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-        if host and written == 0:
-            # Сервер хранения не отдал ни байта — он недоступен, файл не виноват
-            failure = FetchFailure(
-                "storage_down", f"сервер хранения {host} не отвечает ({type(e).__name__})", host)
-        elif isinstance(e, requests.exceptions.Timeout):
-            failure = FetchFailure("timeout", f"таймаут при скачивании файла: {e}")
-        else:
-            failure = FetchFailure("connection", f"обрыв соединения при скачивании файла: {e}")
-    except OSError as e:
-        kind = "local_disk" if is_local_disk_error(e) else "connection"
-        failure = FetchFailure(kind, f"ошибка записи файла: {e}")
-    except Exception as e:
-        failure = FetchFailure("connection", f"сбой скачивания файла: {e}")
+        written, _host, failure = fetch_to_file(
+            s, url, tmp,
+            expected_size=expected_size or None,
+            expected_md5=expected_md5,
+            host_is_dead=host_is_dead,
+            storage_timeout=STORAGE_READ_TIMEOUT_SEC,
+            on_progress=progress,
+        )
+        if failure is None:
+            try:
+                os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+                final = _non_colliding_path(dst)
+                shutil.move(tmp, final)
+            except OSError as e:
+                kind = "local_disk" if is_local_disk_error(e) else "connection"
+                failure = FetchFailure(kind, f"ошибка записи файла: {e}")
+            else:
+                dur = max(0.001, time.monotonic() - t0)
+                log.info("w%d: %s скачан %s за %.1f с (%s/с)", worker_id, name,
+                         human_bytes(written), dur, human_bytes(written / dur))
+                return final, None
     finally:
         remove_quiet(tmp)  # после успешного переноса его уже нет
-    log.error(f"w{worker_id} {name}: {failure}")
+    (log.info if failure.is_storage else log.error)(f"w{worker_id} {name}: {failure}")
     return "", failure
 
 
