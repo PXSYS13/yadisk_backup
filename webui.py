@@ -54,6 +54,7 @@ from public_download import (
 )
 from public_download import connect_db as links_connect
 from state import CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER, SELECTION_MARKERS, State
+import supporters
 from unlim_common import (
     DEFERRED_MARKER,
     RELEASE_IN_PROGRESS_SQL,
@@ -3860,6 +3861,17 @@ def api_disk_folders(path: str = "disk:/", demo: str | None = None):
 @app.get("/api/unlim/preview")
 def unlim_preview():
     return preview_db(UNLIM_DB_FILE, "unlim_files", "file_id")
+
+
+@app.get("/api/supporters")
+def api_supporters(demo: str | None = None):
+    """«Нас поддерживают»: список ведёт автор в supporters.json на GitHub.
+
+    Синхронная функция — опрос /api/status не ждёт GitHub; список кешируется на час.
+    """
+    data = supporters.demo() if demo and os.environ.get("YADISK_DEMO") == "1" else supporters.get_supporters()
+    return {"ok": True, **data, "people": supporters.count_people(data["supporters"]),
+            "donation_url": DONATION_URL}
 
 
 class SelectivePayload(BaseModel):

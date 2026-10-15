@@ -79,21 +79,23 @@
 
   function visual(r, offline) {
     const sm = r.summary || {};
-    if (offline) return `<div class="hero-art">${icon('power')}</div>`;
-    if (isSetup(r)) return `<div class="hero-art">${icon('download')}</div>`;
+    if (offline) return `<div class="hero-art off">${icon('power')}</div>`;
+    if (isSetup(r)) return `<div class="hero-art">${icon('cloud-down')}</div>`;
     if (preparing(r)) {
       const found = Object.values(r.sources || {}).reduce((n, x) => n + (x.listing_found || 0), 0);
       return App.ring({ spin: true, label: found ? fmt.num(found) : '…', caption: found ? 'файлов уже найдено' : 'получаю список' });
     }
     const total = sm.selected_files || 0;
     if (r.state === 'idle' && !sm.downloaded_files) return `<div class="hero-art">${icon('download')}</div>`;
-    if (r.state === 'done' && sm.complete) return `<div class="hero-art ok">${icon('check')}</div>`;
+    if (r.state === 'done' && sm.complete) {
+      return `<div class="hero-art ok" role="img" aria-label="Все файлы сохранены"><span>${icon('check')}</span></div>`;
+    }
     return App.ring({ done: sm.downloaded_files || 0, wait: sm.deferred_files || 0, fail: sm.failed_files || 0, total,
       label: fmt.pctText(sm.downloaded_files || 0, total), caption: 'сохранено' });
   }
 
-  function tile(cls, ic, label, value, sub) {
-    return `<div class="stat ${cls}"><div class="s-label">${icon(ic)}${esc(label)}</div>
+  function tile(cls, label, value, sub) {
+    return `<div class="stat ${cls}"><div class="s-label"><span class="s-dot"></span>${esc(label)}</div>
       <div class="s-value">${value}</div><div class="s-sub">${sub}</div></div>`;
   }
 
@@ -108,55 +110,55 @@
         <li><span class="n">3</span><div><b>Нажмите «Сохранить»</b>Дальше программа всё сделает сама</div></li></ol>`;
     }
     if (r.state === 'idle') {
-      const part = (name, ic, title) => {
+      const part = (name, title) => {
         const x = src[name] || {};
         const f = x.files || {};
         const b = x.bytes || {};
-        if (!x.configured) return tile('', ic, title, '—', 'не подключён');
-        if (!f.total) return tile('', ic, title, '?', 'список получу при запуске');
-        return tile('', ic, title, fmt.num(f.selected), `${fmt.plural(f.selected, 'файл', 'файла', 'файлов')} · ${fmt.bytes(b.selected || b.total)}`);
+        if (!x.configured) return tile('', title, '—', 'не подключён');
+        if (!f.total) return tile('', title, '?', 'список получу при запуске');
+        return tile('', title, fmt.num(f.selected), `${fmt.plural(f.selected, 'файл', 'файла', 'файлов')} · ${fmt.bytes(b.selected || b.total)}`);
       };
       const free = s.free_space && s.free_space.free != null ? fmt.bytes(s.free_space.free) : '—';
-      return `<div class="stats">${part('disk', 'cloud', 'Обычный Диск')}${part('unlim', 'phone', 'Безлимит')}
-        ${tile('ok', 'check', 'Уже скачано', fmt.num(sm.downloaded_files || 0), fmt.bytes(sm.downloaded_bytes || 0))}
-        ${tile('', 'drive', 'Свободно', free, 'на диске с папкой')}</div>`;
+      return `<div class="stats">${part('disk', 'Обычный Диск')}${part('unlim', 'Безлимит')}
+        ${tile('ok', 'Уже скачано', fmt.num(sm.downloaded_files || 0), fmt.bytes(sm.downloaded_bytes || 0))}
+        ${tile('', 'Свободно', free, 'на диске с папкой')}</div>`;
     }
     if (preparing(r)) {
-      const part = (name, ic, title) => {
+      const part = (name, title) => {
         const x = src[name] || {};
         if (!x.enabled) return '';
-        return tile('run', ic, title, x.listing_found ? fmt.num(x.listing_found) : '…',
+        return tile('run', title, x.listing_found ? fmt.num(x.listing_found) : '…',
           x.state === 'checking' ? 'проверяю доступ' : 'файлов найдено, ищу дальше');
       };
-      return `<div class="stats">${part('disk', 'cloud', 'Обычный Диск')}${part('unlim', 'phone', 'Безлимит')}</div>`;
+      return `<div class="stats">${part('disk', 'Обычный Диск')}${part('unlim', 'Безлимит')}</div>`;
     }
     const left = sm.left_files || 0;
     const etas = Object.values(src).map((x) => x.eta_sec).filter(Boolean);
     const eta = etas.length ? Math.max(...etas) : null;
-    const done = tile('ok', 'check', 'Скачано', fmt.num(sm.downloaded_files || 0),
+    const done = tile('ok', 'Скачано', fmt.num(sm.downloaded_files || 0),
       `${fmt.bytes(sm.downloaded_bytes || 0)} · из ${fmt.files(sm.selected_files || 0)}`);
-    const wait = tile('wait', 'clock', 'Ждут Яндекса', fmt.num(sm.deferred_files || 0), sm.deferred_files
+    const wait = tile('wait', 'Ждут Яндекса', fmt.num(sm.deferred_files || 0), sm.deferred_files
       ? (r.next_retry_at ? `повтор в ${fmt.hhmm(r.next_retry_at)}` : 'программа повторит сама') : 'таких пока нет');
-    const queue = tile('', 'list', 'В очереди', fmt.num(left), left ? (eta ? `осталось ≈ ${fmt.duration(eta)}` : 'ждут своей очереди') : 'очередь пуста');
+    const queue = tile('', 'В очереди', fmt.num(left), left ? (eta ? `осталось ≈ ${fmt.duration(eta)}` : 'ждут своей очереди') : 'очередь пуста');
     let fourth;
     const rc = r.recent;
     if (r.state === 'running') {
       fourth = rc
-        ? tile('run', 'activity', cap(fmt.lastMinutes(rc.window_sec)), `+${fmt.num(rc.checked)}`,
+        ? tile('run', cap(fmt.lastMinutes(rc.window_sec)), `+${fmt.num(rc.checked)}`,
           `скачано ${fmt.num(rc.done)}, отложено ${fmt.num(Math.max(0, rc.checked - rc.done))}`)
-        : tile('run', 'activity', 'Скорость', '…', 'считаю — нужно полминуты');
+        : tile('run', 'Скорость', '…', 'считаю — нужно полминуты');
     } else if (sm.failed_files) {
-      fourth = tile('err', 'x', 'Не скачались', fmt.num(sm.failed_files), 'можно повторить');
+      fourth = tile('err', 'Не скачались', fmt.num(sm.failed_files), 'можно повторить');
     } else if (sm.preview_only_files) {
-      fourth = tile('violet', 'image', 'Есть превью', fmt.num(sm.preview_only_files), 'уменьшенные копии фото');
+      fourth = tile('violet', 'Есть превью', fmt.num(sm.preview_only_files), 'уменьшенные копии фото');
     } else {
       // Большую папку программа не успевает посчитать целиком — тогда «больше X»;
       // на телефоне «больше» уходит на свою строку, а не обрезает число многоточием
       const folder = (src.disk || {}).folder || {};
       fourth = folder.size_partial
-        ? tile('wrap', 'folder', 'В папке', `<small>больше</small> ${fmt.bytes(folder.size_bytes || 0).replace(' ', '&nbsp;')}`,
+        ? tile('wrap', 'В папке', `<small>больше</small> ${fmt.bytes(folder.size_bytes || 0).replace(' ', '&nbsp;')}`,
           'уже на вашем диске')
-        : tile('', 'folder', 'В папке', fmt.bytes(folder.size_bytes || 0), 'уже на вашем диске');
+        : tile('', 'В папке', fmt.bytes(folder.size_bytes || 0), 'уже на вашем диске');
     }
     return `<div class="stats">${done}${wait}${queue}${fourth}</div>`;
   }
@@ -176,27 +178,39 @@
     return `Что скачиваем: ${esc(sources)} — ${esc(cats)}${st.gentle ? ' · бережный режим' : ''} · <a href="#/settings">изменить</a>`;
   }
 
+  // Спокойное пояснение, пока часть файлов ждёт Яндекса: они не потеряны
+  function reassure(r, offline) {
+    // Плашка про молчащие серверы говорит то же самое — тогда строка в карточке не нужна
+    if (offline || r.notice || r.state !== 'waiting' || !((r.summary || {}).deferred_files)) return '';
+    return `<p class="reassure">${icon('shield-check')}<span>Файлы не потеряны — они на серверах Яндекса,
+      которые сейчас не отвечают. Программа повторит сама.</span></p>`;
+  }
+
   App.screens.home = {
     mount(el) {
       el.innerHTML = `<div id="home-banner"></div>
-        <section class="card hero" id="home-hero">
-          <div class="hero-top"><span id="home-pill"></span><span class="spacer"></span><span id="home-beat"></span></div>
+        <section class="card hero" id="home-hero" aria-labelledby="home-headline">
+          <div class="hero-top"><span id="home-pill"></span><span id="home-beat"></span></div>
           <div class="hero-body">
             <div id="home-visual"></div>
             <div>
               <h1 id="home-headline">Загружаю…</h1>
               <p class="sub" id="home-subline"></p>
+              <div id="home-reassure"></div>
               <div class="row actions" id="home-actions"></div>
             </div>
           </div>
           <div id="home-stats"></div>
           <p class="hero-what" id="home-what"></p>
         </section>
+        <div class="mt" id="home-safety"></div>
         <div class="mt" id="home-notice"></div>
         <div class="grid-2 mt" id="home-sources"></div>
-        <div class="grid-2 mt" id="home-live"></div>
-        <div class="mt" id="home-where"></div>
-        <div class="mt" id="home-safety"></div>`;
+        <div class="home-grid mt" id="home-grid">
+          <div id="home-feed"></div>
+          <div class="stack"><div id="home-where"></div><div id="home-recent"></div></div>
+        </div>
+        <div id="home-thanks"></div>`;
     },
     update(s) {
       const r = s.rescue || {};
@@ -211,19 +225,27 @@
       App.text(byId('home-subline'), offline
         ? 'Похоже, окно программы закрыто. Запустите её снова — всё скачанное сохранено, она продолжит с того же места.'
         : r.subline || '');
+      App.html(byId('home-reassure'), reassure(r, offline));
       App.html(byId('home-actions'), offline ? '' : heroActions(r, s));
       App.html(byId('home-stats'), stats(r, s, offline));
       App.html(byId('home-what'), setup || offline ? '' : whatLine(s));
       byId('home-what').classList.toggle('hidden', setup || offline);
+      // Плашка про молчащие серверы уже просит ничего не удалять — второй раз не повторяем
+      const showSafety = r.state !== 'idle' && !((r.summary || {}).complete) && !r.notice;
+      App.html(byId('home-safety'), showSafety && !offline ? App.safetyNote() : '');
       App.html(byId('home-notice'), offline ? '' : App.noticeBanner(r.notice));
       const src = r.sources || {};
       App.html(byId('home-sources'), setup ? '' : App.sourceBlock('disk', src.disk, r) + App.sourceBlock('unlim', src.unlim, r));
-      const cards = [r.started_at ? App.feedCard(r) : '', setup ? '' : App.recentCard(r)].filter(Boolean);
-      App.html(byId('home-live'), cards.join(''));
-      byId('home-live').classList.toggle('single', cards.length === 1);
+      // Внизу: лента событий слева, «Где мои файлы» и последние файлы справа
+      const feed = r.started_at && !setup ? App.feedCard(r) : '';
+      App.html(byId('home-feed'), feed);
+      byId('home-feed').classList.toggle('hidden', !feed);
+      byId('home-grid').classList.toggle('single', !feed);
+      byId('home-grid').classList.toggle('hidden', setup);
       App.html(byId('home-where'), setup ? '' : App.whereFiles(s));
-      const showSafety = r.state !== 'idle' && !((r.summary || {}).complete);
-      App.html(byId('home-safety'), showSafety ? App.safetyBanner() : '');
+      App.html(byId('home-recent'), setup ? '' : App.recentCard(r));
+      const quiet = !offline && !setup && r.state !== 'needs_action';
+      App.html(byId('home-thanks'), quiet ? App.thanksStrip() : '');
     },
   };
 })();

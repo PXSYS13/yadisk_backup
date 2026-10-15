@@ -17,6 +17,7 @@ def _isolate_project_files(tmp_path, monkeypatch):
     Тесты не должны ни зависеть от них, ни портить их: подменяем пути на tmp.
     """
     import public_download
+    import supporters
     import webui
 
     monkeypatch.setattr(webui, "ENV_FILE", tmp_path / ".env")
@@ -30,6 +31,10 @@ def _isolate_project_files(tmp_path, monkeypatch):
     monkeypatch.setattr(webui, "TASK_LOG_DIR", tmp_path / "logs" / "tasks")
     monkeypatch.setattr(webui, "WEBUI_LOG", tmp_path / "logs" / "webui.log")
     monkeypatch.setattr(webui, "HEALTH_LOG", tmp_path / "logs" / "yandex_health.jsonl")
+    # «Нас поддерживают»: без похода на GitHub и без настоящего supporters.json
+    monkeypatch.setattr(supporters, "REMOTE_URL", "")
+    monkeypatch.setattr(supporters, "LOCAL_FILE", tmp_path / "supporters.json")
+    monkeypatch.setattr(supporters, "_cache", None)
     # Настройки, которые программа пишет прямо в os.environ: после теста — как было.
     # Пустое значение = «по умолчанию» (всё качать, превью включены, демо выключено)
     for key in ("BACKUP_SOURCES", "BACKUP_CATEGORIES", "BACKUP_DISK_FOLDERS", "GENTLE_MODE",

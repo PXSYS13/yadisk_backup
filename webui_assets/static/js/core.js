@@ -76,6 +76,26 @@
       if (sec < 3600) return `${Math.floor(sec / 60)} мин назад`;
       return ts ? `в ${App.fmt.hhmm(ts)}` : `${Math.floor(sec / 3600)} ч назад`;
     },
+    // Длинный путь сокращается посередине: диск и последние папки видны — C:\…\Фото\2024
+    shortPath(path, max = 32) {
+      path = String(path || '');
+      if (path.length <= max) return path;
+      const sep = path.includes('\\') ? '\\' : '/';
+      const parts = path.split(sep);
+      if (parts.length > 2) {
+        const head = parts[0] || sep;
+        let tail = parts[parts.length - 1];
+        for (let i = parts.length - 2; i > 0; i--) {
+          const next = `${parts[i]}${sep}${tail}`;
+          if (head.length + next.length + 3 > max) break;
+          tail = next;
+        }
+        const out = `${head}${head.endsWith(sep) ? '' : sep}…${sep}${tail}`;
+        if (out.length <= max + 2) return out;
+      }
+      const keep = max - 1;
+      return `${path.slice(0, Math.ceil(keep / 2))}…${path.slice(path.length - Math.floor(keep / 2))}`;
+    },
     // «за последнюю минуту», «за последние 5 минут»
     lastMinutes(sec) {
       const m = Math.max(1, Math.round((sec || 0) / 60));
@@ -127,6 +147,10 @@
     chevron: '<path d="m9 18 6-6-6-6"/>',
     users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9"/><path d="M16 3.1a4 4 0 0 1 0 7.8"/>',
     link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"/>',
+    'cloud-down': '<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 8.5a4 4 0 0 1-.5 9.5"/><path d="M12 11v8"/><path d="m9 16 3 3 3-3"/>',
+    hdd: '<path d="M22 12H2"/><path d="M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z"/><path d="M6 16h.01"/><path d="M10 16h.01"/>',
+    code: '<path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/>',
+    'shield-check': '<path d="M20 13c0 5-3.5 7.5-7.7 9a1 1 0 0 1-.6 0C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.2-2.7a1.2 1.2 0 0 1 1.6 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
   };
   App.icon = (name, cls = '') =>
     `<svg class="i${cls ? ` ${cls}` : ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ` +
@@ -150,7 +174,9 @@
       const btn = App.byId('theme-toggle');
       if (!btn) return;
       const dark = App.theme.get() === 'dark';
-      App.html(btn, `${App.icon(dark ? 'sun' : 'moon')}<span>${dark ? 'Светлая тема' : 'Тёмная тема'}</span>`);
+      const label = dark ? 'Светлая тема' : 'Тёмная тема';
+      App.html(btn, `${App.icon(dark ? 'sun' : 'moon')}<span>${label}</span>`);
+      btn.setAttribute('aria-label', label);
     },
   };
 
@@ -296,6 +322,16 @@
     const screen = App.screens[App.state.route];
     if (s && screen && screen._mounted) screen.update(s, App.state.params);
   };
+  // ── «Нас поддерживают»: список ведёт автор на GitHub, программа держит его час ──
+  App.supporters = null;
+  App.loadSupporters = async () => {
+    const res = await App.api.get('/api/supporters' + (App.demo ? '?demo=1' : ''));
+    if (res.ok) {
+      App.supporters = res.data;
+      App.render();
+    }
+  };
+
   App.startPolling = () => {
     const tick = async () => {
       await App.refresh();

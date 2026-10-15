@@ -145,3 +145,48 @@ def test_folder_size_says_more_when_not_fully_counted(monkeypatch):
     html = _render_home(done)
     assert "31,0 ГБ" in html["stats"] and "больше" not in html["stats"]
     assert "Уже в папке: 31,0 ГБ" in html["where"]
+
+
+# «Нас поддерживают»: строка внизу главной и суммы — в node, без браузера
+_THANKS_HARNESS = r"""
+const path = require('path');
+global.window = globalThis;
+global.addEventListener = () => {};
+global.location = { search: '', hash: '', pathname: '/' };
+const el = () => ({ innerHTML: '', textContent: '', className: '', dataset: {}, style: {},
+  addEventListener() {}, setAttribute() {}, classList: { add() {}, remove() {}, toggle() {} } });
+global.document = Object.assign(el(), { documentElement: el(), body: el(), createElement: el,
+  querySelectorAll: () => [], querySelector: () => null, getElementById: () => el() });
+global.localStorage = { getItem: () => null, setItem() {} };
+global.matchMedia = () => ({ matches: false, addEventListener() {} });
+for (const f of ['core.js', 'components.js']) require(path.join(process.env.JS_DIR, f));
+const App = window.App;
+const out = { money: [App.money(500, 'RUB'), App.money(12.5, 'USD'), App.money(null, 'RUB')],
+  initials: [App.initials('Анна П.'), App.initials('сергей')] };
+App.supporters = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+out.strip = App.thanksStrip();
+App.supporters = { supporters: [], people: 0 };
+out.empty = App.thanksStrip();
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_thanks_strip_names_and_money():
+    sp = {"people": 5, "supporters": [
+        {"name": "Анна П.", "amount": 500, "currency": "RUB"}, {"name": "Аноним", "amount": 100, "currency": "RUB"},
+        {"name": "<b>Сергей</b>", "amount": 300, "currency": "RUB"}, {"name": "Анна П.", "amount": 50, "currency": "RUB"},
+        {"name": "Мария К.", "amount": 1000, "currency": "RUB"}]}
+    res = subprocess.run(["node", "-e", _THANKS_HARNESS], input=json.dumps(sp), capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    strip = out["strip"]
+    # Аноним и повторный донат не занимают место среди трёх имён; имена экранируются
+    assert "Анна П., &lt;b&gt;Сергей&lt;/b&gt;, Мария К. и ещё 2" in strip
+    assert 'href="#/support"' in strip and "<b>Сергей" not in strip
+    assert out["empty"] == ""
+    assert out["money"][0].endswith("₽") and "500" in out["money"][0]
+    assert "12,50" in out["money"][1] and out["money"][1].endswith("$")
+    assert out["money"][2] == ""
+    assert out["initials"] == ["АП", "С"]

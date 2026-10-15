@@ -8,13 +8,13 @@
 
   const SOURCE_TITLE = { disk: 'Обычный Диск', unlim: 'Безлимит' };
   const SOURCE_SUB = { disk: 'ваши папки и файлы', unlim: 'фото и видео, загруженные с телефона' };
-  const SOURCE_ICON = { disk: ['cloud', ''], unlim: ['phone', 'violet'] };
+  const SOURCE_ICON = { disk: 'hdd', unlim: 'phone' };
   const SOURCE_TAG = { disk: 'Диск', unlim: 'Безлимит' };
   const STATE_BADGE = {
-    idle: ['plain', 'готов'], off: ['plain', 'выключен'], checking: ['run', 'проверяю доступ'],
-    listing: ['run', 'получаю список'], downloading: ['run', 'качается'],
-    waiting: ['wait', 'ждём Яндекса'], done: ['ok', 'готово'], needs_action: ['err', 'нужно действие'],
-    stopped: ['plain', 'на паузе'], error: ['err', 'ошибка'],
+    idle: ['', 'готов'], off: ['', 'выключен'], checking: ['run', 'проверяю доступ'],
+    listing: ['run', 'собираю список'], downloading: ['run', 'качается'],
+    waiting: ['wait', 'ждёт Яндекса'], done: ['ok', 'готово'], needs_action: ['err', 'нужно действие'],
+    stopped: ['', 'на паузе'], error: ['err', 'ошибка'],
   };
   App.SOURCE_NAMES = { disk: 'Обычный Диск', unlim: 'Безлимит (фото с телефона)' };
   App.SOURCE_TAG = SOURCE_TAG;
@@ -24,10 +24,11 @@
   App.renderHeader = (s, offline) => {
     const chips = App.byId('chips');
     if (!chips) return;
+    paintThanks();
     if (offline || !s) {
-      App.html(chips, `<div class="chip err"><span class="dot"></span><span class="chip-text">
-        <span class="chip-label">${offline ? 'Программа не отвечает' : 'Подключаюсь…'}</span>
-        <span class="chip-value">${offline ? 'окно программы закрыто?' : 'секунду'}</span></span></div>`);
+      App.html(chips, `<div class="chip err"><span class="chip-label"><span class="dot"></span>${
+        offline ? 'Программа не отвечает' : 'Подключаюсь…'}</span>
+        <span class="chip-value">${offline ? 'окно программы закрыто?' : 'секунду'}</span></div>`);
       return;
     }
     const tok = s.token || {};
@@ -41,8 +42,8 @@
     const folder = cfg.download_dir_set ? ['ok', cfg.download_dir || ''] : ['warn', 'выберите папку'];
     const chip = ([cls, value], label, field) =>
       `<button type="button" class="chip ${cls}" data-action="go-access" data-field="${field}" title="${esc(`${label}: ${value}`)}">` +
-      `<span class="dot"></span><span class="chip-text"><span class="chip-label">${label}</span>` +
-      `<span class="chip-value">${esc(value)}</span></span></button>`;
+      `<span class="chip-label"><span class="dot"></span>${label}</span>` +
+      `<span class="chip-value">${esc(field === 'folder' ? fmt.shortPath(value, 30) : value)}</span></button>`;
     App.html(chips, chip(disk, 'Диск', 'token') + chip(unlim, 'Безлимит', 'cookies') + chip(folder, 'Папка', 'folder'));
     App.text(App.byId('brand-version'), `версия ${s.app_version || ''}${s.demo ? ` · демо: ${s.demo}` : ''}`);
   };
@@ -78,25 +79,39 @@
         <div><h3>${esc(notice.title)}</h3><p>${esc(notice.text)}</p></div></div>`
     : '';
 
-  App.safetyBanner = () => `<div class="banner safety"><span class="b-icon">${icon('shield')}</span><div>
-    <h3>Пока не всё скачано — ничего не удаляйте с Яндекс.Диска</h3>
-    <p>И не нажимайте «Освободить место» в приложении Яндекса на телефоне: файлы на молчащих серверах не потеряны,
-    они временно недоступны, и программа докачает их сама.</p></div></div>`;
+  // ── Тихая строка под главной карточкой: пока не всё скачано, ничего не удалять ──
+  App.safetyNote = () => `<p class="safety-note">${icon('alert')}<span>Не удаляйте файлы с Диска и не нажимайте
+    в приложении Яндекса «Освободить место», пока всё не скачается.</span></p>`;
 
   // ── Кольцо прогресса: зелёное — скачано, жёлтое — ждёт Яндекса, красное — не скачалось ──
   App.ring = ({ done = 0, wait = 0, fail = 0, total = 0, label = '', caption = '', spin = false }) => {
-    const R = 52, C = 2 * Math.PI * R;
-    const len = (n) => (total > 0 ? Math.max(0, Math.min(1, n / total)) * C : 0);
-    const d = len(done), w = len(wait), f = len(fail);
-    const arc = (cls, l, off) => (l >= 0.5
-      ? `<circle class="${cls}" cx="60" cy="60" r="${R}" stroke-dasharray="${l.toFixed(1)} ${C.toFixed(1)}" stroke-dashoffset="${(-off).toFixed(1)}"/>`
-      : '');
-    const arcs = spin
-      ? `<circle class="arc-spin" cx="60" cy="60" r="${R}" stroke-dasharray="${(C * 0.22).toFixed(1)} ${C.toFixed(1)}"/>`
-      : arc('arc-done', d, 0) + arc('arc-wait', w, d) + arc('arc-fail', f, d + w);
+    const R = 54, C = 2 * Math.PI * R, MIN = 3;
+    const circle = (cls, len, start) =>
+      `<circle class="${cls}" cx="64" cy="64" r="${R}" stroke-dasharray="${len.toFixed(1)} ${C.toFixed(1)}" stroke-dashoffset="${(-start).toFixed(1)}"/>`;
+    let arcs = '';
+    if (spin) {
+      arcs = circle('arc-spin', C * 0.22, 0);
+    } else if (total > 0) {
+      // Маленькая доля всё равно видна (3 единицы), между частями — тонкий зазор
+      const parts = [['arc-done', done], ['arc-wait', wait], ['arc-fail', fail]].filter(([, n]) => n > 0);
+      const lens = parts.map(([, n]) => Math.max(MIN, Math.min(1, n / total) * C));
+      const sum = lens.reduce((a, b) => a + b, 0);
+      if (sum > C) lens[lens.indexOf(Math.max(...lens))] -= sum - C;
+      const gap = parts.length > 1 ? 1.5 : 0;
+      let start = 0;
+      arcs = parts.map(([cls], i) => {
+        const out = circle(cls, Math.max(0, lens[i] - gap), start);
+        start += lens[i];
+        return out;
+      }).join('');
+    }
+    // «20%» — число крупно, знак процента мельче
+    const m = /^(.*\d)%$/.exec(label);
+    const big = m ? `${esc(m[1])}<span class="pct-sign">%</span>` : esc(label);
+    const long = String(m ? m[1] : label).length > 4 ? ' long' : '';
     return `<div class="ring" role="img" aria-label="${esc(`${label} ${caption}`)}">
-      <svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="${R}"/>${arcs}</svg>
-      <div class="center"><div class="pct">${esc(label)}</div><div class="cap">${esc(caption)}</div></div></div>`;
+      <svg viewBox="0 0 128 128"><circle class="track" cx="64" cy="64" r="${R}"/>${arcs}</svg>
+      <div class="center"><div class="pct${long}">${big}</div><div class="cap">${esc(caption)}</div></div></div>`;
   };
 
   // ── Этапы источника: доступ → список файлов → скачивание → готово ──
@@ -117,14 +132,15 @@
   App.steps = (src) => {
     const m = stepModel(src || {});
     if (!m) return '';
-    const dots = { current: '', wait: icon('clock'), err: icon('alert'), paused: icon('stop') };
-    return `<ol class="steps">${STEP_NAMES.map((name, i) => {
-      if (i < m.at) return `<li class="done"><span class="st-dot">${icon('check')}</span><span>${name}</span></li>`;
+    return `<ol class="steps" aria-label="Этапы">${STEP_NAMES.map((name, i) => {
+      if (i < m.at) {
+        return `<li class="done"><span class="st-bar"></span><span class="st-name">${icon('check')}${name}</span></li>`;
+      }
       if (i === m.at) {
-        return `<li class="${m.mode}"><span class="st-dot">${dots[m.mode]}</span><span>${name}</span>` +
+        return `<li class="${m.mode}" aria-current="step"><span class="st-bar"></span><span class="st-name">${name}</span>` +
           `${m.sub ? `<span class="st-sub">${esc(m.sub)}</span>` : ''}</li>`;
       }
-      return `<li><span class="st-dot">${i + 1}</span><span>${name}</span></li>`;
+      return `<li><span class="st-bar"></span><span class="st-name">${name}</span></li>`;
     }).join('')}</ol>`;
   };
 
@@ -168,68 +184,64 @@
   }
   function listedLine(name, src) {
     if (!src.listed_at || src.state === 'listing') return '';
-    const what = name === 'unlim' ? 'Список фото и видео' : 'Список файлов';
     const hint = 'Программа сама собирает список заново раз в 6 часов. Нажмите, если ' +
       (name === 'unlim' ? 'с телефона только что загрузились новые фото' : 'только что добавили файлы на Диск');
     const btn = RELIST_STATES.has(src.state)
-      ? `<button class="link" data-action="relist" data-source="${name}" title="${esc(hint)}">Обновить список</button>` : '';
-    return `<div class="listed">${icon('list')}<span>${what} собран ${whenText(src.listed_at)}</span>${btn}</div>`;
+      ? `<span aria-hidden="true">·</span><button class="link" data-action="relist" data-source="${name}" title="${esc(hint)}">Обновить список</button>` : '';
+    return `<div class="listed"><span>Список собран ${whenText(src.listed_at)}</span>${btn}</div>`;
   }
 
   // ── Карточка источника ──
   App.sourceBlock = (name, src, r) => {
     src = src || {};
-    const [badgeCls, badge] = !src.configured ? ['plain', 'не подключён'] : (STATE_BADGE[src.state] || ['plain', src.state || '']);
-    const [ico, icoCls] = SOURCE_ICON[name];
-    const head = `<div class="source-head"><span class="icon-box ${icoCls}">${icon(ico)}</span>
+    const [badgeCls, badge] = !src.configured ? ['', 'не подключён'] : (STATE_BADGE[src.state] || ['', src.state || '']);
+    const head = `<div class="source-head"><span class="icon-box">${icon(SOURCE_ICON[name])}</span>
       <div class="grow"><div class="source-title">${SOURCE_TITLE[name]}</div><div class="source-sub">${SOURCE_SUB[name]}</div></div>
       <span class="badge ${badgeCls}">${esc(badge)}</span></div>`;
     if (!src.configured) {
       return `<div class="card source">${head}
         <p class="muted">${name === 'disk' ? 'Чтобы скачать обычные файлы, нужен ключ доступа к Диску.'
           : 'Чтобы скачать фото, загруженные с телефона в безлимит, нужен доступ к Безлимиту.'}</p>
-        <div class="row"><button data-action="go-access" data-field="${name === 'disk' ? 'token' : 'cookies'}">${icon('key')}Подключить</button></div></div>`;
+        <div class="row"><button data-action="go-access" data-field="${name === 'disk' ? 'token' : 'cookies'}">${icon('key')}${
+          name === 'disk' ? 'Подключить Диск' : 'Подключить Безлимит'}</button></div></div>`;
     }
     const steps = r && r.started_at ? App.steps(src) : '';
     const [nowCls, nowIcon, nowText] = nowLine(src);
     const activity = `<div class="activity ${nowCls}">${icon(nowIcon)}<span>${esc(nowText)}</span></div>`;
-    const listed = listedLine(name, src);
+    const foot = `<div class="source-foot">${listedLine(name, src) || '<span></span>'}
+      <a class="more" href="#/details/${name}">Подробнее ${icon('chevron')}</a></div>`;
     const f = src.files || {};
     const b = src.bytes || {};
-    if (!f.total) return `<div class="card source">${head}${steps}${activity}${listed}</div>`;
+    if (!f.total) return `<div class="card source">${head}${steps}${activity}${foot}</div>`;
     const selected = f.selected || 0;
     const seg = (cls, n) => `<span class="${cls}" style="width:${fmt.pct(n, selected).toFixed(2)}%"></span>`;
+    const queue = (f.pending || 0) + (f.in_progress || 0);
     const bar = `<div class="bar" role="img" aria-label="Скачано ${f.done} из ${selected}">${
-      seg('done', f.done)}${seg('work', f.in_progress)}${seg('wait', f.deferred)}${seg('fail', f.failed)}</div>`;
+      seg('done', f.done)}${seg('work', queue)}${seg('wait', f.deferred)}${seg('fail', f.failed)}</div>`;
     const legend = [
-      `<span><i class="l-done"></i>скачано ${fmt.num(f.done)}</span>`,
-      f.pending || f.in_progress ? `<span><i class="l-pend"></i>в очереди ${fmt.num((f.pending || 0) + (f.in_progress || 0))}</span>` : '',
-      f.deferred ? `<span><i class="l-wait"></i>ждут Яндекса ${fmt.num(f.deferred)}</span>` : '',
-      f.failed ? `<span><i class="l-fail"></i>не скачались ${fmt.num(f.failed)}</span>` : '',
-      f.preview_only ? `<span><i class="l-prev"></i>есть превью ${fmt.num(f.preview_only)}</span>` : '',
+      `<span><i class="l-done"></i>скачано <b>${fmt.num(f.done)}</b></span>`,
+      queue ? `<span><i class="l-pend"></i>в очереди <b>${fmt.num(queue)}</b></span>` : '',
+      f.deferred ? `<span><i class="l-wait"></i>ждут Яндекса <b>${fmt.num(f.deferred)}</b></span>` : '',
+      f.failed ? `<span><i class="l-fail"></i>не скачались <b>${fmt.num(f.failed)}</b></span>` : '',
+      f.preview_only ? `<span><i class="l-prev"></i>есть превью <b>${fmt.num(f.preview_only)}</b></span>` : '',
     ].join('');
     const speed = src.state === 'downloading' && src.speed_bps
       ? ` · ${fmt.speed(src.speed_bps)}${src.eta_sec ? ` · осталось ≈ ${fmt.duration(src.eta_sec)}` : ''}` : '';
-    const last = (src.recent_files || [])[0];
-    const lastText = last ? `Последний скачанный: ${last.name}${last.at ? ` · ${fmt.hhmm(last.at)}` : ''}` : '';
     return `<div class="card source">${head}${steps}
-      <div><div class="progress-line"><div class="big-number">${fmt.num(f.done)} <small>из ${fmt.files(selected)}</small></div>
+      <div><div class="progress-line"><div class="big-number"><b>${fmt.num(f.done)}</b> из ${fmt.files(selected)}</div>
         <span class="pct-badge">${fmt.pctText(f.done, selected)}</span></div>
-        <div class="muted small" style="margin-top:4px">${fmt.bytes(b.done)} из ${fmt.bytes(b.selected || b.total)}${speed}</div></div>
-      ${bar}<div class="legend">${legend}</div>
-      ${activity}${listed}
-      <div class="source-foot"><span title="${esc(lastText)}">${esc(lastText)}</span>
-        <a class="more" href="#/details/${name}">Подробнее ${icon('arrow')}</a></div></div>`;
+        <div class="bytes-line">${fmt.bytes(b.done)} из ${fmt.bytes(b.selected || b.total)}${speed}</div>
+        <div style="margin-top:10px">${bar}</div><div class="legend">${legend}</div></div>
+      ${activity}${foot}</div>`;
   };
 
   // ── Лента «Что происходит» ──
-  const EVENT_ICON = { ok: 'check', run: 'activity', wait: 'clock', warn: 'alert', err: 'alert', info: 'info' };
   App.feedCard = (r) => {
     const items = ((r && r.events) || []).slice(0, 8).map((e) => `<li class="${esc(e.kind)}">
-        <time>${fmt.hhmm(e.at)}</time><span class="f-dot">${icon(EVENT_ICON[e.kind] || 'info')}</span>
+        <time>${fmt.hhmm(e.at)}</time><span class="f-dot"></span>
         <div class="f-text">${esc(e.text)}${e.source ? `<span class="f-src">${SOURCE_TAG[e.source] || ''}</span>` : ''}</div></li>`).join('');
-    return `<div class="card"><div class="card-head"><span class="icon-box">${icon('activity')}</span>
-      <div class="grow"><h3>Что происходит</h3><span class="tiny">Главные события, новые сверху</span></div></div>
+    return `<div class="card"><div class="card-head"><div class="grow"><h3>Что происходит</h3>
+      <span class="tiny">Главные события, новые сверху</span></div></div>
       ${items ? `<ul class="feed">${items}</ul>` : `<div class="empty">${icon('hourglass')}Событий пока нет</div>`}</div>`;
   };
 
@@ -246,15 +258,15 @@
     list.sort((a, b) => (b.at || 0) - (a.at || 0));
     const rows = list.slice(0, 6).map((f) => {
       const kind = IMG.test(f.name) ? 'image' : VID.test(f.name) ? 'video' : 'file';
-      const when = f.at ? fmt.ago(now - f.at, f.at) : '';
-      return `<li><span class="f-ico ${kind === 'image' ? '' : kind}">${icon(kind)}</span>
+      const when = f.at ? (now - f.at < 3600 ? fmt.ago(now - f.at, f.at) : fmt.hhmm(f.at)) : '';
+      return `<li><span class="f-ico">${icon(kind)}</span>
         <div class="f-main"><span class="f-name" title="${esc(f.name)}">${esc(f.name)}</span>
-        <span class="f-meta">${fmt.bytes(f.size)}${when ? ` · ${when}` : ''} · ${SOURCE_TAG[f.source]}</span></div></li>`;
+        <span class="f-meta">${fmt.bytes(f.size)} · ${SOURCE_TAG[f.source]}</span></div>
+        ${when ? `<span class="f-time">${esc(when)}</span>` : ''}</li>`;
     }).join('');
     if (!rows) return '';
-    return `<div class="card"><div class="card-head"><span class="icon-box ok">${icon('check')}</span>
-      <div class="grow"><h3>Последние скачанные</h3><span class="tiny">Эти файлы уже лежат в вашей папке</span></div>
-      <button class="small" data-action="open-folder" data-which="download">${icon('folder')}Открыть</button></div>
+    return `<div class="card"><div class="card-head"><div class="grow"><h3>Последние скачанные</h3>
+      <span class="tiny">Эти файлы уже лежат в вашей папке</span></div></div>
       <ul class="files">${rows}</ul></div>`;
   };
 
@@ -267,18 +279,70 @@
     const size = fmt.folderSize(disk.folder);
     const previews = ((disk.files || {}).preview_only || 0) + ((unlim.files || {}).preview_only || 0);
     const links = ((s.links || {}).items || []).length;
-    const free = s.free_space && s.free_space.free != null ? ` · свободно на диске ${fmt.bytes(s.free_space.free)}` : '';
-    return `<div class="card"><div class="card-head"><span class="icon-box info">${icon('folder')}</span>
-      <div class="grow"><h3>Где мои файлы</h3><span class="tiny">Уже в папке: ${size}${free}</span></div></div>
-      <div class="path-box">${icon('drive')}<code>${esc(dir)}</code></div>
-      <p class="small muted" style="margin-top:10px">Обычный Диск — с сохранением ваших папок, фото из Безлимита — в подпапке «_unlim»${
+    const free = s.free_space && s.free_space.free != null ? ` · свободно ${fmt.bytes(s.free_space.free)}` : '';
+    return `<div class="card"><div class="card-head"><div class="grow"><h3>Где мои файлы</h3>
+      <span class="tiny">Уже в папке: ${size}${free}</span></div></div>
+      <div class="path-box" title="${esc(dir)}">${icon('folder')}<code>${esc(dir)}</code></div>
+      <p class="tiny" style="margin-top:10px">Обычный Диск — с сохранением ваших папок, фото из Безлимита — в подпапке «_unlim»${
         previews ? ', превью — в подпапке «_превью»' : ''}${links ? ', скачанное по ссылкам — в подпапке «_ссылки»' : ''}.</p>
-      <div class="row" style="margin-top:14px">
-        <button data-action="open-folder" data-which="download">${icon('folder')}Открыть папку</button>
-        <button data-action="copy-path" data-path="${esc(dir)}">${icon('copy')}Скопировать путь</button>
-        ${previews ? `<button data-action="open-folder" data-which="previews">${icon('image')}Открыть превью</button>` : ''}
+      <div class="row" style="margin-top:14px;gap:6px">
+        <button class="small" data-action="open-folder" data-which="download">${icon('folder')}Открыть папку</button>
+        <button class="small ghost" data-action="copy-path" data-path="${esc(dir)}">${icon('copy')}Скопировать путь</button>
+        ${previews ? `<button class="small ghost" data-action="open-folder" data-which="previews">${icon('image')}Открыть превью</button>` : ''}
       </div></div>`;
   };
+
+  // ── «Нас поддерживают» ──
+  const CURRENCY = { RUB: '₽', USD: '$', EUR: '€', KZT: '₸', UAH: '₴', BYN: 'Br' };
+  App.money = (amount, currency) => (amount == null ? '' : `${String(amount).includes('.')
+    ? Number(amount).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : fmt.num(amount)} ${CURRENCY[currency] || currency || '₽'}`);
+  App.initials = (name) => String(name || '?').replace(/\./g, '').split(/\s+/).filter(Boolean).slice(0, 2)
+    .map((p) => p.charAt(0).toUpperCase()).join('') || '?';
+  App.avatar = (name, i, small = false) =>
+    `<span class="avatar t${i % 5}${small ? ' sm' : ''}" aria-hidden="true">${esc(App.initials(name))}</span>`;
+  // «сегодня», «вчера», «3 дня назад», «2 недели назад», иначе «12 сентября»
+  App.dayAgo = (iso) => {
+    if (!iso) return '';
+    const [y, mo, d] = iso.split('-').map(Number);
+    const then = new Date(y, mo - 1, d);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const days = Math.round((today - then) / 86400000);
+    if (days <= 0) return 'сегодня';
+    if (days === 1) return 'вчера';
+    if (days < 7) return `${days} ${fmt.plural(days, 'день', 'дня', 'дней')} назад`;
+    if (days < 28) {
+      const w = Math.floor(days / 7);
+      return w === 1 ? 'неделю назад' : `${w} ${fmt.plural(w, 'неделю', 'недели', 'недель')} назад`;
+    }
+    return then.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', ...(y !== now.getFullYear() ? { year: 'numeric' } : {}) });
+  };
+
+  // Тихая строка внизу главной: «Проект живёт благодаря вам: Анна П., Сергей и ещё 45»
+  App.thanksStrip = () => {
+    const sp = App.supporters;
+    const list = (sp && sp.supporters) || [];
+    if (!list.length) return '';
+    const seen = new Set();
+    const first = list.filter((x) => x.name !== 'Аноним' && !seen.has(x.name) && seen.add(x.name)).slice(0, 3);
+    const rest = Math.max(0, (sp.people || list.length) - first.length);
+    const names = first.length ? first.map((x) => esc(x.name)).join(', ') : '';
+    const text = names
+      ? `Проект живёт благодаря вам: ${names}${rest ? ` и ещё ${fmt.num(rest)}` : ''}`
+      : `Проект живёт благодаря вам: спасибо ${fmt.num(rest)} ${fmt.plural(rest, 'человеку', 'людям', 'людям')}`;
+    return `<aside class="thanks-strip" aria-label="Поддержка проекта"><div class="thanks-who">
+      ${first.length ? `<span class="avatars">${first.map((x, i) => App.avatar(x.name, i, true)).join('')}</span>` : ''}
+      <p>${text}</p></div><a href="#/support">${icon('heart')}Поддержать</a></aside>`;
+  };
+
+  function paintThanks() {
+    const link = App.byId('side-thanks');
+    if (!link) return;
+    const people = (App.supporters && App.supporters.people) || 0;
+    link.classList.toggle('hidden', !people);
+    if (people) App.text(App.byId('side-thanks-text'), `Спасибо ${fmt.num(people)} ${fmt.plural(people, 'помощнику', 'помощникам', 'помощникам')}`);
+  }
 
   // ── «Доступ»: ключ Диска, папка, доступ к Безлимиту (общий для настройки и «Настроек») ──
   const POLYGON_URL = 'https://yandex.ru/dev/disk/poligon/';
@@ -314,7 +378,7 @@
           <span class="small muted" data-field="cookies-result"></span></div></div>`,
   };
   const ROW_TITLES = { token: 'Ключ доступа к Диску', folder: 'Папка для файлов', cookies: 'Доступ к Безлимиту' };
-  const ROW_ICON = { token: ['key', ''], folder: ['folder', 'info'], cookies: ['phone', 'violet'] };
+  const ROW_ICON = { token: 'key', folder: 'folder', cookies: 'image' };
 
   App.Access = {
     // kinds — какие строки показать; open — какие формы сразу раскрыты
@@ -322,8 +386,10 @@
       el.setAttribute('data-access', '1');
       el.dataset.buttons = buttons ? '1' : '0';
       el.innerHTML = kinds.map((k) => `<div class="access-row" data-row="${k}">
-          <div class="what"><span class="icon-box ${ROW_ICON[k][1]}">${icon(ROW_ICON[k][0])}</span>${ROW_TITLES[k]}</div>
-          <div class="state" data-field="${k}-state">…</div>
+          <div class="what"><span class="icon-box">${icon(ROW_ICON[k])}</span><div class="what-text">
+            <div class="what-title">${ROW_TITLES[k]}</div>
+            <div class="state" data-field="${k}-line"><span class="dot" data-field="${k}-dot"></span><span data-field="${k}-state">…</span></div>
+          </div></div>
           <div class="row" data-field="${k}-buttons"></div>
           <div class="${open.includes(k) ? '' : 'hidden'}" data-wrap="${k}" style="width:100%">${FORMS[k]}</div>
         </div>`).join('');
@@ -331,6 +397,14 @@
     update(el, s) {
       if (!el || !s) return;
       const q = (sel) => el.querySelector(sel);
+      // Цветная точка у состояния: ok — работает, wait — проверить не удалось, err — нужно действие
+      const tone = (k, cls) => {
+        const dot = q(`[data-field="${k}-dot"]`);
+        if (dot && dot.className !== `dot ${cls}`) dot.className = `dot ${cls}`;
+        const line = q(`[data-field="${k}-line"]`);
+        if (line) line.classList.toggle('err', cls === 'err');
+      };
+      const actionId = (((s.rescue || {}).action) || {}).id;
       const running = !!(s.pipeline && s.pipeline.running);
       const withButtons = el.dataset.buttons !== '0';
       const tok = s.token || {};
@@ -341,6 +415,7 @@
             acc.photo_unlim ? `, в Безлимите ${fmt.bytes(acc.photo_unlim)}` : ''}`
           : tok.unreachable ? 'Яндекс сейчас не ответил на проверку — ключ, скорее всего, в порядке'
             : 'Не задан — без него обычный Диск не скачать');
+        tone('token', tok.ok ? 'ok' : tok.unreachable ? 'wait' : actionId === 'token' ? 'err' : '');
         App.html(q('[data-field="token-buttons"]'), !withButtons ? '' : tok.ok || tok.unreachable
           ? '<button class="small" data-action="toggle-form" data-form-kind="token">Заменить ключ</button>' +
             '<button class="small danger" data-action="token-clear">Удалить ключ</button>'
@@ -350,6 +425,7 @@
         const cfg = s.config || {};
         const free = s.free_space && s.free_space.free != null ? ` · свободно ${fmt.bytes(s.free_space.free)}` : '';
         App.text(q('[data-field="folder-state"]'), `${cfg.download_dir || '—'}${cfg.download_dir_set ? '' : ' (по умолчанию)'}${free}`);
+        tone('folder', actionId === 'free_space' ? 'err' : cfg.download_dir_set ? 'ok' : 'wait');
         const linksRunning = !!(s.links && s.links.running);
         App.html(q('[data-field="folder-buttons"]'), !withButtons ? '' : running || linksRunning
           ? `<span class="tiny">Сменить папку можно после остановки скачивания${running ? '' : ' по ссылкам'}</span>`
@@ -362,10 +438,12 @@
         App.text(q('[data-field="cookies-state"]'), coo.ok
           ? `Подключён${coo.count ? ` (${coo.count} записей)` : ''}`
           : 'Не подключён — нужен, чтобы скачать фото, загруженные с телефона');
+        const unlimAction = ((((s.rescue || {}).sources || {}).unlim) || {}).action;
+        tone('cookies', unlimAction === 'cookies' ? 'err' : coo.ok ? 'ok' : '');
         App.html(q('[data-field="cookies-buttons"]'), !withButtons ? '' : coo.ok
           ? '<button class="small" data-action="toggle-form" data-form-kind="cookies">Обновить доступ</button>' +
             '<button class="small danger" data-action="cookies-clear">Удалить доступ</button>'
-          : `<button class="small primary" data-action="toggle-form" data-form-kind="cookies">${icon('phone')}Подключить</button>`);
+          : `<button class="small primary" data-action="toggle-form" data-form-kind="cookies">${icon('image')}Подключить Безлимит</button>`);
       }
     },
     open(el, kind) {

@@ -36,7 +36,15 @@
       const c = counts[src] && counts[src].categories && counts[src].categories[cat];
       if (c) { n += c.count || 0; b += c.bytes || 0; }
     }
-    return n ? ` — ${fmt.files(n)}, ${fmt.bytes(b)}` : '';
+    return n ? `${fmt.files(n)} · ${fmt.bytes(b)}` : '';
+  }
+
+  // «6 015 файлов · 23,4 ГБ» под названием источника
+  function sourceSummary(src) {
+    const c = counts[src];
+    if (!c || !c.total) return src === 'disk' ? 'ваши папки и файлы' : 'фото и видео, загруженные с телефона';
+    const bytes = Object.values(c.categories || {}).reduce((sum, x) => sum + (x.bytes || 0), 0);
+    return `${fmt.files(c.total)} · ${fmt.bytes(bytes)}`;
   }
 
   function paintWhat(s, force) {
@@ -47,16 +55,21 @@
     const sources = st.sources || ['disk', 'unlim'];
     const cats = st.categories;  // null — всё
     const allChecked = !cats;
-    const srcBox = (k, title) => `<label class="check"><input type="checkbox" data-field="src-${k}" ${
-      sources.includes(k) ? 'checked' : ''} ${running ? 'disabled' : ''}><span><b>${title}</b></span></label>`;
+    const srcBox = (k, ic, title) => `<label class="check src"><input type="checkbox" data-field="src-${k}" ${
+      sources.includes(k) ? 'checked' : ''} ${running ? 'disabled' : ''}><span class="icon-box">${App.icon(ic)}</span>
+      <span><b>${title}</b><span class="tiny">${esc(sourceSummary(k))}</span></span></label>`;
     const catBox = (k) => `<label class="check"><input type="checkbox" data-field="cat" value="${esc(k)}" ${
       allChecked || cats.includes(k) ? 'checked' : ''} ${running ? 'disabled' : ''}><span><b>${esc(labels[k] || k)}</b>
       <span class="tiny">${esc(countFor(k))}</span></span></label>`;
-    App.html(byId('set-what'), `
-      <div class="section-title">Источники</div>
-      <div class="checks">${srcBox('disk', 'Обычный Диск')}${srcBox('unlim', 'Безлимит (фото с телефона)')}</div>
-      <div class="section-title" style="margin-top:16px">Типы файлов</div>
-      <div class="checks">${Object.keys(labels).map(catBox).join('')}</div>`);
+    App.html(byId('set-sources'), `<div class="checks two">${srcBox('disk', 'hdd', 'Обычный Диск')}${
+      srcBox('unlim', 'phone', 'Безлимит (фото с телефона)')}</div>`);
+    App.html(byId('set-types'), `<div class="checks types">${Object.keys(labels).map(catBox).join('')}</div>`);
+  }
+
+  // Полоса «Есть несохранённые изменения» — только когда что-то поменяли
+  function paintSavebar() {
+    const bar = byId('set-savebar');
+    if (bar) bar.classList.toggle('hidden', !(formDirty || picker.dirty));
   }
 
   // ── Папки Диска ──
@@ -74,8 +87,8 @@
 
   function summaryHtml() {
     const sel = [...picker.selected].sort((a, b) => a.localeCompare(b, 'ru'));
-    if (!sel.length) return '<span class="tiny">Пока ничего не выбрано — отметьте папки ниже.</span>';
-    return `<span class="tiny">Выбрано: ${fmt.num(sel.length)} ${fmt.plural(sel.length, 'папка', 'папки', 'папок')}</span>` +
+    if (!sel.length) return '<span>Пока ничего не выбрано — отметьте папки ниже.</span>';
+    return `<span>Выбрано: <b>${fmt.num(sel.length)}</b> ${fmt.plural(sel.length, 'папка', 'папки', 'папок')}</span>` +
       sel.map((p) => `<span class="folder-chip">${App.icon('folder')}<span class="name">${esc(folderLabel(p))}</span>` +
         `<button type="button" data-action="folder-unpick" data-path="${esc(p)}" title="Убрать из выбора" ` +
         `aria-label="Убрать «${esc(folderLabel(p))}» из выбора">${App.icon('x')}</button></span>`).join('');
@@ -167,6 +180,7 @@
       picker.dirty = true;
       if (picker.mode === 'some') loadFolder(ROOT);
       paintFolders();
+      paintSavebar();
       return;
     }
     if (input.dataset.field !== 'folder') return;
@@ -185,6 +199,7 @@
     }
     picker.dirty = true;
     paintFolders();
+    paintSavebar();
   }
 
   function paintExtra(s) {
@@ -198,63 +213,97 @@
     App.text(byId('set-danger-note'), running ? 'Сначала остановите скачивание.' : '');
   }
 
+  const SECTIONS = [['set-sec-access', 'Доступ'], ['set-sec-what', 'Что скачивать'],
+    ['set-sec-extra', 'Дополнительно'], ['set-sec-danger', 'Если что-то не так']];
+  let observer = null;
+
+  // Подсветка раздела в оглавлении слева — того, что сейчас на экране
+  function watchSections() {
+    if (observer || typeof IntersectionObserver === 'undefined') return;
+    observer = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        for (const btn of document.querySelectorAll('#set-nav button')) btn.classList.toggle('active', btn.dataset.target === e.target.id);
+      }
+    }, { rootMargin: '-15% 0px -70% 0px' });
+    for (const [id] of SECTIONS) observer.observe(byId(id));
+  }
+
   App.screens.settings = {
     mount(el) {
-      const head = (ic, cls, title, sub) => `<div class="card-head"><span class="icon-box ${cls}">${App.icon(ic)}</span>
-        <div class="grow"><h2>${title}</h2><span class="tiny">${sub}</span></div></div>`;
+      const head = (title, sub) => `<div class="sec-head"><h2>${title}</h2>${sub ? `<p>${sub}</p>` : ''}</div>`;
       el.innerHTML = `<div class="page-head"><h1>Настройки</h1>
-          <p>Доступ к Яндексу, что скачивать и дополнительные параметры. Менять можно в любой момент.</p></div>
-        <div class="stack" id="set-root">
-        <div class="card">${head('key', '', 'Доступ', 'Ключ к Диску, папка для файлов и доступ к Безлимиту. Всё хранится только на этом компьютере.')}
-          <div id="set-access"></div></div>
-        <div class="card">${head('list', 'ok', 'Что скачивать', 'Снимите галочки с того, что не нужно. Остальное программа скачает.')}
-          <div id="set-what"></div>
-          <p class="tiny" style="margin-top:8px">Галочки только выбирают, что скачивать: файлы лягут в те же папки, что на Диске.
-            В общие папки «Фото», «Документы» и другие их собирает только «Сортировка» — если вы сами её запустите.</p>
-          <div id="set-folders" class="folders">
-            <div class="section-title" style="margin-top:18px">Папки Диска</div>
-            <fieldset class="bare" data-field="folders-set">
-              <legend class="sr-only">Какие папки Диска скачивать</legend>
-              <div class="checks">
-                <label class="check"><input type="radio" name="folders-mode" value="all" data-field="folders-mode">
-                  <span><b>Весь Диск</b><span class="tiny block">Все папки и файлы — и общие папки, к которым вам дали доступ</span></span></label>
-                <label class="check"><input type="radio" name="folders-mode" value="some" data-field="folders-mode">
-                  <span><b>Только выбранные папки</b><span class="tiny block">Отметьте нужные папки — остальное скачиваться не будет</span></span></label>
+          <p>Доступ к Диску, папка на компьютере и что именно скачивать. Менять можно в любой момент.</p></div>
+        <div class="settings-layout" id="set-root">
+          <nav class="settings-nav" id="set-nav" aria-label="Разделы настроек">${SECTIONS.map(([id, label], i) =>
+            `<button type="button" class="${i ? '' : 'active'}" data-action="settings-jump" data-target="${id}">${label}</button>`).join('')}</nav>
+          <div class="settings-main">
+            <section id="set-sec-access">${head('Доступ', 'Чем программа заходит на Диск и куда кладёт файлы. Всё хранится только на этом компьютере.')}
+              <div class="card" id="set-access"></div></section>
+            <section id="set-sec-what">${head('Что скачивать', 'Откуда и какие файлы сохранять. По умолчанию программа качает всё.')}
+              <div class="card">
+                <p class="tiny" id="set-what-note"></p>
+                <div class="panel-sec" id="set-what"><div class="section-title">Источники</div><div id="set-sources"></div></div>
+                <div class="panel-sec folders" id="set-folders">
+                  <div class="section-title">Папки Диска</div>
+                  <fieldset class="bare" data-field="folders-set">
+                    <legend class="sr-only">Какие папки Диска скачивать</legend>
+                    <div class="checks two">
+                      <label class="check"><input type="radio" name="folders-mode" value="all" data-field="folders-mode">
+                        <span><b>Весь Диск</b><span class="tiny">все папки и файлы, и общие тоже</span></span></label>
+                      <label class="check"><input type="radio" name="folders-mode" value="some" data-field="folders-mode">
+                        <span><b>Только выбранные папки</b><span class="tiny">отметьте нужные ниже</span></span></label>
+                    </div>
+                    <div class="hidden" data-field="folders-picker">
+                      <div class="folder-box">
+                        <div class="folders-summary" data-field="folders-summary"></div>
+                        <div class="tree" data-field="folders-tree"></div>
+                      </div>
+                      <p class="tiny" style="margin-top:10px">Значок «общая» — папка из общего доступа. На компьютере папки
+                        будут разложены так же, как на Диске.</p>
+                    </div>
+                  </fieldset>
+                  <p class="tiny" data-field="folders-off"></p>
+                </div>
+                <div class="panel-sec" id="set-what-types">
+                  <div class="row" style="justify-content:space-between;margin-bottom:12px">
+                    <div class="section-title" style="margin:0">Типы файлов</div>
+                    <button class="link" data-action="settings-all" id="set-all">Отметить всё</button></div>
+                  <div id="set-types"></div>
+                  <p class="tiny" style="margin-top:12px">Это только фильтр скачивания: файлы лягут в те же папки, что на Диске.
+                    В общие папки «Фото», «Документы» и другие их собирает только «Сортировка» — если вы сами её запустите.</p>
+                </div>
               </div>
-              <div class="hidden" data-field="folders-picker">
-                <div class="folders-summary" data-field="folders-summary"></div>
-                <div class="tree" data-field="folders-tree"></div>
-                <p class="tiny" style="margin-top:8px">Значок «общая» — папка из общего доступа. На компьютере папки
-                  будут разложены так же, как на Диске.</p>
+              <div class="savebar hidden" id="set-savebar" role="region" aria-label="Несохранённые изменения" style="margin-top:16px">
+                <p><span class="dot wait"></span>Есть несохранённые изменения</p>
+                <div class="row"><button data-action="settings-reset">Отменить</button>
+                  <button class="primary" data-action="settings-save-what" id="set-save">Сохранить</button></div>
               </div>
-            </fieldset>
-            <p class="tiny" data-field="folders-off"></p>
+            </section>
+            <section id="set-sec-extra">${head('Дополнительно', 'Обычно менять ничего не нужно. Переключатели сохраняются сразу.')}
+              <div class="card">
+                <div class="switch"><div><b>Бережный режим</b>
+                    <p>Вдвое меньше одновременных скачиваний. Включите, если Яндекс часто отвечает
+                    «слишком много запросов» или интернет медленный.</p></div>
+                  <input type="checkbox" data-field="opt-gentle" data-action="settings-toggle" data-option="gentle" aria-label="Бережный режим"></div>
+                <div class="switch"><div><b>Сохранять уменьшенные копии фото, пока оригинал недоступен</b>
+                    <p>Копия до 1280 пикселей ляжет в папку «_превью». Оригинал докачается сам, когда Яндекс его отдаст, —
+                    тогда копия удалится.</p></div>
+                  <input type="checkbox" data-field="opt-previews" data-action="settings-toggle" data-option="previews" aria-label="Страховочные превью фото"></div>
+              </div></section>
+            <section id="set-sec-danger">${head('Если что-то пошло не так', 'Нужно редко. Скачанные файлы в папке не удаляются.')}
+              <div class="card"><details><summary>Забыть список файлов</summary><div class="body">
+                <p class="small">Программа забудет список файлов и при следующем запуске соберёт его заново.
+                Скачанные файлы в папке <b>не удаляются</b> и второй раз качаться не будут.</p>
+                <div class="row" style="margin-top:12px">
+                  <button class="danger" data-danger="1" data-action="forget-list" data-source="disk">Забыть список файлов Диска</button>
+                  <button class="danger" data-danger="1" data-action="forget-list" data-source="unlim">Забыть список файлов Безлимита</button>
+                </div><p class="tiny" id="set-danger-note"></p></div></details></div></section>
           </div>
-          <div class="row" style="margin-top:16px">
-            <button class="primary" data-action="settings-save-what" id="set-save">Сохранить</button>
-            <button class="link" data-action="settings-all" id="set-all">Отметить всё</button>
-            <span class="tiny" id="set-what-note"></span>
-          </div></div>
-        <div class="card">${head('sliders', 'plain', 'Дополнительно', 'Обычно менять ничего не нужно.')}
-          <div class="switch"><div><b>Бережный режим</b>
-              <p class="small muted">Вдвое меньше одновременных скачиваний. Включите, если Яндекс часто отвечает
-              «слишком много запросов» или медленный интернет.</p></div>
-            <input type="checkbox" data-field="opt-gentle" data-action="settings-toggle" data-option="gentle"></div>
-          <div class="switch"><div><b>Страховочные превью фото</b>
-              <p class="small muted">Пока оригинал фото недоступен, сохранять его уменьшенную копию (до 1280 пикселей)
-              в папку «_превью». Оригинал докачается сам, когда Яндекс его отдаст, — тогда превью удалится.</p></div>
-            <input type="checkbox" data-field="opt-previews" data-action="settings-toggle" data-option="previews"></div>
-        </div>
-        <div class="card"><details><summary>Опасная зона — нужна, только если что-то пошло совсем не так</summary><div class="body">
-          <p class="small">Программа забудет список файлов и при следующем запуске соберёт его заново.
-          Скачанные файлы в папке <b>не удаляются</b>. Нужно, только если что-то пошло совсем не так.</p>
-          <div class="row" style="margin-top:12px">
-            <button class="danger" data-danger="1" data-action="forget-list" data-source="disk">Забыть список файлов Диска</button>
-            <button class="danger" data-danger="1" data-action="forget-list" data-source="unlim">Забыть список файлов Безлимита</button>
-          </div><p class="tiny" id="set-danger-note"></p></div></details></div>
-      </div>`;
+        </div>`;
       App.Access.mount(byId('set-access'));
-      byId('set-what').addEventListener('change', () => { formDirty = true; });
+      byId('set-what').addEventListener('change', () => { formDirty = true; paintSavebar(); });
+      byId('set-what-types').addEventListener('change', () => { formDirty = true; paintSavebar(); });
       byId('set-folders').addEventListener('change', onFoldersChange);
     },
     show() {
@@ -263,7 +312,9 @@
       picker.dirty = false;
       picker.synced = false;
       picker.errors.clear();
+      paintSavebar();
       loadCounts();
+      setTimeout(watchSections, 0);
       const focus = App.pendingAccessFocus;
       App.pendingAccessFocus = null;
       if (focus) {
@@ -294,18 +345,32 @@
         diskOn ? '' : 'Обычный Диск выключен в «Источниках» — его папки сейчас не скачиваются.');
       byId('set-save').disabled = running;
       byId('set-all').disabled = running;
-      App.text(byId('set-what-note'), running ? 'Изменить можно после остановки скачивания.'
-        : 'По умолчанию программа качает всё.');
+      App.text(byId('set-what-note'), running ? 'Изменить можно после остановки скачивания.' : '');
+      byId('set-what-note').classList.toggle('hidden', !running);
     },
   };
 
+  App.action('settings-jump', (btn) => {
+    const target = byId(btn.dataset.target);
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+
+  App.action('settings-reset', () => {
+    formDirty = false;
+    picker.dirty = false;
+    picker.synced = false;
+    paintSavebar();
+    if (App.state.status) App.screens.settings.update(App.state.status);
+  });
+
   App.action('settings-all', () => {
-    for (const box of byId('set-what').querySelectorAll('input[type=checkbox]')) box.checked = true;
+    for (const box of byId('set-types').querySelectorAll('input[type=checkbox]')) box.checked = true;
     formDirty = true;
+    paintSavebar();
   });
 
   App.action('settings-save-what', (btn) => App.run(btn, async () => {
-    const root = byId('set-what');
+    const root = byId('set-root');
     const sources = ['disk', 'unlim'].filter((k) => root.querySelector(`[data-field="src-${k}"]`).checked);
     const all = [...root.querySelectorAll('[data-field="cat"]')];
     const cats = all.filter((b) => b.checked).map((b) => b.value);
@@ -324,6 +389,7 @@
       formDirty = false;
       picker.dirty = false;
       picker.synced = false;  // сервер мог сжать выбор — перечитаем его
+      paintSavebar();
       return { ok: true, data: { msg: 'Сохранено' } };
     }
     return res;
@@ -351,6 +417,7 @@
     picker.selected.delete(btn.dataset.path);
     picker.dirty = true;
     paintFolders();
+    paintSavebar();
   });
 
   App.action('settings-toggle', (input) => {
