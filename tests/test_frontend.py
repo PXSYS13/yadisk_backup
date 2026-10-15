@@ -194,3 +194,47 @@ def test_thanks_strip_names_and_money():
     assert "12,50" in out["money"][1] and out["money"][1].endswith("$")
     assert out["money"][2] == ""
     assert out["initials"] == ["АП", "С"]
+
+
+# «Помогло? Поддержите»: когда карточка появляется и когда молчит — в node, без браузера
+_DONATE_HARNESS = _THANKS_HARNESS.split("App.supporters = JSON.parse")[0] + r"""
+const r = (state, files, extra) => Object.assign({ state, summary: { downloaded_files: files, downloaded_bytes: files * 1e6 } }, extra || {});
+const fresh = { donated: false, closed: [] };
+const m = (x, seen) => { const v = App.donateMoment(x, seen || fresh); return v && `${v.kind}:${v.key}`; };
+const res = {
+  done_small: m(r('done', 12)), done_big: m(r('done', 12345)),
+  run_small: m(r('running', 999)), run_1000: m(r('running', 1500)), wait_10000: m(r('waiting', 10001)),
+  closed: m(r('running', 1500), { donated: false, closed: ['m-1000'] }),
+  closed_next: m(r('running', 10500), { donated: false, closed: ['m-1000'] }),
+  done_after_close: m(r('done', 1500), { donated: false, closed: ['m-1000'] }),
+  donated: m(r('done', 50000), { donated: true, closed: [] }),
+  action: m(r('needs_action', 5000, { action: { id: 'token' } })), idle: m(r('idle', 5000)),
+  nothing: m(r('done', 0)), stopped: m(r('stopped', 5000)),
+  card: App.donateCard(App.donateMoment(r('done', 12345), fresh), 'https://dalink.to/x'),
+  card_ms: App.donateCard(App.donateMoment(r('running', 10001), fresh), ''),
+};
+process.stdout.write(JSON.stringify(res));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_donate_card_asks_once_per_milestone():
+    res = subprocess.run(["node", "-e", _DONATE_HARNESS], capture_output=True, text=True, encoding="utf-8",
+                         env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    # Числа ru-RU разделяются неразрывным пробелом
+    out = json.loads(res.stdout.replace("\u00a0", " ").replace(" ", " "))
+    # «Готово» — всегда повод спросить, во время скачивания — только на круглых числах
+    assert out["done_small"] == "done:m-0" and out["done_big"] == "done:m-10000"
+    assert out["run_small"] is None and out["run_1000"] == "milestone:m-1000"
+    assert out["wait_10000"] == "milestone:m-10000"
+    # «Не сейчас» закрывает порог: до следующего порога — тишина, «Готово» на нём же — тоже
+    assert out["closed"] is None and out["closed_next"] == "milestone:m-10000"
+    assert out["done_after_close"] is None
+    # «Уже поддерживаю», нужное действие, простой, пауза и ноль файлов — не спрашиваем
+    for key in ("donated", "action", "idle", "nothing", "stopped"):
+        assert out[key] is None, key
+    assert "Программа помогла?" in out["card"] and 'href="https://dalink.to/x"' in out["card"]
+    assert 'data-action="donate-open"' in out["card"] and 'data-key="m-10000"' in out["card"]
+    assert "Уже 10 000 файлов на вашем компьютере" in out["card_ms"]
+    assert "https://dalink.to/davronsvv" in out["card_ms"]

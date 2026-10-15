@@ -349,6 +349,56 @@
     if (people) App.text(App.byId('side-thanks-text'), `Спасибо ${fmt.num(people)} ${fmt.plural(people, 'помощнику', 'помощникам', 'помощникам')}`);
   }
 
+  // ── «Помогло? Поддержите» — в момент результата: после «Готово» и на круглых числах ──
+  // Каждый порог спрашиваем один раз: «Не сейчас» закрывает его, «Уже поддерживаю» — навсегда
+  App.DONATE_MILESTONES = [1000, 10000, 50000, 100000];
+  const DONATE_KEY = 'yadisk-donate';
+  let donateMemory = { donated: false, closed: [] };
+  App.donateSeen = {
+    get() {
+      try {
+        const v = JSON.parse(localStorage.getItem(DONATE_KEY) || 'null');
+        if (v && Array.isArray(v.closed)) donateMemory = { donated: !!v.donated, closed: v.closed.slice(-50) };
+      } catch (e) { /* без хранилища помним до перезагрузки страницы */ }
+      return donateMemory;
+    },
+    save(next) {
+      donateMemory = next;
+      try { localStorage.setItem(DONATE_KEY, JSON.stringify(next)); } catch (e) { /* то же */ }
+    },
+  };
+
+  App.donateMoment = (r, seen) => {
+    const sm = (r && r.summary) || {};
+    const files = sm.downloaded_files || 0;
+    if (!r || !seen || seen.donated || !files || r.action) return null;
+    const reached = App.DONATE_MILESTONES.filter((m) => files >= m);
+    const milestone = reached.length ? reached.at(-1) : 0;
+    const key = `m-${milestone}`;
+    if (seen.closed.includes(key)) return null;
+    const moment = { key, milestone, files, bytes: sm.downloaded_bytes || 0 };
+    if (r.state === 'done') return { ...moment, kind: 'done' };
+    if ((r.state === 'running' || r.state === 'waiting') && milestone) return { ...moment, kind: 'milestone' };
+    return null;
+  };
+
+  App.donateCard = (m, url) => {
+    if (!m) return '';
+    // В «Готово» цифры уже крупно написаны выше — здесь не повторяем
+    const title = m.kind === 'done' ? 'Программа помогла? Поддержите её'
+      : `Уже ${fmt.files(m.milestone)} на вашем компьютере`;
+    return `<section class="banner donate" aria-label="Поддержать проект"><span class="b-icon">${icon('heart')}</span>
+      <div><h3>${esc(title)}</h3>
+        <p>Программа бесплатная, её делает один человек в свободное время. Любая сумма помогает её развивать,
+          а ваше имя появится в «Нас поддерживают».</p>
+        <div class="row actions">
+          <a class="btn primary" href="${esc(url || 'https://dalink.to/davronsvv')}" target="_blank" rel="noopener"
+            data-action="donate-open" data-key="${esc(m.key)}">${icon('heart')}Поддержать проект</a>
+          <button data-action="donate-later" data-key="${esc(m.key)}">Не сейчас</button>
+          <button class="link" data-action="donate-done">Уже поддерживаю</button>
+        </div></div></section>`;
+  };
+
   // ── «Доступ»: ключ Диска, папка, доступ к Безлимиту (общий для настройки и «Настроек») ──
   const POLYGON_URL = 'https://yandex.ru/dev/disk/poligon/';
   const FORMS = {

@@ -230,6 +230,10 @@ button.small .i,.btn.small .i{width:16px;height:16px}
 .banner.notice{background:var(--surface-2);box-shadow:none}
 .banner.safety .b-icon{background:var(--warn-soft);color:var(--warn)}
 .mt>.banner{margin-bottom:0}
+.banner.donate{align-items:flex-start;border-color:var(--accent-line)}
+.banner.donate .b-icon{background:var(--grad);color:#fff}
+.banner.donate p{max-width:68ch}
+.banner.donate .actions{gap:8px 16px;align-items:center}
 /* Тихая строка «не удаляйте файлы» под главной карточкой */
 .safety-note{display:flex;align-items:flex-start;gap:12px;padding:14px 16px;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--surface-2);color:var(--text-2);font-size:15px;line-height:1.45}
 .safety-note .i{width:20px;height:20px;color:var(--warn);margin-top:1px;stroke-width:1.75}

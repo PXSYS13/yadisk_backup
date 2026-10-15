@@ -186,6 +186,24 @@
       которые сейчас не отвечают. Программа повторит сама.</span></p>`;
   }
 
+  // Карточка «Поддержать» прячется сразу, не дожидаясь следующего опроса статуса
+  function closeDonate(key, donated) {
+    const seen = App.donateSeen.get();
+    App.donateSeen.save({ donated: seen.donated || donated, closed: key ? [...seen.closed, key] : seen.closed });
+    App.html(byId('home-donate'), '');
+    byId('home-donate').classList.add('hidden');
+  }
+
+  App.action('donate-open', (el) => {
+    window.open(el.href, '_blank', 'noopener');
+    closeDonate(el.dataset.key, false);
+  });
+  App.action('donate-later', (el) => closeDonate(el.dataset.key, false));
+  App.action('donate-done', () => {
+    closeDonate('', true);
+    App.toast('Спасибо, что поддерживаете проект!', 'ok');
+  });
+
   App.screens.home = {
     mount(el) {
       el.innerHTML = `<div id="home-banner"></div>
@@ -205,6 +223,7 @@
         </section>
         <div class="mt" id="home-safety"></div>
         <div class="mt" id="home-notice"></div>
+        <div class="mt" id="home-donate"></div>
         <div class="grid-2 mt" id="home-sources"></div>
         <div class="home-grid mt" id="home-grid">
           <div id="home-feed"></div>
@@ -234,6 +253,9 @@
       const showSafety = r.state !== 'idle' && !((r.summary || {}).complete) && !r.notice;
       App.html(byId('home-safety'), showSafety && !offline ? App.safetyNote() : '');
       App.html(byId('home-notice'), offline ? '' : App.noticeBanner(r.notice));
+      const moment = offline ? null : App.donateMoment(r, App.donateSeen.get());
+      App.html(byId('home-donate'), App.donateCard(moment, s.donation_url));
+      byId('home-donate').classList.toggle('hidden', !moment);
       const src = r.sources || {};
       App.html(byId('home-sources'), setup ? '' : App.sourceBlock('disk', src.disk, r) + App.sourceBlock('unlim', src.unlim, r));
       // Внизу: лента событий слева, «Где мои файлы» и последние файлы справа
