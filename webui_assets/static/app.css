@@ -433,6 +433,7 @@ button.small .i,.btn.small .i{width:16px;height:16px}
 .support-hero .badge-art .i{width:28px;height:28px;stroke-width:1.75}
 .support-hero h1{font-size:36px;margin-top:24px}
 .support-hero .sub{color:var(--text-2);font-size:17px;line-height:1.55;max-width:56ch;margin-top:12px}
+.support-hero .support-note{color:var(--text-3);font-size:14px;line-height:1.5;max-width:62ch;margin-top:10px}
 .support-hero .actions{margin-top:28px;gap:12px}
 .supporters-head{display:flex;align-items:flex-end;justify-content:space-between;gap:8px 24px;flex-wrap:wrap;margin:40px 0 20px}
 .supporters-head h2{font-size:24px;letter-spacing:-.01em}

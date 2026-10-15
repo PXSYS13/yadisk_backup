@@ -322,8 +322,13 @@
   // Тихая строка внизу главной: «Проект живёт благодаря вам: Анна П., Сергей и ещё 45»
   App.thanksStrip = () => {
     const sp = App.supporters;
-    const list = (sp && sp.supporters) || [];
-    if (!list.length) return '';
+    if (!sp) return '';
+    const list = sp.supporters || [];
+    if (!list.length) {
+      return `<aside class="thanks-strip" aria-label="Поддержка проекта"><div class="thanks-who">
+        <p>Программа бесплатная и живёт на поддержке тех, кому она помогла. Имена поддержавших появляются здесь.</p></div>
+        <a href="#/support">${icon('heart')}Поддержать</a></aside>`;
+    }
     const seen = new Set();
     const first = list.filter((x) => x.name !== 'Аноним' && !seen.has(x.name) && seen.add(x.name)).slice(0, 3);
     const rest = Math.max(0, (sp.people || list.length) - first.length);

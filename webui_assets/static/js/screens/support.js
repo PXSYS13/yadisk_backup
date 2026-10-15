@@ -1,5 +1,6 @@
 /* Поддержать проект и «Нас поддерживают» — одна страница вместо ссылок на каждом экране.
-   Список поддержавших ведёт автор в supporters.json на GitHub (/api/supporters). */
+   Список поддержавших — supporters.json на GitHub (/api/supporters): донаты DonationAlerts
+   попадают туда сами. */
 (function () {
   'use strict';
   const App = window.App;
@@ -48,6 +49,8 @@
           <h1>Поддержать проект</h1>
           <p class="sub">Программа бесплатная и открытая. Её делают в свободное время, чтобы люди не потеряли свои фото и файлы.
             Если она помогла — можно поддержать автора или просто рассказать о ней знакомым.</p>
+          <p class="support-note">Имя и сообщение из доната появятся ниже, в «Нас поддерживают», примерно через полчаса.
+            Не хотите, чтобы имя было видно, — подпишитесь «Аноним».</p>
           <div class="row actions">
             <a class="btn primary big" id="support-donate" href="https://dalink.to/davronsvv" target="_blank" rel="noopener">${I('heart')}Поддержать на DonationAlerts</a>
             <a class="btn big" id="support-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">${I('send')}Канал в Telegram</a>

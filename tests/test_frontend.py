@@ -167,6 +167,8 @@ App.supporters = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 out.strip = App.thanksStrip();
 App.supporters = { supporters: [], people: 0 };
 out.empty = App.thanksStrip();
+App.supporters = null;
+out.loading = App.thanksStrip();
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -185,7 +187,9 @@ def test_thanks_strip_names_and_money():
     # Аноним и повторный донат не занимают место среди трёх имён; имена экранируются
     assert "Анна П., &lt;b&gt;Сергей&lt;/b&gt;, Мария К. и ещё 2" in strip
     assert 'href="#/support"' in strip and "<b>Сергей" not in strip
-    assert out["empty"] == ""
+    # Пока никто не поддержал — тихое приглашение, пока список не загрузился — ничего
+    assert "Имена поддержавших появляются здесь" in out["empty"] and 'href="#/support"' in out["empty"]
+    assert out["loading"] == ""
     assert out["money"][0].endswith("₽") and "500" in out["money"][0]
     assert "12,50" in out["money"][1] and out["money"][1].endswith("$")
     assert out["money"][2] == ""

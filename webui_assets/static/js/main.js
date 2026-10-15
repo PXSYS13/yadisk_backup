@@ -7,6 +7,6 @@
   App.route();
   App.startPolling();
   App.loadSupporters();
-  setInterval(App.loadSupporters, 3600 * 1000);
+  setInterval(App.loadSupporters, 15 * 60 * 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) App.refresh(); });
 })();
