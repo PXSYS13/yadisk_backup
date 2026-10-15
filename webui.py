@@ -2183,8 +2183,13 @@ def guide():
 
 @app.get("/donate")
 def donate():
-    """Перенаправляет на страницу пожертвования / вкладку доната."""
-    return RedirectResponse(url="/?tab=donate", status_code=307)
+    """Перенаправляет на экран «Поддержать» (README даёт этот адрес людям).
+
+    Новый интерфейс не знает ?tab= прежнего и открывал «Главную»: ему — #/support,
+    прежнему — его вкладка доната.
+    """
+    new_ui = UI_DEFAULT == "new" and (TEMPLATES_DIR / "app.html").exists()
+    return RedirectResponse(url="/#/support" if new_ui else "/?tab=donate", status_code=307)
 
 
 # ── Сводка «Режима спасения» для интерфейса ────────────────────────────────

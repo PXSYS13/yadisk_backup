@@ -228,10 +228,14 @@ def test_sql_ident_whitelist_rejects_injection(disk_db):
         webui.preview_db(disk_db, "files", "1=1; --")
 
 
-def test_donate_redirect():
+def test_donate_redirect(monkeypatch):
+    # Новый интерфейс: экран «Поддержать», а не «Главная» (там ?tab= не понимают)
     resp = webui.donate()
     assert resp.status_code == 307
-    assert resp.headers["location"] == "/?tab=donate"
+    assert resp.headers["location"] == "/#/support"
+    # Прежний интерфейс по умолчанию — его вкладка доната
+    monkeypatch.setattr(webui, "UI_DEFAULT", "old")
+    assert webui.donate().headers["location"] == "/?tab=donate"
 
 
 def test_donation_url_constant():
