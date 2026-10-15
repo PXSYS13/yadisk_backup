@@ -26,6 +26,7 @@ import time
 from tqdm import tqdm
 
 from unlim_common import (
+    DOWNLOAD_DIR,
     LOG_DIR,
     UNLIM_DB_FILE as DB_FILE,
     UNLIM_SCHEMA as SCHEMA,
@@ -47,6 +48,7 @@ from utils import (
     ensure_utf8_stdio,
     human_bytes,
     is_sqlite_disk_error,
+    remove_preview,
     sqlite_tx,
 )
 
@@ -139,6 +141,32 @@ def save_listed_files(items: list[dict]) -> int:
             )
             added += 1
     return added
+
+
+def drop_rows_outside_unlim() -> int:
+    """Убирает из очереди строки старого списка, которые лежат не в безлимите. Сколько убрано.
+
+    До октября 2026 список собирал фотосрез, а он отдаёт все фото аккаунта — и с обычного
+    Диска тоже. Такие файлы скачивает ветка Диска; отсюда они ушли бы второй копией в
+    _unlim. Зовётся только после полного списка mpfs/list: тогда известно, что безлимит —
+    это /photounlim (фотосрез называл те же файлы «photounlim:/имя»). Скачанное не трогаем.
+    """
+    c = db()
+    rows = c.execute(
+        "SELECT file_id, preview_path FROM unlim_files WHERE status IN ('pending', 'failed') "
+        "AND substr(file_id, 1, ?) != ? AND substr(file_id, 1, ?) != ?",
+        (len(UNLIM_ROOT) + 1, UNLIM_ROOT + "/", len("photounlim:"), "photounlim:"),
+    ).fetchall()
+    if not rows:
+        return 0
+    # Превью таких строк — копии фото Диска; у Диска свои превью
+    for r in rows:
+        remove_preview(r["preview_path"], DOWNLOAD_DIR)
+    with sqlite_tx(c):
+        c.executemany("DELETE FROM unlim_files WHERE file_id=? AND status IN ('pending', 'failed')",
+                      [(r["file_id"],) for r in rows])
+    log.info("убрано строк старого списка вне безлимита: %d", len(rows))
+    return len(rows)
 
 
 def collect_via_list(s, sk, uid) -> int:
@@ -361,6 +389,11 @@ def cmd_collect():
                 code = None
             if code:
                 return code
+        if not list_error:
+            dropped = drop_rows_outside_unlim()
+            if dropped:
+                print(f"  ↷ Убрал из очереди {dropped} файлов старого списка: они лежат на обычном Диске, "
+                      f"их скачивает Диск")
 
         stats = status_counts()
         if not stats and list_error:

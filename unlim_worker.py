@@ -40,7 +40,7 @@ from typing import NamedTuple
 
 import requests
 
-from storage_fetch import FetchFailure, fetch_preview, fetch_to_file
+from storage_fetch import FetchFailure, fetch_preview, fetch_to_file, preview_failure_text
 
 from unlim_common import (
     BASE,
@@ -1353,7 +1353,8 @@ class Worker:
         dst = preview_path_for(os.path.dirname(EXTRACT_DIR), os.path.join(EXTRACT_DIR, name))
         failure = fetch_preview(self.session, url, dst)
         if failure is not None:
-            log.warning("w%d превью %s: %s", self.id, name, failure)
+            missing, text = preview_failure_text(failure)
+            (log.info if missing else log.warning)("w%d превью %s: %s", self.id, name, text)
             return
         set_preview_path(fid, dst)
         self.previews += 1

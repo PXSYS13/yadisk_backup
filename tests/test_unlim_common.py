@@ -210,3 +210,49 @@ def test_reset_failed_files_without_a_file_list(tmp_path):
     db_path = str(tmp_path / "unlim_state.db")
     uc.ensure_unlim_schema(db_path)  # так её создаёт воркер: только unlim_meta
     assert uc.reset_failed_files(db_path, include_in_progress=True) == 0
+
+
+def test_old_photoslice_rows_outside_unlim_are_dropped(unlim_db, tmp_path, monkeypatch):
+    """Фотосрез до октября 2026 отдавал все фото аккаунта, и с обычного Диска тоже.
+    Их качает Диск — из очереди безлимита такие строки уходят, скачанное остаётся."""
+    from utils import PREVIEW_DIRNAME
+
+    ud = unlim_db
+    monkeypatch.setattr(ud, "DOWNLOAD_DIR", str(tmp_path))
+    preview = tmp_path / PREVIEW_DIRNAME / "_unlim" / "c.jpg.jpg"
+    preview.parent.mkdir(parents=True)
+    preview.write_bytes(b"jpeg")
+    ud.db().executemany(
+        "INSERT INTO unlim_files (file_id, name, size, status, preview_path) VALUES (?, ?, 0, ?, ?)",
+        [("/photounlim/a.jpg", "a.jpg", "pending", None), ("photounlim:/b.jpg", "b.jpg", "failed", None),
+         ("/disk/Фотокамера/c.jpg", "c.jpg", "pending", str(preview)), ("disk:/x.jpg", "x.jpg", "failed", None),
+         ("/disk/y.jpg", "y.jpg", "downloaded", None), ("/disk/z.jpg", "z.jpg", "in_progress", None)],
+    )
+    assert ud.drop_rows_outside_unlim() == 2
+    left = {r["file_id"]: r["status"] for r in ud.db().execute("SELECT file_id, status FROM unlim_files")}
+    assert left == {"/photounlim/a.jpg": "pending", "photounlim:/b.jpg": "failed",
+                    "/disk/y.jpg": "downloaded", "/disk/z.jpg": "in_progress"}
+    assert not preview.exists()
+    assert ud.drop_rows_outside_unlim() == 0
+
+
+def test_collect_drops_old_rows_only_after_a_full_list(unlim_db, monkeypatch, capsys):
+    ud = unlim_db
+    monkeypatch.setattr(ud, "load_cookies", lambda: {})
+    monkeypatch.setattr(ud, "get_sk_uid", lambda s: ("sk", "uid"))
+    monkeypatch.setattr(ud, "collect_via_photoslice", lambda *a: None)
+    ud.db().execute("INSERT INTO unlim_files (file_id, name, size, status) VALUES ('/disk/a.jpg', 'a.jpg', 0, 'pending')")
+
+    def broken(*a, **k):
+        raise RuntimeError("mpfs/list: HTTP 500")
+
+    # Список не получен — неизвестно, что в безлимите: ничего не трогаем
+    monkeypatch.setattr(ud, "api_call", broken)
+    ud.cmd_collect()
+    assert ud.db().execute("SELECT COUNT(*) FROM unlim_files").fetchone()[0] == 1
+
+    # Безлимит пуст, список полный — старая строка Диска уходит из очереди
+    monkeypatch.setattr(ud, "api_call", lambda *a, **k: [{"type": "dir", "path": "/photounlim"}])
+    assert not ud.cmd_collect()
+    assert ud.db().execute("SELECT COUNT(*) FROM unlim_files").fetchone()[0] == 0
+    assert "их скачивает Диск" in capsys.readouterr().out

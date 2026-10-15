@@ -33,7 +33,7 @@ from tenacity import (
 from tqdm import tqdm
 
 from state import DEFERRED_MARKER, State
-from storage_fetch import DeadHosts, FetchFailure, fetch_preview, fetch_to_file
+from storage_fetch import DeadHosts, FetchFailure, fetch_preview, fetch_to_file, preview_failure_text
 from utils import (
     APP_VERSION,
     EXIT_AUTH,
@@ -632,7 +632,8 @@ def _save_preview(client: yadisk.Client, job: DownloadJob, local_path: str, down
         log.warning("превью %s: %s", job.remote_path, e)
         return ""
     if failure is not None:
-        log.warning("превью %s: %s", job.remote_path, failure)
+        missing, text = preview_failure_text(failure)
+        (log.info if missing else log.warning)("превью %s: %s", job.remote_path, text)
         return ""
     log.info("PREVIEW | %s | %s", job.remote_path, dst)
     return dst

@@ -454,3 +454,32 @@ def test_unlim_old_previews_are_swept_at_worker_start(tmp_path, unlim_db):
     assert uw.sweep_previews() == 1
     assert not os.path.exists(old) and os.path.exists(foreign)
     assert _unlim_rows(unlim_db) == {"a.HEIC": ("downloaded", None), "v.MOV": ("downloaded", foreign)}
+
+
+def test_missing_preview_is_not_logged_as_a_refusal(tmp_path, disk_net, monkeypatch, caplog):
+    """HTTP 434 на превью — у Яндекса нет копии. Строка «refused | …» включала баннер
+    «Яндекс отказывает в скачивании безлимита» у человека, который качал только Диск."""
+    import logging
+
+    class NoPreview(_Http):
+        def get(self, url, stream=False, timeout=None, allow_redirects=True):
+            if url.split("/")[2] == "preview":
+                return _Stream(status=434, headers={"Content-Type": "text/plain"})
+            return super().get(url, stream, timeout, allow_redirects)
+
+    http = NoPreview()
+    monkeypatch.setattr(downloader, "_thread_preview_http", lambda token: http)
+    with caplog.at_level(logging.INFO, logger="yadisk_backup"):
+        res = downloader._download_one(downloader.DownloadJob("disk:/Фото/a.HEIC", 5, None), _DiskClient(), str(tmp_path))
+    assert res.status == "deferred" and not res.preview_path
+    lines = [r for r in caplog.records if "превью" in r.getMessage()]
+    assert lines and all(r.levelno == logging.INFO for r in lines)
+    assert all("refused |" not in r.getMessage() for r in lines)
+    assert "нет уменьшенной копии" in lines[0].getMessage()
+
+
+def test_preview_failure_text_drops_the_category_label():
+    missing, text = sf.preview_failure_text(sf.FetchFailure("refused", "HTTP 434 при скачивании файла"))
+    assert missing and "|" not in text
+    missing, text = sf.preview_failure_text(sf.FetchFailure("server_50x", "HTTP 500 при скачивании файла"))
+    assert not missing and "server_50x" not in text and "HTTP 500" in text

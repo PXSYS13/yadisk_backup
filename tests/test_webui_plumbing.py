@@ -118,3 +118,19 @@ def test_status_exposes_exit_code_texts(monkeypatch):
     codes = client.get("/api/status").json()["exit_codes"]
     assert set(codes) >= {"1", "2", "3", "4", "5"}
     assert "Яндекс" in codes["5"]
+
+
+def test_disk_lines_never_claim_that_yandex_refuses_unlim(monkeypatch):
+    """Отчёт пользователя: Безлимит не запускался, а баннер писал «Яндекс отказывает в
+    скачивании безлимита» — из-за 29 строк Диска «превью …: refused | HTTP 434»."""
+    preview = "10:39:55  2026-10-15 10:39:55 | WARNING | превью disk:/Photos/a.JPG: refused | HTTP 434"
+    diag = _diag(monkeypatch, {"disk": _Task([preview] * 29 + ["refused | HTTP 403"] * 5, alive=True)})
+    assert diag["kind"] != "bulk_disabled"
+    assert diag["counts"]["bulk_disabled"] == 0
+    # Превью не объясняет и сбои Яндекса: таймаут превью — не «Яндекс отвечает медленно»
+    slow = "WARNING | превью disk:/a.JPG: не скачалось — Read timed out. (read timeout=15.0) server_50x"
+    diag = _diag(monkeypatch, {"disk": _Task([slow] * 10, alive=True)})
+    assert diag["kind"] is None
+    # А у воркера безлимита те же отказы — по-прежнему повод для объяснения
+    diag = _diag(monkeypatch, {"unlim_w1": _Task(["[w1] refused | HTTP 403"] * 3, alive=True)})
+    assert diag["kind"] == "bulk_disabled"

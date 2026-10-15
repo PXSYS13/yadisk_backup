@@ -459,20 +459,22 @@ class TaskManager:
             return {slot: t.snapshot() for slot, t in self._tasks.items()}
 
     def recent_log_lines(self, per_task: int = 40, recent_sec: float = DIAG_RECENT_SEC,
-                         exclude: tuple[str, ...] = ()) -> list[str]:
+                         exclude: tuple[str, ...] = (), with_slots: bool = False) -> list:
         """Хвосты логов живых задач и задач, закончившихся не раньше recent_sec назад.
 
         Старые задачи не учитываем: исправленная проблема не должна висеть баннером.
         exclude — слоты, чьи строки к этим объяснениям не относятся.
+        with_slots — пары (слот, строка): часть правил диагностики касается одного источника.
         """
         now = time.time()
         with self._lock:
-            lines: list[str] = []
+            lines: list = []
             for slot, t in self._tasks.items():
                 if slot in exclude:
                     continue
                 if t.alive() or (t.finished_at is not None and now - t.finished_at <= recent_sec):
-                    lines.extend(list(t.log)[-per_task:])
+                    tail = list(t.log)[-per_task:]
+                    lines.extend([(slot, ln) for ln in tail] if with_slots else tail)
             return lines
 
     def clear_logs(self, pattern: str) -> int:
@@ -604,7 +606,13 @@ LOW_FREE_BYTES = 1024 ** 3
 PREPARE_NEEDS_ACTION = -2
 # Временные ошибки Диска: явный старт возвращает такие файлы в очередь
 _DISK_TRANSIENT_ERRORS = ("local_disk |", "auth_expired |", "server_50x |",
-                          "download_timeout |", "rate_limit |")
+                          "download_timeout |", "rate_limit |",
+                          # Версии до 1.2 писали «ИмяИсключения: текст» без метки и считали
+                          # таймаут молчащего сервера ошибкой файла — такие файлы застревали навсегда
+                          "RequestTimeoutError:", "InternalServerError:", "BadGatewayError:",
+                          "GatewayTimeoutError:", "ServiceUnavailableError:", "RequestError:",
+                          "TooManyRequestsError:", "429 TooManyRequests:", "ConnectionError:",
+                          "ReadTimeout:", "ConnectTimeout:")
 _SOURCE_LABEL = {"disk": "Диск", "unlim": "Безлимит"}
 _BRANCH_STATE_TEXT = {
     "checking": "проверяю доступ", "listing": "получаю список файлов", "downloading": "скачиваю",
@@ -1966,6 +1974,8 @@ _DIAG_RULES: list[dict] = [
     {
         "kind": "bulk_disabled",
         "markers": ("bulk_unavailable", "not_zip |", "refused |"),
+        # Правило про безлимит: строки Диска сюда не считаем (unlim_collect, unlim_w1…)
+        "slots": ("unlim",),
         # Один отказ на один файл — не повод кричать «Яндекс отказывает»
         "min_lines": 3,
         "strong_markers": ("bulk_unavailable",),
@@ -2049,9 +2059,17 @@ def diagnose_tasks() -> dict:
     """
     # Строки скачивания по ссылкам объясняет свой экран: здесь они дали бы баннер «Диска».
     # Сортировка печатает имена файлов («timeout_2024.docx») — это не про Яндекс
-    lines = [ln.lower() for ln in tm.recent_log_lines(40, exclude=(SLOT_LINKS, SLOT_ORGANIZE))]
+    # Превью — бонус: «превью …: HTTP 434» или таймаут превью не объясняют, почему не качаются файлы
+    tagged = [(slot, ln.lower()) for slot, ln in
+              tm.recent_log_lines(40, exclude=(SLOT_LINKS, SLOT_ORGANIZE), with_slots=True)
+              if "превью" not in ln.lower()]
+
+    def rule_lines(rule: dict) -> list[str]:
+        slots = rule.get("slots")
+        return [ln for slot, ln in tagged if not slots or slot.startswith(slots)]
+
     counts = {
-        rule["kind"]: sum(1 for ln in lines if any(m in ln for m in rule["markers"]))
+        rule["kind"]: sum(1 for ln in rule_lines(rule) if any(m in ln for m in rule["markers"]))
         for rule in _DIAG_RULES
     }
     diag: dict = {f"{k}_detected": False for k in _DIAG_FLAG_KINDS}
@@ -2064,7 +2082,7 @@ def diagnose_tasks() -> dict:
         if n >= rule.get("min_lines", 1):
             return True
         strong = rule.get("strong_markers", ())
-        return bool(n) and any(m in ln for ln in lines for m in strong)
+        return bool(n) and any(m in ln for ln in rule_lines(rule) for m in strong)
 
     for rule in _DIAG_RULES:
         if fired(rule):

@@ -411,3 +411,28 @@ def test_unlim_branch_survives_a_database_from_an_old_version(rescue, monkeypatc
     assert {"attempts", "storage_host", "preview_path"} <= cols
     assert rows == {"1": "pending", "2": "downloaded"}
     assert any("снова в очереди" in line for line in rescue.log)
+
+
+def test_failures_from_versions_before_1_2_go_back_to_the_queue(tmp_path, monkeypatch):
+    """До 1.2 таймаут молчащего сервера записывался ошибкой файла («RequestTimeoutError: …»,
+    без метки). Такие 610 файлов у пользователя застряли навсегда: явный старт их не трогал."""
+    db = tmp_path / "state.db"
+    monkeypatch.setattr(webui, "DB_FILE", db)
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE files (remote_path TEXT PRIMARY KEY, status TEXT, error TEXT)")
+    con.executemany("INSERT INTO files VALUES (?, 'failed', ?)", [
+        ("a", "RequestTimeoutError: HTTPSConnectionPool(host='s345klg.storage.yandex.net', port=443)"),
+        ("b", "InternalServerError: Status code: 500"),
+        ("c", "429 TooManyRequests: слишком часто"),
+        ("d", "RequestError: Connection aborted"),
+        ("e", "download_timeout | Яндекс не отдал файл за 300 с"),
+        ("f", "PathNotFound: файла больше нет"),
+        ("g", "bad_file | размер не совпал"),
+    ])
+    con.commit()
+    con.close()
+    assert webui._reset_transient_disk_failures() == 5
+    con = sqlite3.connect(db)
+    still = {r[0] for r in con.execute("SELECT remote_path FROM files WHERE status='failed'")}
+    con.close()
+    assert still == {"f", "g"}  # файл удалён или испорчен — это не сбой, повтор не поможет

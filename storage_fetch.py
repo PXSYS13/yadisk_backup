@@ -211,6 +211,21 @@ def fetch_to_file(
     return written, host, None
 
 
+# Так Яндекс отвечает, когда уменьшенной копии у файла нет вовсе
+_NO_PREVIEW = ("HTTP 434", "HTTP 404")
+
+
+def preview_failure_text(failure: FetchFailure) -> tuple[bool, str]:
+    """(у Яндекса просто нет превью?, текст для журнала без метки «категория |»).
+
+    Превью — бонус. Строка «refused | HTTP 434» о нём выглядела как отказ Яндекса,
+    и диагностика объявляла «Яндекс отказывает в скачивании безлимита».
+    """
+    if any(code in failure.text for code in _NO_PREVIEW):
+        return True, "у Яндекса нет уменьшенной копии"
+    return False, f"не скачалось — {failure.text}"
+
+
 def fetch_preview(session, url: str, dst: str) -> FetchFailure | None:
     """Скачивает превью (JPEG) в dst атомарно. None — успех.
 
