@@ -50,9 +50,12 @@ from unlim_common import (
     UNLIM_DB_FILE,
     DEFERRED_MARKER,
     AuthExpiredError,
+    CookiesFormatError,
+    UnlimError,
     YandexUnavailableError,
     connect_unlim_db,
     count_deferred,
+    count_failed,
     ensure_unlim_schema,
     get_sk_uid,
     make_cid,
@@ -68,6 +71,7 @@ from utils import (
     EXIT_DEFERRED,
     EXIT_DISK_FULL,
     EXIT_OUTAGE,
+    EXIT_PARTIAL,
     TELEGRAM_CHANNEL,
     categorize,
     ensure_utf8_stdio,
@@ -75,6 +79,7 @@ from utils import (
     is_local_disk_error,
     preview_path_for,
     previews_enabled,
+    remove_preview,
     remove_quiet,
     sanitize_component,
 )
@@ -257,17 +262,73 @@ def _release_to_pending(file_ids: list[str], worker_id: int | None = None) -> No
 
 
 def mark_done(file_ids: list[str], paths: dict[str, str] | None = None) -> None:
-    """Помечает файлы скачанными; paths — file_id → локальный путь (если известен)."""
+    """Помечает файлы скачанными; paths — file_id → локальный путь (если известен).
+
+    Оригинал на месте — страховочное превью больше не нужно: оно удаляется (drop_previews).
+    """
     if not file_ids:
         return
     paths = paths or {}
     with _tx() as c:
-        host_reset = ", storage_host=NULL" if "storage_host" in _columns(c) else ""
+        cols = _columns(c)
+        host_reset = ", storage_host=NULL" if "storage_host" in cols else ""
         c.executemany(
             "UPDATE unlim_files SET status='downloaded', local_path=COALESCE(?, local_path), "
             f"downloaded_at=CURRENT_TIMESTAMP, worker_id=NULL, error=NULL{host_reset} WHERE file_id=?",
             [(paths.get(i), i) for i in file_ids],
         )
+        previews = []
+        if "preview_path" in cols:
+            for fid in file_ids:
+                row = c.execute("SELECT preview_path FROM unlim_files WHERE file_id=?", (fid,)).fetchone()
+                if row and row[0]:
+                    previews.append((fid, row[0]))
+    drop_previews(previews)
+
+
+def sweep_previews() -> int:
+    """Удаляет превью уже скачанных файлов. Сколько удалено; никогда не бросает.
+
+    Такие превью остались от прошлых версий или не удалились в прошлый раз (файл
+    был открыт в программе просмотра).
+    """
+    try:
+        with _tx() as c:
+            if "preview_path" not in _columns(c):
+                return 0
+            rows = [(r[0], r[1]) for r in c.execute(
+                "SELECT file_id, preview_path FROM unlim_files "
+                "WHERE status='downloaded' AND preview_path IS NOT NULL")]
+    except Exception as e:  # noqa: BLE001 — уборка не должна мешать скачиванию
+        log.warning("уборка превью: %s", e)
+        return 0
+    return drop_previews(rows)
+
+
+def drop_previews(previews: list[tuple[str, str]]) -> int:
+    """Удаляет превью файлов, чьи оригиналы скачаны, и забывает их. Сколько удалено.
+
+    Корень — <папка над _unlim>/_превью, как у Worker._save_preview. Никогда не
+    бросает: ошибка уборки не должна ронять скачивание. Неудалённое превью остаётся
+    записанным и уберётся при следующем запуске воркера.
+    """
+    if not previews:
+        return 0
+    try:
+        root = os.path.dirname(EXTRACT_DIR)
+        gone, kept = [], []
+        for fid, path in previews:
+            (gone if remove_preview(path, root) else kept).append((fid, path))
+        if gone:
+            with _tx() as c:
+                c.executemany("UPDATE unlim_files SET preview_path=NULL WHERE file_id=? AND preview_path=?", gone)
+        if kept:
+            log.warning("не удалено превью: %d (файл занят или лежит не в «_превью»), например %s",
+                        len(kept), kept[0][1])
+        return len(gone)
+    except Exception as e:  # noqa: BLE001 — уборка не должна ронять скачивание
+        log.warning("уборка превью: %s", e)
+        return 0
 
 
 def mark_deferred(file_ids: list[str], host: str, error: str, worker_id: int | None = None) -> None:
@@ -1067,7 +1128,15 @@ class Worker:
     # ── авторизация ──
 
     def authorize(self) -> None:
-        self.session = make_session()
+        try:
+            self.session = make_session()
+        except CookiesFormatError as e:
+            self.say(f"auth_expired | {e}")
+            sys.exit(EXIT_AUTH)
+        except (ValueError, OSError) as e:  # битый JSON, не тот файл, нет прав на чтение
+            self.say(f"auth_expired | Не получается прочитать cookies.json ({e}). "
+                     f"Обновите доступ к Безлимиту в «Настройках».")
+            sys.exit(EXIT_AUTH)
         try:
             self.sk, self.uid = get_sk_uid(self.session)
         except AuthExpiredError as e:
@@ -1076,6 +1145,10 @@ class Worker:
             sys.exit(EXIT_AUTH)
         except YandexUnavailableError as e:
             self.say(f"server_50x | Яндекс не отвечает, вход проверить не удалось: {e}. Повторю позже.")
+            sys.exit(EXIT_OUTAGE)
+        except UnlimError as e:
+            # Страница пришла без sk/uid: капча или новая вёрстка — не падение с кодом 1
+            self.say(f"server_50x | Не удалось войти в веб-версию Диска: {e}. Повторю позже.")
             sys.exit(EXIT_OUTAGE)
         self.say(f"авторизован uid={self.uid}")
 
@@ -1120,6 +1193,11 @@ class Worker:
             self.say(f"storage_down | Всё доступное скачано. Ждут, когда серверы хранения Яндекса "
                      f"оживут: {deferred} файлов. Попытки не сожжены.")
             return EXIT_DEFERRED
+        failed = count_failed(DB_FILE)
+        if failed:
+            # Очередь пройдена, но часть файлов так и не скачалась — код 1, как у Диска
+            self.say(f"Очередь пройдена, не скачалось: {failed} файлов (см. «Подробнее» в интерфейсе)")
+            return EXIT_PARTIAL
         self.say("нет работы, выход")
         return 0
 
@@ -1550,6 +1628,9 @@ def main() -> int:
     n_rec = recover_stuck(worker_id=worker.id)
     if n_rec:
         worker.say(f"возвращено {n_rec} зависших файлов в очередь")
+    n_prev = sweep_previews()
+    if n_prev:
+        worker.say(f"убрано {n_prev} превью: оригиналы этих фото уже скачаны")
 
     summary = queue_summary()
     ok_space, free = check_disk_space(DOWNLOAD_DIR, 0)

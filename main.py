@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import platform
+import sqlite3
 import sys
 import time
 from contextlib import closing
@@ -31,6 +32,7 @@ from downloader import (
     RootNotFound,
     download_all,
     make_client,
+    scan_exit_code,
     scan_media,
     scan_tree,
     token_state,
@@ -53,6 +55,7 @@ from utils import (
     file_size_safe,
     human_bytes,
     human_duration,
+    is_sqlite_disk_error,
     safe_int,
 )
 
@@ -179,6 +182,13 @@ def _run_download(cfg: dict, state: State, workers: int) -> int:
             download_dir=cfg["download_dir"],
             workers=workers,
         )
+    except sqlite3.OperationalError as e:
+        if not is_sqlite_disk_error(e):
+            raise
+        # База лежит на том же диске, что и файлы: он кончился — это код 4, а не падение
+        print(f"local_disk | Не получается записать базу state.db: {e}. Освободите место "
+              f"или проверьте, что диск подключён.", flush=True)
+        return EXIT_DISK_FULL
     except KeyboardInterrupt:
         _print_summary(counters, time.time() - t0)
         print("\nПрервано пользователем. Прогресс сохранён в state.db.", flush=True)
@@ -285,18 +295,45 @@ def cmd_scan(cfg: dict, args: argparse.Namespace) -> int:
                 log.info("scan: %d файлов, %s", files, human_bytes(bytes_))
                 total_files += files
                 total_bytes += bytes_
+    except Exception as e:  # noqa: BLE001 — ниже решаем, известная ли это ошибка
+        code = scan_exit_code(e)
+        if code is None:
+            raise
+        return _scan_failed(code, e)
     finally:
         progress.close()
 
     # Находки — в самом конце: Web UI читает их из хвоста журнала, когда сбор закончен,
     # а за долгий сбор ранние строки вытеснили бы строки прогресса
+    unreadable = notes.pop("unreadable_folders", [])
     for path in missing:
         print(f"folder_missing | {json.dumps({'path': path}, ensure_ascii=False)}", flush=True)
     for kind, names in notes.items():
         _print_note(kind, names)
     print(f"\nИтого: {total_files} файлов, {human_bytes(total_bytes)}")
     log.info("scan итого: %d файлов, %s; в БД %s", total_files, human_bytes(total_bytes), _stats_line())
+    if unreadable:
+        # Список без этих папок неполный: код 3, чтобы Web UI не запомнил его как собранный,
+        # а найденные файлы всё равно уже в базе и скачаются
+        print(f"server_50x | Не удалось прочитать {len(unreadable)} папок — Яндекс не ответил. "
+              f"Список файлов неполный, соберу его заново при следующей попытке.", flush=True)
+        log.warning("scan: не прочитано папок: %d", len(unreadable))
+        return EXIT_OUTAGE
     return 0
+
+
+def _scan_failed(code: int, e: BaseException) -> int:
+    """Сбор списка оборвался известной ошибкой: строка с префиксом для Web UI и код выхода."""
+    if code == EXIT_AUTH:
+        print(f"auth_expired | Яндекс перестал принимать ключ доступа: {e}. Получите новый.", flush=True)
+    elif code == EXIT_DISK_FULL:
+        print(f"local_disk | Не получается записать базу state.db: {e}. Освободите место "
+              f"или проверьте, что диск подключён.", flush=True)
+    else:
+        print(f"server_50x | Яндекс не отвечает, список файлов собрать не удалось: {e}. "
+              f"Повторю позже — уже собранное не теряется.", flush=True)
+    log.error("scan оборван: %s: %s", type(e).__name__, e)
+    return code
 
 
 def _print_note(kind: str, names: list[str]) -> None:

@@ -367,6 +367,28 @@ def test_deferred_photo_gets_a_safety_preview(db, net, tmp_path):
     assert row["preview_path"] == want and open(want, "rb").read() == b"JPEGPREVIEW"
 
 
+def test_preview_goes_away_once_the_original_is_downloaded(db, net, tmp_path):
+    fake = net(FakeYandex({"/Свадьба/1.jpg": b"one", "/Свадьба/2.jpg": b"two"}))
+    fake.dead.update(fake.files)
+    _add(db)
+    dl = str(tmp_path / "dl")
+    pd.run(db, dl, workers=1)
+    one, two = (_files(db)[p]["preview_path"] for p in ("/Свадьба/1.jpg", "/Свадьба/2.jpg"))
+    assert os.path.exists(one) and os.path.exists(two)
+
+    fake.dead.discard("/Свадьба/1.jpg")  # ожил сервер только первого фото
+    assert pd.run(db, dl, workers=1) == EXIT_DEFERRED
+    rows = _files(db)
+    assert (rows["/Свадьба/1.jpg"]["status"], rows["/Свадьба/1.jpg"]["preview_path"]) == ("downloaded", None)
+    assert not os.path.exists(one)
+    assert os.path.exists(two) and rows["/Свадьба/2.jpg"]["preview_path"] == two  # ещё ждёт — превью нужно
+
+    fake.dead.clear()
+    assert pd.run(db, dl, workers=1) == EXIT_OK
+    assert os.listdir(os.path.join(dl, PREVIEW_DIRNAME)) == []  # опустевшие подпапки убраны, «_превью» на месте
+    assert open(os.path.join(dl, LINKS_DIRNAME, "Свадьба", "Свадьба", "2.jpg"), "rb").read() == b"two"
+
+
 def test_removed_link_is_skipped_and_forgotten(db, net, tmp_path):
     fake = net(FakeYandex({"/a.jpg": b"a"}))
     keep = _add(db)

@@ -36,6 +36,9 @@ from state import DEFERRED_MARKER, State
 from storage_fetch import DeadHosts, FetchFailure, fetch_preview, fetch_to_file
 from utils import (
     APP_VERSION,
+    EXIT_AUTH,
+    EXIT_DISK_FULL,
+    EXIT_OUTAGE,
     MAX_DISK_WORKERS,
     SKIP_PATH_PREFIXES,  # noqa: F401 — реэкспорт: корзину никогда не качаем
     categorize,
@@ -50,6 +53,8 @@ from utils import (
     file_size_safe,
     human_bytes,
     is_local_disk_error,
+    is_sqlite_disk_error,
+    remove_preview,
     remove_quiet,
     resolve_local_path,
     to_disk_path,
@@ -270,8 +275,25 @@ def scan_tree(
         else:
             more_files, more_bytes = _scan_shared_folders(client, state, seen_top, on_file, on_dir, on_note)
             return files + more_files, total + more_bytes
-        return _walk(client, state, root, on_file, on_dir)
-    return _walk(client, state, root, on_file, on_dir, strict_root=True)
+        return _walk(client, state, root, on_file, on_dir, on_note=on_note)
+    return _walk(client, state, root, on_file, on_dir, strict_root=True, on_note=on_note)
+
+
+def scan_exit_code(e: BaseException) -> int | None:
+    """Код выхода для ошибки, оборвавшей сбор списка; None — неизвестная ошибка.
+
+    2 — Яндекс не принял токен, 3 — Яндекс недоступен или просит подождать (повторить
+    позже), 4 — базу не записать на локальный диск. Без этого любая такая ошибка давала
+    код 1, который Web UI читал как «скачивание закончилось с ошибками».
+    """
+    if isinstance(e, yadisk.exceptions.UnauthorizedError):
+        return EXIT_AUTH
+    if isinstance(e, (yadisk.exceptions.RequestError, yadisk.exceptions.TooManyRequestsError,
+                      requests.RequestException, *SERVER_ERRORS, *TIMEOUT_ERRORS)):
+        return EXIT_OUTAGE
+    if is_sqlite_disk_error(e):
+        return EXIT_DISK_FULL
+    return None
 
 
 def _walk(
@@ -281,8 +303,13 @@ def _walk(
     on_file: OnFile | None,
     on_dir: Callable[[str], None] | None,
     strict_root: bool = False,
+    on_note: OnNote | None = None,
 ) -> tuple[int, int]:
-    """Обход папок в ширину от root. strict_root — пропавший root это RootNotFound, а не пропуск."""
+    """Обход папок в ширину от root. strict_root — пропавший root это RootNotFound, а не пропуск.
+
+    Папка, которую не удалось прочитать и после повторов, уходит в on_note("unreadable_folders"):
+    список без неё неполный, и scan не должен закончиться кодом 0.
+    """
     files_count = 0
     bytes_total = 0
     queue: deque[str] = deque([root])  # BFS
@@ -306,6 +333,8 @@ def _walk(
             raise  # пробрасываем выше — токен битый
         except Exception as e:
             log.error("Не смог прочитать %s: %s", cur, e)
+            if on_note:
+                on_note("unreadable_folders", [cur])
             continue
 
         dir_files: list = []
@@ -394,7 +423,7 @@ def _scan_shared_folders(
     files_count = 0
     bytes_total = 0
     for d in missing:
-        n, b = _walk(client, state, d.path, on_file, on_dir)
+        n, b = _walk(client, state, d.path, on_file, on_dir, on_note=on_note)
         files_count += n
         bytes_total += b
     return files_count, bytes_total
@@ -607,6 +636,38 @@ def _save_preview(client: yadisk.Client, job: DownloadJob, local_path: str, down
         return ""
     log.info("PREVIEW | %s | %s", job.remote_path, dst)
     return dst
+
+
+def _drop_preview(state: State, remote_path: str, preview: str, download_dir: str) -> None:
+    """Оригинал фото на месте — его страховочное превью больше не нужно. Никогда не бросает.
+
+    Иначе в папке рядом с оригиналом навсегда оставалась уменьшенная копия, и люди
+    принимали её за «испорченный» оригинал.
+    """
+    try:
+        if remove_preview(preview, download_dir):
+            state.clear_previews([(remote_path, preview)])
+            log.info("PREVIEW-DEL | %s | %s", remote_path, preview)
+        else:
+            log.warning("превью %s не удалено (файл занят или лежит не в «_превью»): %s",
+                        remote_path, preview)
+    except Exception as e:  # noqa: BLE001 — уборка не должна ронять скачивание
+        log.warning("превью %s: %s", remote_path, e)
+
+
+def _sweep_previews(state: State, download_dir: str) -> None:
+    """Убирает превью фото, оригиналы которых уже на месте: они остались от прошлых
+    версий или не удалились в прошлый раз (файл был открыт). Никогда не бросает."""
+    try:
+        stale = state.stale_previews()
+        gone = [item for item in stale if remove_preview(item[1], download_dir)]
+        if gone:
+            state.clear_previews(gone)
+            log.info("Убрано %d превью: оригиналы этих фото уже скачаны", len(gone))
+        if len(gone) < len(stale):
+            log.warning("не удалено превью: %d (файл занят или лежит не в «_превью»)", len(stale) - len(gone))
+    except Exception as e:  # noqa: BLE001 — уборка не должна мешать скачиванию
+        log.warning("уборка превью: %s", e)
 
 
 def _thread_preview_http(token: str) -> requests.Session:
@@ -866,8 +927,9 @@ def download_all(
 
     # Детерминированно сохраняем local_path в state, чтобы исключить коллизии между потоками
     state.assign_local_paths(download_dir)
+    _sweep_previews(state, download_dir)
 
-    counters = {"downloaded": 0, "skipped": 0, "failed": 0, "deferred": 0, "bytes": 0}
+    counters ={"downloaded": 0, "skipped": 0, "failed": 0, "deferred": 0, "bytes": 0}
     jobs_iter, total_files, total_bytes = _job_source(state, jobs)
     if total_files == 0:
         log.info("Нет файлов для скачивания.")
@@ -932,7 +994,7 @@ def download_all(
                     job, "deferred", None, 0,
                     f"{DEFERRED_MARKER}сервер хранения {job.storage_host} недавно не отвечал",
                     0, job.storage_host,
-                ), counters, file_bar, byte_bar)
+                ), counters, file_bar, byte_bar, download_dir)
                 continue
             futures[pool.submit(worker, job)] = job
             return True
@@ -977,7 +1039,7 @@ def download_all(
                         res = fut.result()
                     except Exception as e:  # защитный барьер — _download_one сам ловит всё
                         res = DownloadResult(job, "failed", None, 0, _describe_download_error(e), 0)
-                    _apply_result(state, res, counters, file_bar, byte_bar)
+                    _apply_result(state, res, counters, file_bar, byte_bar, download_dir)
                     abort = should_abort(res)
                     if abort:
                         counters["aborted"] = abort
@@ -1022,10 +1084,15 @@ def _apply_result(
     counters: dict[str, int],
     file_bar: tqdm,
     byte_bar: tqdm,
+    download_dir: str,
 ) -> None:
-    """Применяет результат скачивания к БД и счётчикам."""
+    """Применяет результат скачивания к БД и счётчикам.
+
+    Оригинал на месте (скачан или уже лежал) — его страховочное превью удаляется.
+    """
+    preview = None
     if res.status == "downloaded":
-        state.mark_downloaded(res.job.remote_path, res.local_path or "")
+        preview = state.mark_downloaded(res.job.remote_path, res.local_path or "")
         counters["downloaded"] += 1
         counters["bytes"] += res.bytes_written
         byte_bar.update(res.bytes_written)
@@ -1037,7 +1104,7 @@ def _apply_result(
             res.job.remote_path,
         )
     elif res.status == "skipped":
-        state.mark_skipped(res.job.remote_path, res.local_path or "")
+        preview = state.mark_skipped(res.job.remote_path, res.local_path or "")
         counters["skipped"] += 1
         if res.job.size:
             byte_bar.update(res.job.size)
@@ -1068,6 +1135,8 @@ def _apply_result(
         else:
             log.error("FAIL | %s | %s | %s", res.error, res.duration_ms, res.job.remote_path)
     file_bar.update(1)
+    if preview:
+        _drop_preview(state, res.job.remote_path, preview, download_dir)
 
 
 # ── проверка токена ─────────────────────────────────────────────────────────

@@ -290,3 +290,124 @@ def test_combine_worker_codes():
     assert combine([EXIT_DEFERRED, EXIT_AUTH]) == EXIT_AUTH
     assert combine([EXIT_AUTH, EXIT_DISK_FULL]) == EXIT_DISK_FULL
     assert combine([None, 0]) == 0
+
+
+def test_failed_listing_on_an_empty_database_is_never_done(rescue, monkeypatch):
+    """Сбор списка упал (код 1) при пустой базе: раньше это было «Готово! Все файлы сохранены»."""
+    rescue.skip_unlim = True
+    sc = Script(monkeypatch, rescue, {"disk": [1]})
+    rescue._run()
+    disk = rescue.status()["branches"]["disk"]
+    assert disk["state"] == "needs_action" and disk["action"] == "send_logs"
+    assert rescue.state == "failed"
+    assert sc.steps("disk") == [("disk", "scan")] * webui.RESCUE_STUCK_ROUNDS
+    texts = [e["text"] for e in rescue.status()["events"]]
+    assert not any(t.startswith("Готово") for t in texts)
+    assert "Не получилось получить список файлов — пробую ещё раз через минуту" in texts
+    assert "Снова получаю список файлов" in texts
+
+
+def test_unknown_exit_code_is_a_crash_not_a_yandex_outage(rescue, monkeypatch):
+    rescue.skip_unlim = True
+    Script(monkeypatch, rescue, {"disk": [0, 7]})
+    rescue._run()
+    texts = [e["text"] for e in rescue.status()["events"]]
+    assert not any("Яндекс сейчас не отвечает" in t for t in texts)
+    assert "Запускаю скачивание снова" in texts
+    assert any("Скачивание прервалось" in line for line in rescue.log)
+
+
+def test_orphaned_in_progress_rows_are_released_and_not_reported_as_done(rescue, monkeypatch, tmp_path):
+    """Воркер упал посреди пачки: его файлы «в работе» — это не «все файлы сохранены»."""
+    db = tmp_path / "unlim_state.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE unlim_files (file_id TEXT PRIMARY KEY, name TEXT, size INTEGER, md5 TEXT,"
+        " status TEXT DEFAULT 'pending', local_path TEXT, error TEXT, attempts INTEGER DEFAULT 0,"
+        " worker_id INTEGER, assigned_at TIMESTAMP, downloaded_at TIMESTAMP, storage_host TEXT,"
+        " preview_path TEXT);"
+        "CREATE TABLE unlim_meta (key TEXT PRIMARY KEY, value TEXT);"
+        "INSERT INTO unlim_files (file_id, name, size, status, worker_id)"
+        " VALUES ('1', 'a.jpg', 1, 'in_progress', 1);"
+    )
+    con.close()
+    monkeypatch.setattr(webui, "UNLIM_DB_FILE", db)
+    rescue.skip_disk = True
+    Script(monkeypatch, rescue, {"unlim_collect": [0]}, worker_codes=[1])
+    rescue._run()
+    unlim = rescue.status()["branches"]["unlim"]
+    assert unlim["state"] == "needs_action" and unlim["action"] == "send_logs"
+    con = sqlite3.connect(db)
+    assert con.execute("SELECT status FROM unlim_files").fetchone()[0] == "pending"
+    con.close()
+    texts = [e["text"] for e in rescue.status()["events"]]
+    assert not any(t.startswith("Готово") for t in texts)
+
+
+def test_requeued_flag_runs_another_round_instead_of_a_crash(rescue, monkeypatch, tmp_path):
+    """«Повторить ошибки» во время скачивания: файлы снова в очереди — это не обрыв шага."""
+    db = tmp_path / "state.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE files (remote_path TEXT PRIMARY KEY, size INTEGER, md5 TEXT,"
+        " status TEXT NOT NULL DEFAULT 'pending', local_path TEXT, error TEXT, downloaded_at TIMESTAMP);"
+        "INSERT INTO files (remote_path, size) VALUES ('disk:/a.jpg', 1);"
+    )
+    con.close()
+    monkeypatch.setattr(webui, "DB_FILE", db)
+    b = rescue.branches["disk"]
+    b.requeued = True
+    assert rescue._after_exit(b, EXIT_PARTIAL, (db, "files", "remote_path")) is True
+    assert b.requeued is False and b.odd_rounds == 0 and b.state != "needs_action"
+
+
+def test_retry_failed_restarts_a_finished_branch_and_wakes_a_waiting_one(rescue, monkeypatch):
+    """Диск готов, Безлимит ждёт попытки; «Повторить ошибки» запускает Диск снова, а Безлимит будит."""
+    sc = Script(monkeypatch, rescue, {"disk": [0, 0], "unlim_collect": [0]}, worker_codes=[EXIT_DEFERRED, 0])
+    rescue.retry_every = 3600
+    unlim = rescue.branches["unlim"]
+    rescue._thread = threading.Thread(target=rescue._run)
+    rescue._thread.start()
+    deadline = time.time() + 5
+    while not (rescue.branches["disk"].state == "done" and unlim.state == "waiting") and time.time() < deadline:
+        time.sleep(0.005)
+    ok, msg = rescue.requeue_now("all")
+    assert ok and "Диск" in msg and "Безлимит" in msg
+    rescue._thread.join(10)
+    assert not rescue._thread.is_alive()
+    assert sc.steps("disk").count(("disk", "download")) == 2
+    assert sc.steps("disk").count(("disk", "scan")) == 1  # список свежий — не пересобирается
+    assert rescue.state == "done"
+
+
+# Схема unlim_files до 21.08.2026: ни attempts, ни storage_host, ни preview_path, ни unlim_meta
+OLD_UNLIM_SCHEMA = (
+    "CREATE TABLE unlim_files (file_id TEXT PRIMARY KEY, cluster_id TEXT, name TEXT, size INTEGER,"
+    " md5 TEXT, mime TEXT, status TEXT DEFAULT 'pending', local_path TEXT, error TEXT,"
+    " worker_id INTEGER, assigned_at TIMESTAMP, downloaded_at TIMESTAMP);"
+    "CREATE INDEX idx_unlim_status ON unlim_files(status);"
+    "CREATE TABLE unlim_clusters (cluster_id TEXT PRIMARY KEY, size INTEGER, fetched INTEGER DEFAULT 0);"
+)
+
+
+def test_unlim_branch_survives_a_database_from_an_old_version(rescue, monkeypatch, tmp_path):
+    """Папку обновили поверх старой: база без колонки attempts не роняет ветку «no such column»."""
+    db = tmp_path / "unlim_state.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        OLD_UNLIM_SCHEMA
+        + "INSERT INTO unlim_files (file_id, name, size, status, error)"
+        " VALUES ('1', 'a.jpg', 1, 'failed', 'boom'), ('2', 'b.jpg', 1, 'downloaded', NULL);"
+    )
+    con.close()
+    monkeypatch.setattr(webui, "UNLIM_DB_FILE", db)
+    Script(monkeypatch, rescue, {"unlim_collect": [0]})
+    b = rescue.branches["unlim"]
+    assert rescue._unlim_prepare(b) == 0
+    con = sqlite3.connect(db)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(unlim_files)")}
+    rows = dict(con.execute("SELECT file_id, status FROM unlim_files").fetchall())
+    con.close()
+    assert {"attempts", "storage_host", "preview_path"} <= cols
+    assert rows == {"1": "pending", "2": "downloaded"}
+    assert any("снова в очереди" in line for line in rescue.log)

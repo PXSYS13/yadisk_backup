@@ -800,6 +800,7 @@ class Branch:
         self.odd_rounds = 0
         self.reset_done = False
         self.relist = False  # «Обновить список»: перед следующим скачиванием собрать список заново
+        self.requeued = False  # «Повторить ошибки» во время шага: после него сразу новый раунд
         self.wake.clear()
 
     @property
@@ -924,12 +925,52 @@ class Rescue:
                 b.wake.set()
                 return True, "Обновляю список файлов"
             # Ветка закончила (готово или нужно действие), а соседняя ещё работает — запускаем эту снова
-            b.reset()
-            b.state = "checking"
-            target = self._run_disk if source == "disk" else self._run_unlim
-            b.thread = threading.Thread(target=self._branch_main, args=(b, target), daemon=True)
-            b.thread.start()
+            self._restart_branch(b)
             return True, "Обновляю список файлов"
+
+    def requeue_now(self, source: str = "all") -> tuple[bool | None, str]:
+        """«Повторить ошибки» во время спасения: файлы уже вернули в очередь — пусть их качают.
+
+        Ждущая ветка просыпается, качающая возьмёт их после текущего шага, закончившая
+        запускается снова. None — спасение не идёт или уже заканчивается: вызывающий
+        запускает его целиком.
+        """
+        with self._lock:
+            if not self.is_running() or self._closing:
+                return None, ""
+            texts = []
+            for b in self.branches.values():
+                if source not in ("all", b.name) or b.state == "off":
+                    continue
+                if b.state == "waiting" and b.alive():
+                    b.wake.set()
+                    texts.append(f"{b.label} качает их сейчас")
+                elif b.alive():
+                    b.requeued = True
+                    texts.append(f"{b.label} возьмёт их после текущего шага")
+                elif b.state == "done":
+                    self._restart_branch(b)
+                    texts.append(f"{b.label} качает их сейчас")
+            if not texts:
+                return False, "Сейчас их некому качать: сначала сделайте то, о чём просит программа"
+            self._event(None, "run", "Файлы, которые не скачались, снова в очереди — по вашей просьбе")
+            return True, "; ".join(texts)
+
+    def wait_finished(self, timeout: float) -> bool:
+        """Ждёт конца главного потока (когда он уже заканчивает). True — закончился."""
+        t = self._thread
+        if t is None:
+            return True
+        t.join(timeout)
+        return not t.is_alive()
+
+    def _restart_branch(self, b: Branch) -> None:
+        """Ветка закончила, а спасение ещё идёт: запускаем её снова (вызывать под self._lock)."""
+        b.reset()
+        b.state = "checking"
+        target = self._run_disk if b.name == "disk" else self._run_unlim
+        b.thread = threading.Thread(target=self._branch_main, args=(b, target), daemon=True)
+        b.thread.start()
 
     def _forget_listing(self, source: str) -> None:
         try:
@@ -1263,7 +1304,7 @@ class Rescue:
                 if code == PREPARE_NEEDS_ACTION:
                     return  # ветка уже ждёт человека — причина и кнопка выставлены
                 if code != 0:
-                    if not self._after_exit(b, code, db):
+                    if not self._after_exit(b, code, db, step="prepare"):
                         return
                     continue
                 ready = True
@@ -1283,9 +1324,12 @@ class Rescue:
         b.activity = ""
         b.next_retry_at = None
 
-    def _after_exit(self, b: Branch, code: int, db: tuple[Path, str, str]) -> bool:
-        """Что делать после шага с этим кодом. True — раунд отождан, качаем снова."""
-        stats = db_stats(*db)
+    def _after_exit(self, b: Branch, code: int, db: tuple[Path, str, str], step: str = "download") -> bool:
+        """Что делать после шага с этим кодом. True — раунд отождан, качаем снова.
+
+        step="prepare" — не удался сбор списка: из этого ветка никогда не становится «готово»,
+        иначе пустая база после упавшего сбора выглядела бы как «все файлы сохранены».
+        """
         if code == EXIT_AUTH:
             b.state = "needs_action"
             b.action = "token" if b.name == "disk" else "cookies"
@@ -1297,8 +1341,19 @@ class Rescue:
         if code == EXIT_DISK_FULL:
             self._halt_for_disk()
             return False
+        if step == "prepare":
+            return self._after_prepare_exit(b, code)
+        stats = db_stats(*db)
+        if b.requeued:
+            # «Повторить ошибки» нажали во время скачивания: файлы уже в очереди — качаем их сразу,
+            # а не считаем недошедший до конца очереди шаг обрывом
+            b.requeued = False
+            if code in (0, EXIT_PARTIAL, EXIT_DEFERRED):
+                self._event(b.name, "run", "Файлы, которые не скачались, снова в очереди — качаю их")
+                return True
         deferred = int(stats.get("deferred") or 0)
-        left = max(0, int(stats.get("pending") or 0) - deferred)
+        # in_progress — пачки воркера, который упал или работает не из этого спасения: это не «готово»
+        left = max(0, int(stats.get("pending") or 0) - deferred) + int(stats.get("in_progress") or 0)
         if code in (0, EXIT_PARTIAL) and left:
             # Шаг «закончился», а в очереди остались нетронутые файлы: процесс оборвался
             # (у Python код падения тоже 1). Это не «скачано почти всё»
@@ -1325,20 +1380,44 @@ class Rescue:
             self._event(b.name, "err", "Не получается продолжить — скачайте отчёт для поддержки")
             return False
         self._event(b.name, "warn", "Что-то пошло не так — попробую ещё раз чуть позже")
-        return self._wait_round(b, deferred, outage=True)
+        # Неизвестный код — процесс упал или его убили, а не «Яндекс не отвечает»
+        return self._wait_round(b, deferred, outage=False, kind="crash",
+                                delay=min(self.retry_every, RESCUE_CRASH_RETRY_SEC))
+
+    def _after_prepare_exit(self, b: Branch, code: int) -> bool:
+        """Сбор списка завершился с ошибкой (не доступ и не диск): ждём и собираем снова."""
+        if code == EXIT_OUTAGE:
+            b.odd_rounds = 0
+            return self._wait_round(b, 0, outage=True, resume="Снова получаю список файлов")
+        b.odd_rounds += 1
+        self._log(f"⚠️ {b.label}: сбор списка не удался (код {code}) ({b.odd_rounds}/{RESCUE_STUCK_ROUNDS})")
+        if b.odd_rounds >= RESCUE_STUCK_ROUNDS:
+            b.state = "needs_action"
+            b.action = "send_logs"
+            b.reason = "Не получается получить список файлов — отправьте отчёт для поддержки"
+            b.activity = ""
+            self._event(b.name, "err", b.reason)
+            return False
+        self._event(b.name, "warn", "Не получилось получить список файлов — пробую ещё раз через минуту")
+        return self._wait_round(b, 0, outage=False, kind="crash",
+                                delay=min(self.retry_every, RESCUE_CRASH_RETRY_SEC),
+                                reason="Сбор списка файлов прервался — пробую ещё раз",
+                                resume="Снова получаю список файлов")
 
     def _wait_round(self, b: Branch, deferred: int, outage: bool, kind: str | None = None,
-                    delay: float | None = None) -> bool:
+                    delay: float | None = None, reason: str | None = None,
+                    resume: str | None = None) -> bool:
         """Ждёт следующий раунд. kind: deferred — файлы на молчащих серверах, outage —
-        Яндекс не отвечает, crash — процесс скачивания оборвался (повтор раньше)."""
+        Яндекс не отвечает, crash — процесс оборвался (повтор раньше). reason — чем
+        заменить стандартный текст причины, resume — слово в ленту при возобновлении."""
         kind = kind or ("deferred" if deferred and not outage else "outage")
         b.state = "waiting"
         b.wait_kind = kind
         b.next_retry_at = time.time() + (self.retry_every if delay is None else delay)
         at = _hhmm(b.next_retry_at)
-        b.reason = {"deferred": f"Ждут Яндекса: {_files(deferred)}",
-                    "outage": "Яндекс сейчас не отвечает",
-                    "crash": "Скачивание прервалось — пробую ещё раз"}[kind]
+        b.reason = reason or {"deferred": f"Ждут Яндекса: {_files(deferred)}",
+                              "outage": "Яндекс сейчас не отвечает",
+                              "crash": "Скачивание прервалось — пробую ещё раз"}[kind]
         b.activity = f"следующая попытка в {at}"
         self._log(f"⏳ {b.label}: {b.reason}. Следующая попытка в {at}")
         if kind == "deferred":
@@ -1360,7 +1439,8 @@ class Rescue:
             self._branch_stopped(b)
             return False
         if not manual:
-            self._event(b.name, "run", "Запускаю скачивание снова" if kind == "crash" else "Пробую отложенные файлы снова")
+            self._event(b.name, "run", resume or ("Запускаю скачивание снова" if kind == "crash"
+                                                  else "Пробую отложенные файлы снова"))
         return True
 
     def _step_interrupted(self, b: Branch, code: int, left: int, deferred: int) -> bool:
@@ -1527,6 +1607,12 @@ class Rescue:
             return -1
         code = self._combine_worker_codes(codes)
         b.last_exit = {"code": code, "at": time.time(), "step": "скачиваю файлы"}
+        if not tm.any_alive(UNLIM_WORKER_SLOT_PREFIX):
+            # Воркер упал посреди пачки: его файлы остались «в работе» и без этого
+            # не считались бы нескачанными — ветка объявила бы «все файлы сохранены»
+            n = _release_orphaned_unlim()
+            if n:
+                self._log(f"↩️ Безлимит: {n} файлов зависли «в работе» после воркера — снова в очереди")
         return code
 
     @staticmethod
@@ -1693,42 +1779,61 @@ _local_size_cache: dict[str, dict] = {}
 _LOCAL_SIZE_TTL = 60  # секунд
 _LOCAL_SIZE_MAX_PATHS = 4
 _LOCAL_SIZE_WALK_BUDGET = 2.0  # макс секунд на обход
+# В _unlim десятки тысяч фото лежат в одной папке — время проверяем и внутри неё
+_WALK_CLOCK_EVERY = 2000  # записей папки
+
+
+def _walk_size(path: str, deadline: float, clock: Callable[[], float] = time.monotonic) -> tuple[int, int, bool]:
+    """(файлов, байт, не успели до deadline по clock) — обход через os.scandir.
+
+    DirEntry.stat() на Windows берёт размер из самого листинга папки, без отдельного
+    обращения к диску за каждым файлом, как было с os.walk + os.path.getsize. Ссылки
+    на папки не разворачиваем: так обход не уйдёт за пределы папки и не зациклится.
+    """
+    files = size = seen = 0
+    stack = [path]
+    while stack:
+        if clock() > deadline:
+            return files, size, True
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    seen += 1
+                    if not seen % _WALK_CLOCK_EVERY and clock() > deadline:
+                        return files, size, True
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file():
+                            size += entry.stat().st_size
+                            files += 1
+                    except OSError:
+                        pass  # файл удалили или переименовали прямо во время обхода
+        except OSError:
+            pass  # папку не открыть (нет прав) — считаем остальное
+    return files, size, False
 
 
 def local_size(path: str) -> dict:
     r"""Размер папки с TTL-кэшем и лимитом времени обхода.
+
+    partial=True — за _LOCAL_SIZE_WALK_BUDGET обход не успел (большая папка, медленный
+    диск): в папке больше, чем files/bytes, и интерфейс пишет «больше X».
     Защита от корня диска (C:\) — не обходим, иначе зависнет на десятках ГБ.
     """
     if not os.path.isdir(path):
-        return {"files": 0, "bytes": 0}
+        return {"files": 0, "bytes": 0, "partial": False}
 
     abs_path = os.path.abspath(path)
     if len(abs_path) <= 3 and abs_path.endswith(":\\"):
-        return {"files": 0, "bytes": 0, "skipped": "корень диска"}
+        return {"files": 0, "bytes": 0, "partial": False, "skipped": "корень диска"}
 
     cached = _local_size_cache.get(path)
     now = time.time()
     if cached and (now - cached["at"] < _LOCAL_SIZE_TTL):
         return cached["data"]
 
-    n = 0
-    b = 0
-    partial = False
-    deadline = now + _LOCAL_SIZE_WALK_BUDGET
-    try:
-        for dp, _, fns in os.walk(path):
-            if time.time() > deadline:
-                partial = True  # не досчитали — честно скажем UI
-                break
-            for fn in fns:
-                try:
-                    b += os.path.getsize(os.path.join(dp, fn))
-                    n += 1
-                except OSError:
-                    pass
-    except OSError:
-        pass
-
+    n, b, partial = _walk_size(path, time.monotonic() + _LOCAL_SIZE_WALK_BUDGET)
     data = {"files": n, "bytes": b, "partial": partial}
     # Ограничиваем размер кэша — выкидываем самый старый путь
     if len(_local_size_cache) >= _LOCAL_SIZE_MAX_PATHS and path not in _local_size_cache:
@@ -2285,7 +2390,9 @@ def _source_block(name: str, db: dict, branch: dict | None, configured: bool, fo
         "storage_hosts_down": int(db.get("deferred_hosts") or 0),
         "speed_bps": speed,
         "eta_sec": eta,
-        "folder": {"path": folder, "size_bytes": int((local or {}).get("bytes") or 0)},
+        # size_partial — папку не успели обойти целиком: в ней больше, чем size_bytes
+        "folder": {"path": folder, "size_bytes": int((local or {}).get("bytes") or 0),
+                   "size_partial": bool((local or {}).get("partial"))},
         # Признаки жизни: последние скачанные файлы, отклик задач, прирост за минуты
         "recent_files": [
             {"name": str(r.get("path") or "").replace("\\", "/").rsplit("/", 1)[-1],
@@ -2710,8 +2817,11 @@ def api_rescue_retry_failed(p: RetryFailedPayload):
     if p.source in ("unlim", "all") and UNLIM_DB_FILE.exists():
         n += reset_failed_files(str(UNLIM_DB_FILE))
     if pipeline.is_running():
-        pipeline.retry_now()
-        return {"ok": True, "msg": f"Вернул в очередь {n} файлов — уже качаю", "count": n}
+        ok, msg = pipeline.requeue_now(p.source)
+        if ok is not None:
+            return {"ok": ok, "msg": f"Вернул в очередь {n} файлов: {msg}" if ok else msg, "count": n}
+        # Спасение уже заканчивало — даём ему закрыться и запускаем заново
+        pipeline.wait_finished(3)
     res = api_rescue_start()
     res["count"] = n
     if res.get("ok"):
@@ -3173,8 +3283,9 @@ def demo_rescue(kind: str, cfg: dict) -> dict:
             (15, None, "info", "Скачивание остановлено. Всё скачанное сохранено")])
         disk = db(6015, 1500, pending=4515, names=_DEMO_DISK_FILES)
         unlim = db(13602, 2000, pending=11602, size=69 * gb, names=_DEMO_UNLIM_FILES)
+    # «На паузе» показывает и большую папку, которую не успели досчитать: «больше 31 ГБ»
     rescue_st = build_rescue_status(st, disk, unlim, tok, coo, cfg, {"kind": None}, free,
-                                    {"bytes": 31 * gb}, {"bytes": 12 * gb}, live=live)
+                                    {"bytes": 31 * gb, "partial": kind == "stopped"}, {"bytes": 12 * gb}, live=live)
     return {"rescue": rescue_st, "token": tok, "cookies": coo, "disk_db": disk, "unlim_db": unlim,
             "free_space": dict(free, total=2048 * gb, path=cfg.get("download_dir", ""))}
 

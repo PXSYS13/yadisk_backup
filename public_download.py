@@ -55,6 +55,7 @@ from utils import (
     local_copy_matches,
     preview_path_for,
     previews_enabled,
+    remove_preview,
     remove_quiet,
     resolve_local_path,
     safe_int,
@@ -521,6 +522,37 @@ def _save_preview(api: PublicApi, job: Job, local: str, download_dir: str) -> st
     return "" if failure is not None else dst
 
 
+def drop_previews(conn: sqlite3.Connection, download_dir: str, previews: list[tuple[int, str, str]]) -> int:
+    """Удаляет превью файлов, чьи оригиналы скачаны: (link_id, path, путь превью). Сколько удалено.
+
+    Никогда не бросает: уборка не должна ронять скачивание. Неудалённое превью (файл
+    открыт в программе просмотра) остаётся записанным, его уберёт следующий раунд.
+    """
+    try:
+        gone = [p for p in previews if remove_preview(p[2], download_dir)]
+        if gone:
+            with sqlite_tx(conn):
+                conn.executemany("UPDATE link_files SET preview_path=NULL "
+                                 "WHERE link_id=? AND path=? AND preview_path=?", gone)
+        if len(gone) < len(previews):
+            log.warning("не удалено превью: %d (файл занят или лежит не в «_превью»)", len(previews) - len(gone))
+        return len(gone)
+    except Exception as e:  # noqa: BLE001 — уборка не должна ронять скачивание
+        log.warning("уборка превью: %s", type(e).__name__)  # в тексте ошибки — путь с именем ссылки
+        return 0
+
+
+def sweep_previews(conn: sqlite3.Connection, download_dir: str) -> int:
+    """Превью уже скачанных файлов, которые не удалились в прошлый раз, — удалить."""
+    try:
+        rows = conn.execute("SELECT link_id, path, preview_path FROM link_files "
+                            "WHERE status='downloaded' AND preview_path IS NOT NULL").fetchall()
+    except sqlite3.Error as e:
+        log.warning("уборка превью: %s", e)
+        return 0
+    return drop_previews(conn, download_dir, [(r[0], r[1], r[2]) for r in rows])
+
+
 def _download_file(job: Job, download_dir: str, dead: DeadHosts) -> Result:
     """Скачивает один файл ссылки. Никогда не бросает: любой исход — Result."""
     api = _thread_api()
@@ -714,10 +746,14 @@ class Round:
             c["bytes"] += res.bytes_written
             self.limit_streak[job.link_id] = 0
             self.local_streak = 0
+            row = self.conn.execute("SELECT preview_path FROM link_files WHERE link_id=? AND path=?", key).fetchone()
             self.conn.execute(
                 "UPDATE link_files SET status='downloaded', local_path=?, error=NULL, storage_host=NULL, "
                 "downloaded_at=? WHERE link_id=? AND path=?",
                 (res.local_path, datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), *key))
+            if row and row[0]:
+                # Оригинал на месте — страховочное превью больше не нужно
+                drop_previews(self.conn, self.download_dir, [(*key, row[0])])
         elif res.status == "deferred":
             c["deferred"] += 1
             self.conn.execute(
@@ -872,6 +908,7 @@ def run(conn: sqlite3.Connection, download_dir: str, workers: int, wait_mode: bo
         relist: bool = False) -> int:
     dead = DeadHosts()
     purge_removed(conn)
+    sweep_previews(conn, download_dir)
     while True:
         meta_set(conn, "state", "running")
         meta_set(conn, "next_retry_at", None)

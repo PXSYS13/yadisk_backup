@@ -172,6 +172,54 @@ def test_local_size_marks_partial_scan(tmp_path):
     assert out["partial"] is False
 
 
+def _tree(root):
+    (root / "a" / "b").mkdir(parents=True)
+    (root / "f.bin").write_bytes(b"12345")
+    (root / "a" / "g.bin").write_bytes(b"123")
+    (root / "a" / "b" / "h.bin").write_bytes(b"1")
+
+
+def test_local_size_counts_nested_folders(tmp_path):
+    _tree(tmp_path)
+    webui._local_size_cache.clear()
+    assert webui.local_size(str(tmp_path)) == {"files": 3, "bytes": 9, "partial": False}
+    assert webui.local_size(str(tmp_path / "нет такой")) == {"files": 0, "bytes": 0, "partial": False}
+
+
+def test_walk_size_says_when_time_ran_out(tmp_path, monkeypatch):
+    # Большая папка или медленный диск: не успели — так и говорим, а не выдаём неполную цифру за полную
+    _tree(tmp_path)
+    ticks = iter([0.0])  # перед корнем время ещё есть, дальше часы ушли за срок
+    assert webui._walk_size(str(tmp_path), 1.0, clock=lambda: next(ticks, 5.0)) == (1, 5, True)
+    assert webui._walk_size(str(tmp_path), float("inf")) == (3, 9, False)
+    # В _unlim десятки тысяч фото в одной папке — срок проверяется и посреди неё
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    for i in range(5):
+        (flat / f"{i}.jpg").write_bytes(b"x")
+    monkeypatch.setattr(webui, "_WALK_CLOCK_EVERY", 2)
+    ticks = iter([0.0])
+    files, _size, partial = webui._walk_size(str(flat), 1.0, clock=lambda: next(ticks, 5.0))
+    assert partial and files == 1
+
+
+def test_folder_size_partial_reaches_rescue_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(webui, "get_config", lambda: {"token": "", "download_dir": str(tmp_path), "max_workers": 4})
+    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": True, "login": "test"})
+    (tmp_path / "f.bin").write_bytes(b"12345")
+    webui._local_size_cache.clear()
+    folder = webui.api_status()["rescue"]["sources"]["disk"]["folder"]
+    assert folder == {"path": str(tmp_path), "size_bytes": 5, "size_partial": False}
+
+    monkeypatch.setattr(webui, "_walk_size", lambda path, deadline: (40, 40 * 1024 ** 3, True))
+    webui._local_size_cache.clear()
+    sources = webui.api_status()["rescue"]["sources"]
+    assert sources["disk"]["folder"]["size_partial"] is True
+    assert sources["disk"]["folder"]["size_bytes"] == 40 * 1024 ** 3
+    assert sources["unlim"]["folder"]["size_partial"] is False  # папки _unlim нет — считать нечего
+    webui._local_size_cache.clear()
+
+
 def test_sql_ident_whitelist_rejects_injection(disk_db):
     with pytest.raises(ValueError, match="Недопустимый table"):
         webui.db_stats(disk_db, "files; DROP TABLE files; --", "remote_path")

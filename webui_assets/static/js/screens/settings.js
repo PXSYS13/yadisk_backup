@@ -242,7 +242,7 @@
             <input type="checkbox" data-field="opt-gentle" data-action="settings-toggle" data-option="gentle"></div>
           <div class="switch"><div><b>Страховочные превью фото</b>
               <p class="small muted">Пока оригинал фото недоступен, сохранять его уменьшенную копию (до 1280 пикселей)
-              в папку «_превью». Оригинал докачается сам, когда Яндекс его отдаст.</p></div>
+              в папку «_превью». Оригинал докачается сам, когда Яндекс его отдаст, — тогда превью удалится.</p></div>
             <input type="checkbox" data-field="opt-previews" data-action="settings-toggle" data-option="previews"></div>
         </div>
         <div class="card"><details><summary>Опасная зона — нужна, только если что-то пошло совсем не так</summary><div class="body">

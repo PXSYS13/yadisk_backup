@@ -10,12 +10,16 @@ import downloader
 import organize
 import storage_fetch as sf
 import unlim_worker as uw
+import utils
 import webui
-from state import State
-from utils import PREVIEW_DIRNAME, keep_awake, preview_path_for, previews_enabled
+from state import CATEGORY_SKIP_MARKER, State
+from unlim_common import clear_dead_hosts
+from utils import IS_WINDOWS, PREVIEW_DIRNAME, keep_awake, preview_path_for, previews_enabled, remove_preview
 
 JPEG = b"\xff\xd8\xff\xe0" + b"preview" * 10
+ORIGINAL = b"HEIC!"  # оригинал фото: 5 байт, как size в очереди
 DEAD = "s1klg.storage.yandex.net"
+LIVE = "s2nrg.storage.yandex.net"
 
 
 class _Stream:
@@ -43,7 +47,7 @@ class _Stream:
 
 
 class _Http:
-    """https://dl/<host>/<x> → 302 → host; https://preview/<x> → JPEG; dead host — тишина."""
+    """https://dl/<host>/<x> → 302 → host; https://preview/<x> → JPEG; LIVE — оригинал; DEAD — тишина."""
 
     def __init__(self):
         self.hits = []
@@ -55,6 +59,9 @@ class _Http:
             return _Stream(status=302, headers={"Location": "https://" + url.split("/", 3)[3]})
         if host == "preview":
             return _Stream(JPEG)
+        if host == LIVE:
+            return _Stream(ORIGINAL, headers={"Content-Type": "application/octet-stream",
+                                              "Content-Length": str(len(ORIGINAL))})
         raise requests.exceptions.ConnectTimeout("timed out")
 
 
@@ -91,11 +98,12 @@ def test_fetch_preview_is_atomic(tmp_path):
 class _DiskClient:
     token = "y0_test"
 
-    def __init__(self):
+    def __init__(self, host=DEAD):
+        self.host = host  # сервер хранения, на который ведут ссылки на файлы
         self.meta_calls = []
 
     def get_download_link(self, remote):
-        return f"https://dl/{DEAD}/{remote.split('/')[-1]}"
+        return f"https://dl/{self.host}/{remote.split('/')[-1]}"
 
     def get_meta(self, remote, **kw):
         self.meta_calls.append(remote)
@@ -162,10 +170,11 @@ def unlim_db(tmp_path, monkeypatch):
 
 
 class _UnlimSession(_Http):
-    """mpfs/url → ссылка на молчащий сервер; mpfs/info → размеры с превью."""
+    """mpfs/url → ссылка на сервер host (по умолчанию молчащий); mpfs/info → размеры с превью."""
 
-    def __init__(self):
+    def __init__(self, host=DEAD):
         super().__init__()
+        self.host = host
         self.methods = []
 
     def post(self, url, params=None, json=None, timeout=None):
@@ -177,7 +186,7 @@ class _UnlimSession(_Http):
             data = {"meta": {"sizes": [{"name": "ORIGINAL", "url": "//dl/x"},
                                        {"name": "XXXL", "url": f"//preview/{name}"}]}}
         else:
-            data = {"file": f"//dl/{DEAD}/{name}"}
+            data = {"file": f"//dl/{self.host}/{name}"}
         return type("R", (), {"status_code": 200, "text": "", "headers": {}, "json": lambda self: data})()
 
 
@@ -211,3 +220,237 @@ def test_waiting_subline_mentions_previews():
     assert r["sources"]["disk"]["files"]["preview_only"] == 5
     assert "превью" in r["subline"]
     assert r["summary"]["preview_only_files"] == 5
+
+
+# ── Оригинал на месте — превью убирается ────────────────────────────────────
+# Люди принимали оставшееся превью (до 1280 px) за «испорченный» оригинал
+
+
+def _put(path, data=JPEG):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+    return str(path)
+
+
+def test_remove_preview_deletes_the_file_and_emptied_folders_only(tmp_path):
+    dl = str(tmp_path / "dl")
+    root = os.path.join(dl, PREVIEW_DIRNAME)
+    one = _put(os.path.join(root, "Фото", "2024", "a.HEIC.jpg"))
+    two = _put(os.path.join(root, "Фото", "b.jpg.jpg"))
+    assert remove_preview(one, dl)
+    assert not os.path.exists(one)
+    assert not os.path.exists(os.path.join(root, "Фото", "2024"))  # опустевшая подпапка убрана
+    assert os.path.exists(two)  # соседнее превью и его папка на месте
+    assert remove_preview(two, dl)
+    assert os.path.isdir(root) and os.listdir(root) == []  # саму «_превью» не трогаем
+    # Превью уже нет (удалили руками) или его не было — запись в базе можно забыть
+    assert remove_preview(one, dl) and remove_preview(None, dl) and remove_preview("", dl)
+
+
+@pytest.mark.parametrize("rel", [
+    "Фото/a.jpg",                              # оригинал, а не превью
+    f"{PREVIEW_DIRNAME}/../Фото/b.jpg.jpg",    # выход из «_превью» через ..
+    f"{PREVIEW_DIRNAME}2/c.jpg.jpg",           # похожая папка рядом
+    f"{PREVIEW_DIRNAME}/notes.txt",            # в «_превью», но не превью
+])
+def test_remove_preview_never_touches_other_files(tmp_path, rel):
+    dl = str(tmp_path / "dl")
+    path = _put(os.path.join(dl, *rel.split("/")))
+    assert remove_preview(path, dl) is False
+    assert os.path.exists(path)
+
+
+def test_remove_preview_handles_long_paths(tmp_path):
+    # Глубокие папки Диска: путь превью длиннее 260 символов, пишется через to_long_path
+    dl = str(tmp_path / "dl")
+    deep = os.path.join(dl, PREVIEW_DIRNAME, *[f"папка_с_длинным_именем_{i}" for i in range(12)])
+    path = os.path.join(deep, "a.jpg.jpg")
+    assert len(path) > 300
+    _put(utils.to_long_path(path))
+    assert remove_preview(path, dl)
+    assert not os.path.exists(utils.to_long_path(path))
+    assert os.listdir(os.path.join(dl, PREVIEW_DIRNAME)) == []
+
+
+def test_remove_preview_leaves_folders_alone(tmp_path):
+    dl = str(tmp_path / "dl")
+    folder = os.path.join(dl, PREVIEW_DIRNAME, "x.jpg")
+    os.makedirs(os.path.join(folder, "inner"))
+    assert remove_preview(folder, dl) is False
+    assert os.path.isdir(os.path.join(folder, "inner"))
+
+
+def _dir_link(link, target):
+    """Ссылка на папку: symlink, а на Windows без прав на него — junction."""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except OSError:
+        if not IS_WINDOWS:
+            raise
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+
+
+def test_remove_preview_does_not_follow_a_link_out_of_previews(tmp_path):
+    dl = tmp_path / "dl"
+    outside = tmp_path / "Мои фото"
+    victim = _put(str(outside / "a.jpg.jpg"))
+    (dl / PREVIEW_DIRNAME).mkdir(parents=True)
+    link = dl / PREVIEW_DIRNAME / "Фото"
+    try:
+        _dir_link(link, outside)
+    except (OSError, ImportError, AttributeError) as e:
+        pytest.skip(f"ссылку на папку не создать: {e}")
+    try:
+        assert remove_preview(str(link / "a.jpg.jpg"), str(dl)) is False
+        assert os.path.exists(victim)
+    finally:
+        try:
+            os.rmdir(link)  # junction и symlink на папку в Windows
+        except OSError:
+            os.unlink(link)
+
+
+def test_remove_preview_survives_a_locked_file(tmp_path, monkeypatch):
+    dl = str(tmp_path / "dl")
+    path = _put(os.path.join(dl, PREVIEW_DIRNAME, "a.jpg.jpg"))
+
+    def locked(p):
+        raise PermissionError(13, "файл открыт в программе просмотра", p)
+
+    monkeypatch.setattr(utils.os, "remove", locked)
+    assert remove_preview(path, dl) is False
+    assert os.path.exists(path)
+
+
+def _disk_state(tmp_path):
+    st = State(str(tmp_path / "state.db"))
+    st.mark_pending_batch([("disk:/Фото/2024/a.HEIC", len(ORIGINAL), None)])
+    return st
+
+
+def _disk_row(st):
+    return tuple(st._conn().execute("SELECT status, preview_path FROM files").fetchone())
+
+
+def test_disk_preview_goes_away_when_the_original_arrives(tmp_path, disk_net, monkeypatch):
+    cli = _DiskClient()
+    monkeypatch.setattr(downloader, "_get_thread_client", lambda token: cli)
+    dl = str(tmp_path / "dl")
+    st = _disk_state(tmp_path)
+    assert downloader.download_all("y0_test", st, dl, workers=1)["deferred"] == 1
+    preview = os.path.join(dl, PREVIEW_DIRNAME, "Фото", "2024", "a.HEIC.jpg")
+    assert open(preview, "rb").read() == JPEG
+    assert _disk_row(st) == ("pending", preview)
+
+    # Сервер хранения ожил: оригинал скачан, превью рядом больше не лежит
+    downloader.DEAD_HOSTS.clear()
+    cli.host = LIVE
+    assert downloader.download_all("y0_test", st, dl, workers=1)["downloaded"] == 1
+    assert open(os.path.join(dl, "Фото", "2024", "a.HEIC"), "rb").read() == ORIGINAL
+    assert not os.path.exists(preview)
+    assert not os.path.exists(os.path.join(dl, PREVIEW_DIRNAME, "Фото"))  # опустевшие подпапки убраны
+    assert os.path.isdir(os.path.join(dl, PREVIEW_DIRNAME))
+    assert _disk_row(st) == ("downloaded", None)
+    st.close()
+    assert webui.db_stats(tmp_path / "state.db")["previews"] == 0
+
+
+def test_disk_preview_goes_away_when_the_original_is_already_in_the_folder(tmp_path, disk_net, monkeypatch):
+    # Докачка: оригинал уже лежит в папке — файл помечается пропущенным, превью убирается
+    monkeypatch.setattr(downloader, "_get_thread_client", lambda token: _DiskClient(LIVE))
+    dl = str(tmp_path / "dl")
+    st = _disk_state(tmp_path)
+    original = _put(os.path.join(dl, "Фото", "2024", "a.HEIC"), ORIGINAL)
+    preview = _put(preview_path_for(dl, original))
+    st.mark_deferred("disk:/Фото/2024/a.HEIC", DEAD, "сервер молчит", preview_path=preview)
+    assert downloader.download_all("y0_test", st, dl, workers=1)["skipped"] == 1
+    assert not os.path.exists(preview) and open(original, "rb").read() == ORIGINAL
+    assert _disk_row(st) == ("skipped", None)
+    st.close()
+
+
+def test_disk_old_previews_of_saved_photos_are_swept(tmp_path, disk_net):
+    """Превью, оставшиеся от прошлых версий, убираются при следующем запуске скачивания.
+
+    У фото, снятых выбором категорий, оригинала в папке нет — их превью остаются.
+    """
+    dl = str(tmp_path / "dl")
+    st = State(str(tmp_path / "state.db"))
+    rows = {"disk:/a.jpg": ("downloaded", None), "disk:/b.jpg": ("skipped", None),
+            "disk:/c.jpg": ("skipped", CATEGORY_SKIP_MARKER), "disk:/d.jpg": ("downloaded", None)}
+    st.mark_pending_batch([(rp, 5, None) for rp in rows])
+    paths = {rp: _put(preview_path_for(dl, os.path.join(dl, rp[6:]))) for rp in rows}
+    paths["disk:/d.jpg"] = _put(str(tmp_path / "Другая папка" / "d.jpg.jpg"))  # не в «_превью» — чужой файл
+    for rp, (status, error) in rows.items():
+        st._conn().execute("UPDATE files SET status=?, error=?, preview_path=? WHERE remote_path=?",
+                           (status, error, paths[rp], rp))
+    downloader.download_all("y0_test", st, dl, workers=1)  # очередь пуста — только уборка
+    left = dict(st._conn().execute("SELECT remote_path, preview_path FROM files"))
+    st.close()
+    assert left == {"disk:/a.jpg": None, "disk:/b.jpg": None,
+                    "disk:/c.jpg": paths["disk:/c.jpg"], "disk:/d.jpg": paths["disk:/d.jpg"]}
+    assert [rp for rp in rows if os.path.exists(paths[rp])] == ["disk:/c.jpg", "disk:/d.jpg"]
+
+
+def test_disk_preview_cleanup_errors_never_break_the_download(tmp_path, disk_net, monkeypatch):
+    cli = _DiskClient()
+    monkeypatch.setattr(downloader, "_get_thread_client", lambda token: cli)
+    dl = str(tmp_path / "dl")
+    st = _disk_state(tmp_path)
+    downloader.download_all("y0_test", st, dl, workers=1)
+    preview = os.path.join(dl, PREVIEW_DIRNAME, "Фото", "2024", "a.HEIC.jpg")
+
+    def boom(*a):
+        raise RuntimeError("неожиданная ошибка уборки")
+
+    monkeypatch.setattr(downloader, "remove_preview", boom)
+    downloader.DEAD_HOSTS.clear()
+    cli.host = LIVE
+    assert downloader.download_all("y0_test", st, dl, workers=1)["downloaded"] == 1
+    assert os.path.exists(os.path.join(dl, "Фото", "2024", "a.HEIC"))
+    assert _disk_row(st) == ("downloaded", preview)  # запись осталась — уберём в следующий раз
+    monkeypatch.setattr(downloader, "remove_preview", remove_preview)
+    downloader.download_all("y0_test", st, dl, workers=1)
+    assert _disk_row(st) == ("downloaded", None) and not os.path.exists(preview)
+    st.close()
+
+
+def _unlim_rows(db):
+    con = sqlite3.connect(db)
+    try:
+        return {name: (status, pv) for name, status, pv in
+                con.execute("SELECT name, status, preview_path FROM unlim_files")}
+    finally:
+        con.close()
+
+
+def test_unlim_preview_goes_away_when_the_original_arrives(tmp_path, unlim_db):
+    w = uw.Worker(1, batch_size=10)
+    w.session = _UnlimSession()
+    w._process(uw.take_batch(1, size=10))
+    preview = tmp_path / "dl" / PREVIEW_DIRNAME / "_unlim" / "a.HEIC.jpg"
+    assert preview.read_bytes() == JPEG
+
+    # Новый раунд забывает молчащие серверы; сервер ожил — оригинал скачан, превью убрано
+    clear_dead_hosts(str(unlim_db))
+    w.session = _UnlimSession(LIVE)
+    w._process(uw.take_batch(1, size=10))
+    assert (tmp_path / "dl" / "_unlim" / "a.HEIC").read_bytes() == ORIGINAL
+    assert not preview.exists() and not preview.parent.exists()
+    assert (tmp_path / "dl" / PREVIEW_DIRNAME).is_dir()
+    assert _unlim_rows(unlim_db)["a.HEIC"] == ("downloaded", None)
+
+
+def test_unlim_old_previews_are_swept_at_worker_start(tmp_path, unlim_db):
+    old = _put(str(tmp_path / "dl" / PREVIEW_DIRNAME / "_unlim" / "a.HEIC.jpg"))
+    foreign = _put(str(tmp_path / "Другая папка" / "v.MOV.jpg"))  # не в «_превью» — не трогаем
+    con = sqlite3.connect(unlim_db)
+    con.executemany("UPDATE unlim_files SET status='downloaded', preview_path=? WHERE name=?",
+                    [(old, "a.HEIC"), (foreign, "v.MOV")])
+    con.commit()
+    con.close()
+    assert uw.sweep_previews() == 1
+    assert not os.path.exists(old) and os.path.exists(foreign)
+    assert _unlim_rows(unlim_db) == {"a.HEIC": ("downloaded", None), "v.MOV": ("downloaded", foreign)}

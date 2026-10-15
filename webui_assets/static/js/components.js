@@ -264,12 +264,12 @@
     const r = s.rescue || {};
     const disk = (r.sources || {}).disk || {};
     const unlim = (r.sources || {}).unlim || {};
-    const size = ((disk.folder || {}).size_bytes || 0);
+    const size = fmt.folderSize(disk.folder);
     const previews = ((disk.files || {}).preview_only || 0) + ((unlim.files || {}).preview_only || 0);
     const links = ((s.links || {}).items || []).length;
     const free = s.free_space && s.free_space.free != null ? ` · свободно на диске ${fmt.bytes(s.free_space.free)}` : '';
     return `<div class="card"><div class="card-head"><span class="icon-box info">${icon('folder')}</span>
-      <div class="grow"><h3>Где мои файлы</h3><span class="tiny">Уже в папке: ${fmt.bytes(size)}${free}</span></div></div>
+      <div class="grow"><h3>Где мои файлы</h3><span class="tiny">Уже в папке: ${size}${free}</span></div></div>
       <div class="path-box">${icon('drive')}<code>${esc(dir)}</code></div>
       <p class="small muted" style="margin-top:10px">Обычный Диск — с сохранением ваших папок, фото из Безлимита — в подпапке «_unlim»${
         previews ? ', превью — в подпапке «_превью»' : ''}${links ? ', скачанное по ссылкам — в подпапке «_ссылки»' : ''}.</p>

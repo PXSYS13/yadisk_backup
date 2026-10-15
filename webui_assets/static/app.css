@@ -250,6 +250,7 @@ button.small .i,.btn.small .i{width:16px;height:16px}
 .s-label .i{width:15px;height:15px}
 .s-value{font-family:var(--font-display);font-size:25px;font-weight:700;letter-spacing:-.02em;margin-top:6px;line-height:1.15;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .s-value small{font-size:14px;font-weight:550;color:var(--text-3);letter-spacing:0}
+.stat.wrap .s-value{white-space:normal}
 .s-sub{font-size:13px;color:var(--text-2);margin-top:3px}
 .stat.ok .s-label{color:var(--ok)}
 .stat.wait .s-label{color:var(--warn)}

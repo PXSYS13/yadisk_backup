@@ -181,3 +181,32 @@ def test_save_listed_files_does_not_duplicate_photoslice_rows(unlim_db):
     assert rows["photounlim:/a.jpg"] == (10, "a" * 32, "downloaded")  # дополнен, не задублирован
     assert rows["/photounlim/b.jpg"][2] == "pending"
     assert len(rows) == 2
+
+
+def test_reset_failed_files_migrates_a_database_from_an_old_version(tmp_path):
+    """Web UI сбрасывает ошибки до сбора списка: база без attempts не должна ронять его."""
+    db_path = str(tmp_path / "unlim_state.db")
+    con = sqlite3.connect(db_path)
+    con.executescript(
+        "CREATE TABLE unlim_files (file_id TEXT PRIMARY KEY, name TEXT, size INTEGER, md5 TEXT,"
+        " status TEXT DEFAULT 'pending', local_path TEXT, error TEXT, worker_id INTEGER,"
+        " assigned_at TIMESTAMP, downloaded_at TIMESTAMP);"
+        "INSERT INTO unlim_files (file_id, status, error) VALUES ('1', 'failed', 'boom'), ('2', 'pending', NULL);"
+    )
+    con.close()
+
+    assert uc.reset_failed_files(db_path) == 1
+
+    con = sqlite3.connect(db_path)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(unlim_files)")}
+    rows = con.execute("SELECT file_id, status, attempts, error FROM unlim_files ORDER BY file_id").fetchall()
+    con.close()
+    assert {"attempts", "storage_host", "preview_path"} <= cols
+    assert rows == [("1", "pending", 0, None), ("2", "pending", 0, None)]
+
+
+def test_reset_failed_files_without_a_file_list(tmp_path):
+    """База есть, а таблицы файлов нет (воркер запускали до сбора списка) — сбрасывать нечего."""
+    db_path = str(tmp_path / "unlim_state.db")
+    uc.ensure_unlim_schema(db_path)  # так её создаёт воркер: только unlim_meta
+    assert uc.reset_failed_files(db_path, include_in_progress=True) == 0

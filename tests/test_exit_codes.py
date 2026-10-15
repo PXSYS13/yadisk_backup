@@ -16,7 +16,7 @@ import unlim_common as uc
 import unlim_download as ud
 import unlim_worker as uw
 import webui
-from utils import EXIT_AUTH, EXIT_OUTAGE
+from utils import EXIT_AUTH, EXIT_OUTAGE, EXIT_PARTIAL
 
 
 class _Client:
@@ -165,3 +165,123 @@ def test_unwritable_download_folder_is_a_local_disk_problem(monkeypatch, capsys)
     monkeypatch.setattr(main, "ensure_dir", broken)
     assert main._run_download({"download_dir": "X:\нет", "token": "t"}, None, 1) == EXIT_DISK_FULL
     assert "local_disk |" in capsys.readouterr().out
+
+
+def test_scan_exits_3_when_a_folder_could_not_be_listed(tmp_path, monkeypatch, capsys):
+    """Папка не прочиталась после повторов: список неполный — код 3, а не «собрано» с кодом 0."""
+    monkeypatch.setattr(main, "DB_FILE", tmp_path / "state.db")
+    monkeypatch.setattr(main, "token_state", lambda token: ("ok", "OK"))
+    monkeypatch.setattr(main, "make_client", lambda token: _Client(True))
+
+    def scan(client, state, root, on_file, on_note):
+        on_note("unreadable_folders", ["disk:/Фото/2019"])
+        return 5, 10
+
+    monkeypatch.setattr(main, "scan_tree", scan)
+    code = main.cmd_scan({"token": "t"}, argparse.Namespace(root=None, roots=None))
+    out = capsys.readouterr().out
+    assert code == EXIT_OUTAGE
+    assert "server_50x |" in out and "Итого: 5 файлов" in out
+
+
+@pytest.mark.parametrize("exc,code", [
+    (yadisk.exceptions.UnauthorizedError("401"), EXIT_AUTH),
+    (yadisk.exceptions.InternalServerError("500"), EXIT_OUTAGE),
+    (requests.exceptions.ConnectionError("no route"), EXIT_OUTAGE),
+])
+def test_scan_maps_a_broken_listing_to_an_exit_code(tmp_path, monkeypatch, capsys, exc, code):
+    monkeypatch.setattr(main, "DB_FILE", tmp_path / "state.db")
+    monkeypatch.setattr(main, "token_state", lambda token: ("ok", "OK"))
+    monkeypatch.setattr(main, "make_client", lambda token: _Client(True))
+
+    def scan(**kwargs):
+        raise exc
+
+    monkeypatch.setattr(main, "scan_tree", scan)
+    assert main.cmd_scan({"token": "t"}, argparse.Namespace(root=None, roots=None)) == code
+    out = capsys.readouterr().out
+    assert ("auth_expired |" if code == EXIT_AUTH else "server_50x |") in out
+
+
+def test_collect_exits_3_when_the_listing_breaks_after_some_pages(tmp_path, monkeypatch, capsys):
+    """Страница 2 не пришла: собранное сохранено, но код 3 — иначе Web UI запомнил бы список как полный."""
+    monkeypatch.setattr(ud, "DB_FILE", str(tmp_path / "unlim_state.db"))
+    monkeypatch.setattr(ud, "_tls", __import__("threading").local())
+    monkeypatch.setattr(ud, "load_cookies", lambda: {})
+    monkeypatch.setattr(ud, "get_sk_uid", lambda s: ("sk", "uid"))
+
+    def partial(s, sk, uid):
+        ud.save_listed_files([{"path": "/photounlim/a.jpg", "name": "a.jpg", "type": "file", "meta": {"size": 1}}])
+        raise RuntimeError("mpfs/list: HTTP 503")
+
+    monkeypatch.setattr(ud, "collect_via_list", partial)
+    monkeypatch.setattr(ud, "collect_via_photoslice", lambda s, sk, uid: None)
+    assert ud.cmd_collect() == EXIT_OUTAGE
+    assert ud.status_counts() == {"pending": 1}
+    assert "server_50x |" in capsys.readouterr().out
+
+
+def test_collect_exits_3_when_the_disk_page_has_no_session_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(ud, "DB_FILE", str(tmp_path / "unlim_state.db"))
+    monkeypatch.setattr(ud, "_tls", __import__("threading").local())
+    monkeypatch.setattr(ud, "load_cookies", lambda: {})
+
+    def no_keys(_s):
+        raise uc.UnlimError("Не нашёл sk/uid в HTML — Яндекс изменил формат")
+
+    monkeypatch.setattr(ud, "get_sk_uid", no_keys)
+    assert ud.cmd_collect() == EXIT_OUTAGE
+
+
+@pytest.mark.parametrize("exc", [uc.CookiesFormatError("cookies.json должен быть массивом"),
+                                 ValueError("Expecting value: line 1 column 1")])
+def test_collect_exits_2_when_cookies_cannot_be_read(tmp_path, monkeypatch, capsys, exc):
+    monkeypatch.setattr(ud, "DB_FILE", str(tmp_path / "unlim_state.db"))
+    monkeypatch.setattr(ud, "_tls", __import__("threading").local())
+
+    def broken():
+        raise exc
+
+    monkeypatch.setattr(ud, "load_cookies", broken)
+    assert ud.cmd_collect() == EXIT_AUTH
+    assert "auth_expired |" in capsys.readouterr().out
+
+
+def test_worker_exits_3_when_disk_page_has_no_session_keys(monkeypatch):
+    def no_keys(_s):
+        raise uc.UnlimError("Не нашёл sk/uid в HTML")
+
+    monkeypatch.setattr(uw, "get_sk_uid", no_keys)
+    monkeypatch.setattr(uw, "make_session", lambda: _Sess(_Resp(200)))
+    with pytest.raises(SystemExit) as e:
+        uw.Worker(1).authorize()
+    assert e.value.code == EXIT_OUTAGE
+
+
+def test_worker_exits_2_when_cookies_cannot_be_read(monkeypatch, capsys):
+    def broken():
+        raise uc.CookiesFormatError("Нет cookies.json")
+
+    monkeypatch.setattr(uw, "make_session", broken)
+    with pytest.raises(SystemExit) as e:
+        uw.Worker(1).authorize()
+    assert e.value.code == EXIT_AUTH
+    assert "auth_expired |" in capsys.readouterr().out
+
+
+def test_worker_exits_1_when_files_failed_and_nothing_waits(tmp_path, monkeypatch):
+    import sqlite3
+    db = tmp_path / "unlim_state.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE unlim_files (file_id TEXT PRIMARY KEY, name TEXT, size INTEGER, md5 TEXT,"
+        " status TEXT DEFAULT 'pending', local_path TEXT, error TEXT, worker_id INTEGER,"
+        " assigned_at TIMESTAMP, downloaded_at TIMESTAMP, attempts INTEGER DEFAULT 0);"
+        "INSERT INTO unlim_files (file_id, name, size, status) VALUES ('1', 'a.jpg', 10, 'failed');"
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setattr(uw, "DB_FILE", str(db))
+    monkeypatch.setattr(uw.time, "sleep", lambda s: None)
+    uw.ensure_attempts_column()
+    assert uw.Worker(1).run() == EXIT_PARTIAL

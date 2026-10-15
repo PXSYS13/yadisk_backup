@@ -248,8 +248,16 @@ def reset_failed_files(db_path: str | None = None, *, include_in_progress: bool 
 
     include_in_progress=True — также сбрасывает зависшие in_progress (когда
     точно известно, что воркеры не работают).
+
+    Web UI сбрасывает ошибки до сбора списка, а сбор и воркеры, которые раньше одни
+    делали миграцию, ещё не запускались. База из старой версии (без колонки attempts)
+    роняла здесь всю ветку безлимита, поэтому схема дотягивается и тут.
     """
+    db_path = db_path or UNLIM_DB_FILE
+    ensure_unlim_schema(db_path)
     with unlim_tx(db_path) as c:
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='unlim_files'").fetchone():
+            return 0  # база без списка файлов (воркер запускали до сбора) — сбрасывать нечего
         n = c.execute(RESET_FAILED_SQL).rowcount
         if include_in_progress:
             n += c.execute(RELEASE_IN_PROGRESS_SQL).rowcount
@@ -321,5 +329,17 @@ def count_deferred(db_path: str | None = None) -> int:
             "SELECT COUNT(*) FROM unlim_files WHERE status='pending' AND error LIKE ?",
             (DEFERRED_MARKER + "%",),
         ).fetchone()[0]
+    finally:
+        c.close()
+
+
+def count_failed(db_path: str | None = None) -> int:
+    """Сколько файлов так и не скачались (status='failed')."""
+    db_path = db_path or UNLIM_DB_FILE
+    if not os.path.exists(db_path):
+        return 0
+    c = connect_unlim_db(db_path)
+    try:
+        return c.execute("SELECT COUNT(*) FROM unlim_files WHERE status='failed'").fetchone()[0]
     finally:
         c.close()

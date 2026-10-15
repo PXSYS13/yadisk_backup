@@ -394,6 +394,9 @@ def test_download_all_lazy_bounded_queue(tmp_path, monkeypatch):
         def assign_local_paths(self, download_dir):
             pass
 
+        def stale_previews(self):
+            return []
+
         def get_pending_stats(self):
             return {"count": 20, "bytes": 200}
 

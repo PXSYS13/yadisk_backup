@@ -150,7 +150,13 @@
     } else if (sm.preview_only_files) {
       fourth = tile('violet', 'image', 'Есть превью', fmt.num(sm.preview_only_files), 'уменьшенные копии фото');
     } else {
-      fourth = tile('', 'folder', 'В папке', fmt.bytes(((src.disk || {}).folder || {}).size_bytes || 0), 'уже на вашем диске');
+      // Большую папку программа не успевает посчитать целиком — тогда «больше X»;
+      // на телефоне «больше» уходит на свою строку, а не обрезает число многоточием
+      const folder = (src.disk || {}).folder || {};
+      fourth = folder.size_partial
+        ? tile('wrap', 'folder', 'В папке', `<small>больше</small> ${fmt.bytes(folder.size_bytes || 0).replace(' ', '&nbsp;')}`,
+          'уже на вашем диске')
+        : tile('', 'folder', 'В папке', fmt.bytes(folder.size_bytes || 0), 'уже на вашем диске');
     }
     return `<div class="stats">${done}${wait}${queue}${fourth}</div>`;
   }

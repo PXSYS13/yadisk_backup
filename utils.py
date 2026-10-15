@@ -32,7 +32,7 @@ CASE_INSENSITIVE_PATHS = IS_WINDOWS or sys.platform == "darwin"
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
-APP_VERSION = "2.3.2"
+APP_VERSION = "2.3.3"
 
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 
@@ -65,6 +65,60 @@ def preview_path_for(download_dir: str, original_path: str) -> str:
     if rel.startswith(".."):
         rel = os.path.basename(original_path)
     return os.path.join(download_dir, PREVIEW_DIRNAME, rel + ".jpg")
+
+
+def remove_preview(preview_path: str | None, download_dir: str) -> bool:
+    """Удаляет страховочное превью, когда оригинал уже сохранён. True — превью больше нет.
+
+    Трогает только записанный в базе путь внутри <download_dir>/_превью (и после
+    разворота ссылок и junction тоже) и только файл .jpg. Опустевшие подпапки до
+    _превью убирает, саму _превью и чужие файлы — никогда. Не бросает: False — путь
+    чужой или файл не удалился (например, открыт в программе просмотра); запись в
+    базе тогда остаётся, и уборка попробует снова при следующем запуске.
+    """
+    if not preview_path:
+        return True
+    if not download_dir:
+        return False
+    try:
+        root = os.path.abspath(os.path.join(_strip_long_prefix(download_dir), PREVIEW_DIRNAME))
+        target = os.path.abspath(_strip_long_prefix(preview_path))
+        if not target.lower().endswith(".jpg") or not _inside(target, root):
+            return False
+        long_target = to_long_path(target)  # без \\?\ realpath глубокого пути в Windows падает
+        if not _inside(_strip_long_prefix(os.path.realpath(long_target)),
+                       _strip_long_prefix(os.path.realpath(to_long_path(root)))):
+            return False  # подпапка _превью ведёт ссылкой в другое место
+        if os.path.lexists(long_target):
+            if not os.path.isfile(long_target):
+                return False  # там папка, а не наше превью
+            os.remove(long_target)
+    except (OSError, ValueError):
+        return False
+    _remove_empty_dirs(os.path.dirname(target), root)
+    return True
+
+
+def _inside(path: str, root: str) -> bool:
+    """path лежит внутри root, но не равен ему (регистр — как у файловой системы)."""
+    p, r = path_key(path), path_key(root)
+    try:
+        return p != r and os.path.commonpath([p, r]) == r
+    except ValueError:  # разные диски на Windows
+        return False
+
+
+def _remove_empty_dirs(start: str, root: str) -> None:
+    """Удаляет пустые папки от start вверх, не доходя до root. Первая непустая — стоп."""
+    d = start
+    while _inside(d, root):
+        try:
+            os.rmdir(to_long_path(d))
+        except FileNotFoundError:
+            pass  # её уже нет — выше могут быть пустые
+        except OSError:
+            return  # в папке есть файлы (или она занята) — значит, и выше не пусто
+        d = os.path.dirname(d)
 
 
 @contextmanager
@@ -363,6 +417,15 @@ def to_long_path(path: str) -> str:
     return "\\\\?\\" + abs_path
 
 
+def _strip_long_prefix(path: str) -> str:
+    r"""Обратное к to_long_path: \\?\C:\a → C:\a, \\?\UNC\srv\a → \\srv\a."""
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[8:]
+    if path.startswith("\\\\?\\"):
+        return path[4:]
+    return path
+
+
 def _short_hash(remote_path: str) -> str:
     return hashlib.sha256(remote_path.encode("utf-8", errors="replace")).hexdigest()[:6]
 
@@ -456,12 +519,8 @@ def is_safe_dir(path: str, *, must_exist: bool = False) -> tuple[bool, str]:
     """
     if not path or not path.strip():
         return False, "Пустой путь"
-    p_str = path.strip()
     # Префикс длинных путей Windows не должен обходить проверки: \\?\C:\Windows — это C:\Windows
-    if p_str.startswith("\\\\?\\UNC\\"):
-        p_str = "\\\\" + p_str[8:]
-    elif p_str.startswith("\\\\?\\"):
-        p_str = p_str[4:]
+    p_str = _strip_long_prefix(path.strip())
     raw_norm = p_str.lower().replace("/", "\\")
 
     # Текстовые проверки Windows-путей — до is_absolute(), чтобы 'C:\' и 'C:\Windows'
@@ -656,6 +715,18 @@ def is_local_disk_error(exc: BaseException) -> bool:
         and not isinstance(exc, (ConnectionError, TimeoutError))
         and getattr(exc, "errno", None) in LOCAL_DISK_ERRNOS
     )
+
+
+def is_sqlite_disk_error(exc: BaseException) -> bool:
+    """sqlite не смог записать базу: кончилось место, диск отвалился или только чтение.
+
+    Это та же «проблема локального диска», что и у файлов, — код выхода 4, а не падение.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return any(t in text for t in ("disk is full", "disk i/o error", "readonly database",
+                                   "unable to open database"))
 
 
 def human_bytes(n: float) -> str:

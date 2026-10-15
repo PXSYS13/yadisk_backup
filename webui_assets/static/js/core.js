@@ -51,6 +51,9 @@
       return 'меньше минуты';
     },
     speed: (bps) => (bps ? `${App.fmt.bytes(bps)}/с` : ''),
+    // Сколько уже в папке (rescue.sources.*.folder): «больше 31,0 ГБ», если папка
+    // большая и программа не успела посчитать все файлы
+    folderSize: (folder) => `${(folder || {}).size_partial ? 'больше ' : ''}${App.fmt.bytes((folder || {}).size_bytes || 0)}`,
     pct: (part, total) => (total > 0 ? Math.max(0, Math.min(100, (part / total) * 100)) : 0),
     // «0,4%», «42%», «100%» — доли процента видны, чтобы начало не выглядело как ноль
     pctText(part, total) {

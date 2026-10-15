@@ -1,5 +1,7 @@
 """Проверки интерфейса 2.0 без браузера: синтаксис, id, действия, статика, тексты."""
 
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -98,3 +100,48 @@ def test_demo_states_are_complete(monkeypatch):
     # Без YADISK_DEMO демо выключено — настоящий статус
     monkeypatch.delenv("YADISK_DEMO")
     assert client.get("/api/status?demo=waiting").json()["demo"] is None
+
+
+# Главная в node: заглушки DOM, на входе — /api/status, на выходе — разметка блоков
+_HOME_HARNESS = r"""
+const path = require('path');
+global.window = globalThis;
+global.addEventListener = () => {};
+global.location = { search: '', hash: '', pathname: '/' };
+const nodes = {};
+const el = () => ({ innerHTML: '', textContent: '', className: '', dataset: {}, style: {},
+  addEventListener() {}, setAttribute() {}, classList: { add() {}, remove() {}, toggle() {} } });
+global.document = Object.assign(el(), { documentElement: el(), body: el(), createElement: el,
+  querySelectorAll: () => [], querySelector: () => null, getElementById: (id) => (nodes[id] = nodes[id] || el()) });
+global.localStorage = { getItem: () => null, setItem() {} };
+global.matchMedia = () => ({ matches: false, addEventListener() {} });
+for (const f of ['core.js', 'components.js', 'screens/home.js']) require(path.join(process.env.JS_DIR, f));
+window.App.screens.home.update(JSON.parse(require('fs').readFileSync(0, 'utf8')));
+process.stdout.write(JSON.stringify({ stats: nodes['home-stats'].innerHTML, where: nodes['home-where'].innerHTML }));
+"""
+
+
+def _render_home(status: dict) -> dict:
+    res = subprocess.run(["node", "-e", _HOME_HARNESS], input=json.dumps(status), capture_output=True,
+                         text=True, encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_folder_size_says_more_when_not_fully_counted(monkeypatch):
+    # Большую папку программа не успевает посчитать — «больше X», а не заниженная цифра без пометки
+    monkeypatch.setenv("YADISK_DEMO", "1")
+    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    paused = client.get("/api/status?demo=stopped").json()
+    assert paused["rescue"]["sources"]["disk"]["folder"]["size_partial"] is True
+    html = _render_home(paused)
+    assert "<small>больше</small> 31,0&nbsp;ГБ" in html["stats"]  # плитка «В папке»
+    assert "Уже в папке: больше 31,0 ГБ" in html["where"]    # «Где мои файлы»
+
+    done = client.get("/api/status?demo=done").json()
+    assert done["rescue"]["sources"]["disk"]["folder"]["size_partial"] is False
+    html = _render_home(done)
+    assert "31,0 ГБ" in html["stats"] and "больше" not in html["stats"]
+    assert "Уже в папке: 31,0 ГБ" in html["where"]

@@ -178,8 +178,12 @@ class State:
                 items_list,
             )
 
-    def mark_downloaded(self, remote_path: str, local_path: str) -> None:
+    def mark_downloaded(self, remote_path: str, local_path: str) -> str | None:
+        """Файл скачан. Возвращает путь его страховочного превью, если оно записано:
+        оригинал теперь на месте, превью пора убрать (downloader удаляет файл и
+        зовёт clear_previews)."""
         with self._tx() as conn:
+            preview = self._preview_of(conn, remote_path)
             conn.execute(
                 """
                 UPDATE files
@@ -192,9 +196,12 @@ class State:
                 """,
                 (local_path, _utc_now(), remote_path),
             )
+        return preview
 
-    def mark_skipped(self, remote_path: str, local_path: str) -> None:
+    def mark_skipped(self, remote_path: str, local_path: str) -> str | None:
+        """Файл уже лежит в папке (докачка). Возвращает превью, как mark_downloaded."""
         with self._tx() as conn:
+            preview = self._preview_of(conn, remote_path)
             conn.execute(
                 """
                 UPDATE files
@@ -207,6 +214,35 @@ class State:
                 """,
                 (local_path, _utc_now(), remote_path),
             )
+        return preview
+
+    @staticmethod
+    def _preview_of(conn: sqlite3.Connection, remote_path: str) -> str | None:
+        row = conn.execute("SELECT preview_path FROM files WHERE remote_path = ?", (remote_path,)).fetchone()
+        return row["preview_path"] if row else None
+
+    def clear_previews(self, items: Iterable[tuple[str, str]]) -> None:
+        """Забывает удалённые превью: пары (remote_path, путь превью).
+
+        Строку, где за это время записали другое превью, не трогает.
+        """
+        with self._tx() as conn:
+            conn.executemany(
+                "UPDATE files SET preview_path = NULL WHERE remote_path = ? AND preview_path = ?",
+                items,
+            )
+
+    def stale_previews(self) -> list[tuple[str, str]]:
+        """Превью файлов, чьи оригиналы уже на месте: (remote_path, путь превью).
+
+        Скачанные и найденные при докачке (skipped без маркера). Такие превью остались
+        от прошлых версий или не удалились в прошлый раз. Снятые выбором (skipped с
+        маркером) сюда не входят: их оригиналов в папке нет, превью — единственная копия.
+        """
+        return [(r["remote_path"], r["preview_path"]) for r in self._conn().execute(
+            "SELECT remote_path, preview_path FROM files WHERE preview_path IS NOT NULL "
+            "AND (status = 'downloaded' OR (status = 'skipped' AND error IS NULL))"
+        )]
 
     def mark_failed(self, remote_path: str, error: str) -> None:
         with self._tx() as conn:

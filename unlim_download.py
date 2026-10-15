@@ -30,6 +30,8 @@ from unlim_common import (
     UNLIM_DB_FILE as DB_FILE,
     UNLIM_SCHEMA as SCHEMA,
     AuthExpiredError,
+    CookiesFormatError,
+    UnlimError,
     YandexUnavailableError,
     api_call,
     ensure_attempts_column,
@@ -38,7 +40,15 @@ from unlim_common import (
     make_session,
     reset_failed_files,
 )
-from utils import EXIT_AUTH, EXIT_OUTAGE, ensure_utf8_stdio, human_bytes, sqlite_tx
+from utils import (
+    EXIT_AUTH,
+    EXIT_DISK_FULL,
+    EXIT_OUTAGE,
+    ensure_utf8_stdio,
+    human_bytes,
+    is_sqlite_disk_error,
+    sqlite_tx,
+)
 
 LOG_FILE = os.path.join(LOG_DIR, "unlim.log")
 # Сколько кластеров (дней) запрашиваем одним вызовом API
@@ -291,8 +301,23 @@ def _session_alive(s) -> bool:
 
 
 def cmd_collect():
-    db_init()
-    s = make_session(load_cookies())
+    try:
+        db_init()
+    except sqlite3.OperationalError as e:
+        if not is_sqlite_disk_error(e):
+            raise
+        print(f"❌ local_disk | Не получается записать базу unlim_state.db: {e}. "
+              f"Освободите место или проверьте, что диск подключён.")
+        return EXIT_DISK_FULL
+    try:
+        s = make_session(load_cookies())
+    except CookiesFormatError as e:
+        print(f"❌ auth_expired | {e}")
+        return EXIT_AUTH
+    except (ValueError, OSError) as e:  # битый JSON, не тот файл, нет прав на чтение
+        print(f"❌ auth_expired | Не получается прочитать cookies.json ({e}). "
+              f"Обновите доступ к Безлимиту в «Настройках».")
+        return EXIT_AUTH
     try:
         try:
             sk, uid = get_sk_uid(s)
@@ -302,6 +327,11 @@ def cmd_collect():
             return EXIT_AUTH
         except YandexUnavailableError as e:
             print(f"❌ server_50x | Яндекс не отвечает: {e}. Список соберу при следующей попытке.")
+            return EXIT_OUTAGE
+        except UnlimError as e:
+            # Страница пришла, но без sk/uid: капча или новая вёрстка — повторим позже,
+            # это не повод ни менять куки, ни считать список собранным
+            print(f"❌ server_50x | Не удалось войти в веб-версию Диска: {e}. Повторю позже.")
             return EXIT_OUTAGE
         print(f"  ✓ uid={uid}, sk OK")
 
@@ -343,6 +373,12 @@ def cmd_collect():
         if not stats:
             print("  ⚠️ Яндекс не вернул ни одного файла безлимита. Если в веб-версии Диска фото есть — "
                   "обновите cookies.json и запустите сбор ещё раз.")
+        if list_error:
+            # Часть страниц прочитать не удалось: собранное сохранено, но список неполный —
+            # код 3, чтобы Web UI не запомнил его как полный на 6 часов
+            print(f"❌ server_50x | Список безлимита получен не полностью: {list_error}. "
+                  f"Уже собранное не теряется — дособеру при следующей попытке.")
+            return EXIT_OUTAGE
     finally:
         try:
             s.close()
