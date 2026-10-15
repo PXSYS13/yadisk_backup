@@ -883,6 +883,25 @@ def test_guide_renders_instruction_with_working_toc():
     assert toc and toc <= ids, sorted(toc - ids)
 
 
+def test_guide_and_readme_images_exist_and_are_served():
+    """Картинки инструкции: те же пути docs/images/… работают на GitHub и в /guide."""
+    import re as _re
+
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    srcs = [src for src in _re.findall(r'<img[^>]+src="([^"]+)"', client.get("/guide").text)
+            if not src.startswith("https://")]
+    assert len(srcs) >= 3 and all(src.startswith("docs/images/") for src in srcs)
+    for src in srcs:
+        resp = client.get("/" + src)
+        assert resp.status_code == 200 and resp.headers["content-type"] == "image/webp", src
+    assert client.get("/docs/images/nope.webp").status_code == 404
+    assert client.get("/docs/images/..%2F..%2F.env").status_code == 404
+    assert client.get("/docs/images/README.md").status_code == 404
+    readme = (webui.PROJECT / "README.md").read_text(encoding="utf-8")
+    for path in set(_re.findall(r"docs/images/[\w.-]+", readme)):
+        assert (webui.PROJECT / path).is_file(), path
+
+
 def test_ui_has_no_bare_instruction_filename_links():
     """«INSTRUCTION_GET_TOKEN.md» как текст ссылки: Telegram и браузер считают .md доменом."""
     html = (webui.TEMPLATES_DIR / "index.html").read_text(encoding="utf-8")

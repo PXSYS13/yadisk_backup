@@ -2124,6 +2124,7 @@ _GUIDE_PAGE = """<!doctype html>
   blockquote.tip{border-color:var(--green)} blockquote.warning,blockquote.caution{border-color:var(--red)}
   blockquote.important{border-color:var(--yellow)}
   img{max-width:100%;vertical-align:middle} hr{border:0;border-top:1px solid var(--line);margin:28px 0}
+  img[src^="docs/"]{display:block;margin:16px 0;border:1px solid var(--line);border-radius:12px}
 </style></head><body><main>
 <div class="top"><a href="/">← Вернуться в программу</a>
 <a href="https://github.com/PXSYS13/yadisk_backup/blob/main/INSTRUCTION_GET_TOKEN.md" target="_blank" rel="noopener">Открыть на GitHub</a></div>
@@ -2179,6 +2180,19 @@ def guide():
         return RedirectResponse(
             url="https://github.com/PXSYS13/yadisk_backup/blob/main/INSTRUCTION_GET_TOKEN.md", status_code=307)
     return HTMLResponse(render_guide())
+
+
+GUIDE_IMAGES = PROJECT / "docs" / "images"
+_GUIDE_IMAGE_RE = re.compile(r"[a-z0-9-]+\.(?:webp|png)")
+
+
+@app.get("/docs/images/{name}")
+def guide_image(name: str):
+    """Картинки инструкции: один и тот же путь docs/images/… работает и на GitHub, и в /guide."""
+    path = GUIDE_IMAGES / name
+    if not _GUIDE_IMAGE_RE.fullmatch(name) or not path.is_file():
+        return JSONResponse({"ok": False, "error": "нет такой картинки"}, status_code=404)
+    return FileResponse(str(path), media_type="image/webp" if name.endswith(".webp") else "image/png")
 
 
 @app.get("/donate")
