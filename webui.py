@@ -91,15 +91,19 @@ from utils import (
     decode_disk_folders,
     encode_disk_folders,
     ensure_utf8_stdio,
+    filesystem_type,
+    is_fat_filesystem,
     is_safe_dir,
     is_safe_download_dir,
     keep_awake,
     normalize_disk_folders,
     previews_enabled,
+    remote_parts,
     safe_int,
     sqlite_ro_uri,
     sqlite_tx,
     to_disk_path,
+    to_long_path,
 )
 from yandex_health import HealthMonitor
 
@@ -580,7 +584,10 @@ def _stop_and_wait(tasks: list[Task]) -> None:
 
 
 def _free_space(path: str) -> dict | None:
-    """Свободное место на диске папки скачивания (или ближайшего существующего предка)."""
+    """Свободное место на диске папки скачивания (или ближайшего существующего предка).
+
+    fs — файловая система тома; fat — на него не записать файл больше 4 ГБ.
+    """
     p = Path(path)
     while not p.exists() and p != p.parent:
         p = p.parent
@@ -588,7 +595,23 @@ def _free_space(path: str) -> dict | None:
         usage = shutil.disk_usage(p)
     except OSError:
         return None
-    return {"free": usage.free, "total": usage.total, "path": str(p)}
+    fs = _fs_type_cached(str(p))
+    return {"free": usage.free, "total": usage.total, "path": str(p), "fs": fs, "fat": is_fat_filesystem(fs)}
+
+
+# Файловую систему спрашиваем не на каждый опрос статуса: она меняется, только если сменили папку
+_FS_CACHE_SEC = 300
+_fs_cache: dict[str, tuple[float, str | None]] = {}
+
+
+def _fs_type_cached(path: str) -> str | None:
+    now = time.monotonic()
+    hit = _fs_cache.get(path)
+    if hit and now - hit[0] < _FS_CACHE_SEC:
+        return hit[1]
+    fs = filesystem_type(path)
+    _fs_cache[path] = (now, fs)
+    return fs
 
 
 # ── Режим спасения ──────────────────────────────────────────────────────────
@@ -863,6 +886,10 @@ class Rescue:
         self._owned_slots: set[str] = set()
         # Главный поток уже дождался веток и заканчивает: перезапускать ветку поздно
         self._closing = False
+        # Лента «Папка … скачана целиком»: какие папки верхнего уровня уже были скачаны
+        # (None — ещё не считали) и когда считали последний раз
+        self._folders_done: set[str] | None = None
+        self._folders_at = 0.0
 
     # ── управление ──
 
@@ -897,6 +924,7 @@ class Rescue:
             self.disk_folders = list(disk_folders) if disk_folders else None
             self.partial = False
             self.retry_every = _retry_every_sec()
+            self._folders_done, self._folders_at = None, 0.0
             for b in self.branches.values():
                 b.reset()
             self._thread = threading.Thread(target=self._run, daemon=True)
@@ -1078,6 +1106,8 @@ class Rescue:
         """Ждёт задачу, которую только что запустили в слоте. -1 — спасение остановлено."""
         task = tm.get(slot)
         while not self._stopped():
+            if slot == SLOT_DISK and self.branches["disk"].state == "downloading":
+                self._watch_folders()
             if task is None:
                 task = tm.get(slot)
             elif not task.alive():
@@ -1553,9 +1583,43 @@ class Rescue:
     def _disk_download(self, b: Branch) -> int:
         b.state = "downloading"
         self._event("disk", "run", "Новая попытка для отложенных файлов" if b.round > 1 else "Начинаю скачивание")
+        if self._folders_done is None:
+            self._watch_folders(force=True)  # папки, скачанные раньше, — без событий
         workers = min(self.workers, MAX_DISK_WORKERS)
-        return self._run_step(b, SLOT_DISK, "main.py", ["download", "--workers", str(workers), "--no-scan"],
+        code = self._run_step(b, SLOT_DISK, "main.py", ["download", "--workers", str(workers), "--no-scan"],
                               "скачиваю файлы")
+        if code != -1:
+            self._watch_folders(force=True)
+        return code
+
+    def _watch_folders(self, force: bool = False) -> None:
+        """Лента: «Папка «Фото» скачана целиком» — папка верхнего уровня Диска докачалась.
+
+        Первый подсчёт за спасение только запоминает уже скачанные папки. Не чаще раза
+        в FOLDERS_SUMMARY_SEC, если не force. Никогда не бросает: лента — не скачивание.
+        """
+        now = time.monotonic()
+        if not force and now - self._folders_at < FOLDERS_SUMMARY_SEC:
+            return
+        self._folders_at = now
+        try:
+            summary = disk_folders_summary(DB_FILE, force=True)
+        except Exception as e:  # noqa: BLE001
+            log.warning("сводка папок Диска: %s", e)
+            return
+        if summary is None:
+            return
+        done = set(summary["names"])
+        if self._folders_done is not None:
+            new = sorted(done - self._folders_done, key=lambda n: (n.casefold(), n))
+            if 0 < len(new) <= 3:
+                for name in new:
+                    self._event("disk", "ok", f"Папка «{name}» скачана целиком")
+            elif new:
+                shown = ", ".join(f"«{n}»" for n in new[:3])
+                self._event("disk", "ok", f"Скачано целиком папок: {len(new)} — {shown} и другие. "
+                                          "Список — в «Подробнее» у Диска")
+        self._folders_done = done
 
     # ── Безлимит ──
 
@@ -2448,11 +2512,13 @@ def _source_block(name: str, db: dict, branch: dict | None, configured: bool, fo
 def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: dict, cookies: dict,
                         cfg: dict, diag: dict | None = None, free_space: dict | None = None,
                         disk_local: dict | None = None, unlim_local: dict | None = None,
-                        now: float | None = None, live: dict | None = None) -> dict:
+                        now: float | None = None, live: dict | None = None,
+                        disk_folders: dict | None = None) -> dict:
     """Всё, что нужно главному экрану, одним объектом: без разбора логов во фронтенде.
 
     Чистая функция от уже собранных данных — её легко проверить тестом. live —
     признаки жизни по источникам (см. source_live), их собирает /api/status.
+    disk_folders — сводка disk_folders_summary: сколько папок Диска скачано целиком.
     """
     now = now or time.time()
     live = live or {}
@@ -2469,6 +2535,8 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
                                bool(cookies.get("ok")), os.path.join(download_dir, "_unlim") if download_dir else "",
                                unlim_local, window, live.get("unlim"), now),
     }
+    sources["disk"]["folders"] = ({"total": int(disk_folders.get("total") or 0),
+                                   "complete": int(disk_folders.get("complete") or 0)} if disk_folders else None)
     active = [s for s in sources.values() if s["enabled"]]
 
     # Состояние главного экрана
@@ -2581,6 +2649,13 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
                "checked": sum(w["checked"] for w in windows),
                "done": sum(w["done"] for w in windows)} if windows else None)
 
+    # Хватит ли места: всё, что ещё не скачано (и то, что ждёт Яндекса), против свободного
+    free_bytes = (free_space or {}).get("free")
+    need = sum(s["bytes"]["pending"] + s["bytes"]["in_progress"] + s["bytes"]["deferred"] + s["bytes"]["failed"]
+               for s in active)
+    space = {"free": free_bytes, "need": need, "short": free_bytes is not None and need > free_bytes,
+             "fs": (free_space or {}).get("fs"), "fat": bool((free_space or {}).get("fat"))}
+
     return {
         "schema": RESCUE_SCHEMA,
         "state": state,
@@ -2594,6 +2669,7 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
         "can_retry_now": any(s["state"] == "waiting" for s in active),
         "action": action,
         "notice": notice,
+        "space": space,
         "sources": sources,
         # Лента «Что происходит» — новые сверху; признаки жизни — по всем источникам
         "events": list(reversed(rescue_st.get("events") or []))[:12] if started else [],
@@ -2640,6 +2716,7 @@ def api_status(demo: str | None = None):
     unlim_local = local_size(os.path.join(cfg["download_dir"], "_unlim"))
     tasks = tm.status()
     live = None
+    folders = None
     if not demo_data:
         live = {}
         branches = pipe_st.get("branches") or {}
@@ -2647,6 +2724,7 @@ def api_status(demo: str | None = None):
             checked, done = _db_checked_done(db)
             rate = progress_meter.sample(name, checked, done)
             live[name] = source_live(name, tasks, (branches.get(name) or {}).get("state"), rate)
+        folders = disk_folders_summary(DB_FILE) if disk_db.get("total") else None
     return {
         "app_version": APP_VERSION,
         "donation_url": DONATION_URL,
@@ -2669,7 +2747,7 @@ def api_status(demo: str | None = None):
         "pipeline": pipe_st,
         "rescue": demo_data["rescue"] if demo_data else build_rescue_status(
             pipe_st, disk_db, unlim_db, token, cookies, cfg, diag, free, disk_local, unlim_local,
-            live=live),
+            live=live, disk_folders=folders),
         "settings": get_settings(),
         "links": demo_links(time.time(), os.path.join(cfg["download_dir"], LINKS_DIRNAME)) if demo_data
         else links_status(cfg, tasks),
@@ -2915,8 +2993,9 @@ def api_problem_files(source: str, limit: int = 200):
 
 
 class OpenFolderPayload(BaseModel):
-    which: str = "download"  # download | unlim | previews | links
+    which: str = "download"  # download | unlim | previews | links | disk_folder
     link_id: int | None = None  # для links: папка одной ссылки
+    path: str | None = None  # для disk_folder: папка Диска, например disk:/Фото/2023
 
 
 def _link_folder(base: Path, link_id: int) -> Path | None:
@@ -2942,16 +3021,36 @@ def _link_folder(base: Path, link_id: int) -> Path | None:
     return path
 
 
+def _disk_folder_local(base: Path, remote: str) -> Path | None:
+    """Папка Диска внутри папки скачивания — с теми же очищенными именами, что при скачивании."""
+    parts = remote_parts(to_disk_path(remote.strip()))[1]
+    if not parts:
+        return None
+    path = base.joinpath(*parts)
+    try:
+        path.resolve().relative_to(base.resolve())
+    except ValueError:
+        return None
+    return path
+
+
 @app.post("/api/open_folder")
 def api_open_folder(p: OpenFolderPayload):
     """Открывает папку скачивания в проводнике. Только настроенную — никаких чужих путей."""
     base = Path(get_config()["download_dir"])
-    sub = {"download": "", "unlim": "_unlim", "previews": PREVIEW_DIRNAME, "links": LINKS_DIRNAME}.get(p.which)
+    sub = {"download": "", "unlim": "_unlim", "previews": PREVIEW_DIRNAME, "links": LINKS_DIRNAME,
+           "disk_folder": ""}.get(p.which)
     if sub is None:
         raise HTTPException(400, "Неизвестная папка")
     path = base / sub if sub else base
     if p.which == "links" and p.link_id is not None:
         path = _link_folder(base, p.link_id) or path
+    if p.which == "disk_folder":
+        path = _disk_folder_local(base, p.path or "")
+        if path is None:
+            raise HTTPException(400, "Неизвестная папка")
+        if not os.path.isdir(to_long_path(str(path))):
+            return {"ok": False, "msg": "Этой папки нет в папке скачивания — возможно, её перенесли или удалили"}
     if not path.exists():
         return {"ok": False, "msg": "Папки пока нет — в ней ещё ничего не скачано"}
     try:
@@ -3204,7 +3303,7 @@ def api_links_stop():
 
 # ── Демо-режим: пройти все состояния главного экрана без настоящего Яндекса ──
 
-DEMO_STATES = ("setup", "ready", "listing", "downloading", "waiting", "token", "cookies",
+DEMO_STATES = ("setup", "ready", "listing", "downloading", "low_space", "waiting", "token", "cookies",
                "disk_full", "done", "done_partial", "stopped")
 
 _DEMO_DISK_FILES = ("Документы/Договор аренды.pdf", "Фото/2023/Отпуск/IMG_2041.JPG",
@@ -3260,8 +3359,10 @@ def demo_rescue(kind: str, cfg: dict) -> dict:
                 "events": events(*ev)}
 
     dl = {"state": "downloading", "activity": "скачиваю файлы", "round": 1}
+    folders: dict | None = {"total": 6, "complete": 2}
     if kind == "setup":
         tok, coo = {"ok": False}, {"ok": False}
+        folders = None
     elif kind == "listing":
         st = run({"state": "listing", "round": 1}, {"state": "listing", "round": 1}, started_ago=40,
                  ev=[(40, None, "run", "Начинаю: проверяю доступ к Яндексу"),
@@ -3271,12 +3372,16 @@ def demo_rescue(kind: str, cfg: dict) -> dict:
                      (38, "unlim", "run", "Получаю у Яндекса список фото и видео")])
         disk, unlim = db(0, 0), db(0, 0)
         live = {"disk": alive(0, 0, listing=2400), "unlim": alive(0, 0, listing=9000, ago=1)}
-    elif kind == "downloading":
-        st = run(dl, dl, ev=start_events + [(600, "disk", "info", "Снова в очереди: 12 файлов, которые раньше не скачались")])
+        folders = None
+    elif kind in ("downloading", "low_space"):
+        st = run(dl, dl, ev=start_events + [(600, "disk", "info", "Снова в очереди: 12 файлов, которые раньше не скачались"),
+                                            (240, "disk", "ok", "Папка «Документы» скачана целиком")])
         disk = db(6015, 2100, pending=3500, deferred=415, speed=420 * 1024 ** 2, names=_DEMO_DISK_FILES)
         unlim = db(13602, 1900, pending=10900, deferred=802, previews=650, size=69 * gb, speed=380 * 1024 ** 2,
                    names=_DEMO_UNLIM_FILES)
         live = {"disk": alive(140, 18), "unlim": alive(260, 41, ago=1)}
+        if kind == "low_space":  # осталось скачать ~63 ГБ, а свободно 40 — и диск в FAT32
+            free = {"free": 40 * gb, "fs": "FAT32", "fat": True}
     elif kind == "waiting":
         wait = {"state": "waiting", "next_retry_at": now + 1500, "round": 2}
         st = run(wait, wait, next_retry=now + 1500, ev=start_events + [
@@ -3322,8 +3427,11 @@ def demo_rescue(kind: str, cfg: dict) -> dict:
         disk = db(6015, 1500, pending=4515, names=_DEMO_DISK_FILES)
         unlim = db(13602, 2000, pending=11602, size=69 * gb, names=_DEMO_UNLIM_FILES)
     # «На паузе» показывает и большую папку, которую не успели досчитать: «больше 31 ГБ»
+    if kind == "done":
+        folders = {"total": 6, "complete": 6}
     rescue_st = build_rescue_status(st, disk, unlim, tok, coo, cfg, {"kind": None}, free,
-                                    {"bytes": 31 * gb, "partial": kind == "stopped"}, {"bytes": 12 * gb}, live=live)
+                                    {"bytes": 31 * gb, "partial": kind == "stopped"}, {"bytes": 12 * gb}, live=live,
+                                    disk_folders=folders)
     return {"rescue": rescue_st, "token": tok, "cookies": coo, "disk_db": disk, "unlim_db": unlim,
             "free_space": dict(free, total=2048 * gb, path=cfg.get("download_dir", ""))}
 
@@ -3893,6 +4001,159 @@ def api_disk_folders(path: str = "disk:/", demo: str | None = None):
     finally:
         client.close()
     return {"ok": True, "path": path, "folders": folders, "truncated": truncated}
+
+
+# ── Какие папки Диска уже скачаны целиком ───────────────────────────────────
+
+# Сводку по папкам верхнего уровня (Главная, лента) считаем по всей базе — не чаще раза в минуту
+FOLDERS_SUMMARY_SEC = 60
+# Столько папок одного уровня отдаём интерфейсу; об остальных — только число
+FOLDER_PROGRESS_LIMIT = 500
+
+# rest — путь внутри папки, cut — где кончается имя подпапки (0 — файл лежит прямо в папке)
+_FOLDER_PROGRESS_SQL = """
+SELECT child, COUNT(*) AS n, MAX(deep) AS deep,
+       SUM(done) AS done, SUM(deferred) AS deferred, SUM(failed) AS failed, SUM(excluded) AS excluded,
+       SUM(CASE WHEN excluded THEN 0 ELSE size END) AS b_sel,
+       SUM(CASE WHEN done THEN size ELSE 0 END) AS b_done
+FROM (
+    SELECT CASE WHEN cut > 0 THEN substr(rest, 1, cut - 1) END AS child,
+           cut > 0 AND instr(substr(rest, cut + 1), '/') > 0 AS deep,
+           COALESCE(size, 0) AS size,
+           status = 'downloaded' OR (status = 'skipped' AND COALESCE(error, '') NOT IN (?, ?)) AS done,
+           status = 'pending' AND COALESCE(error, '') LIKE ? AS deferred,
+           status = 'failed' AS failed,
+           status = 'skipped' AND COALESCE(error, '') IN (?, ?) AS excluded
+    FROM (SELECT substr(remote_path, ?) AS rest, instr(substr(remote_path, ?), '/') AS cut,
+                 status, error, size
+          FROM files WHERE substr(remote_path, 1, ?) = ?)
+)
+GROUP BY child
+"""
+
+
+def _folder_split(parent: str) -> tuple[str, str]:
+    """Папка Диска и префикс путей внутри неё: ('disk:/Фото', 'disk:/Фото/'), корень — ('disk:/', 'disk:/')."""
+    path = to_disk_path((parent or "").strip() or "/").rstrip("/")
+    if path == "disk:":
+        return "disk:/", "disk:/"
+    return path, path + "/"
+
+
+def _progress_counts(r: sqlite3.Row) -> dict:
+    excluded = int(r["excluded"] or 0)
+    files = int(r["n"]) - excluded
+    done, deferred, failed = int(r["done"] or 0), int(r["deferred"] or 0), int(r["failed"] or 0)
+    return {"files": files, "done": done, "deferred": deferred, "failed": failed,
+            "waiting": max(0, files - done - deferred - failed), "excluded": excluded,
+            "bytes": int(r["b_sel"] or 0), "bytes_done": int(r["b_done"] or 0),
+            "complete": files > 0 and done >= files}
+
+
+def folder_progress(db_file: Path, parent: str = "disk:/", download_dir: str = "",
+                    limit: int | None = FOLDER_PROGRESS_LIMIT) -> dict:
+    """Как скачаны подпапки parent: сколько выбранных файлов каждой уже на компьютере.
+
+    complete — всё выбранное в папке скачано. Такую папку можно переносить на другой диск:
+    скачанное программа помнит по базе и второй раз не качает. Снятое выбором (категории,
+    папки) не считается. Префикс сравнивается через substr, как в filter_to_folders: в именах
+    бывают % и _. here — файлы прямо в parent; on_disk — подпапка есть в download_dir.
+    """
+    path, prefix = _folder_split(parent)
+    out: dict = {"ok": True, "path": path, "folders": [], "here": None,
+                 "complete": 0, "total": 0, "more": 0, "empty": True}
+    if not db_file.exists():
+        return out
+    c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
+    c.row_factory = sqlite3.Row
+    try:
+        n = len(prefix)
+        rows = c.execute(_FOLDER_PROGRESS_SQL, (*SELECTION_MARKERS, DEFERRED_MARKER + "%", *SELECTION_MARKERS,
+                                                n + 1, n + 1, n, prefix)).fetchall()
+    except sqlite3.Error as e:
+        return {"ok": False, "path": path, "msg": f"База Диска занята, попробуйте через минуту: {e}"}
+    finally:
+        c.close()
+    folders = []
+    for r in rows:
+        item = _progress_counts(r)
+        if r["child"] is None:
+            out["here"] = item
+            continue
+        item.update(name=r["child"], path=prefix + r["child"], has_sub=bool(r["deep"]))
+        folders.append(item)
+    folders.sort(key=lambda f: (f["name"].casefold(), f["name"]))
+    counted = [f for f in folders if f["files"]]
+    out.update(total=len(counted), complete=sum(1 for f in counted if f["complete"]), empty=not rows)
+    if limit is not None and len(folders) > limit:
+        out["more"] = len(folders) - limit
+        folders = folders[:limit]
+    if download_dir:
+        for f in folders:
+            local = os.path.join(download_dir, *remote_parts(f["path"])[1])
+            f["on_disk"] = os.path.isdir(to_long_path(local))
+    out["folders"] = folders
+    return out
+
+
+_folders_summary_cache: dict[str, tuple[float, dict | None]] = {}
+_folders_summary_lock = threading.Lock()
+
+
+def disk_folders_summary(db_file: Path, force: bool = False) -> dict | None:
+    """Папки верхнего уровня Диска: всего и скачано целиком (names — их имена).
+
+    Кэш на FOLDERS_SUMMARY_SEC: /api/status опрашивается каждые 1,5 секунды. None — список
+    ещё не собран или базу не прочитать.
+    """
+    key = str(db_file)
+    now = time.monotonic()
+    with _folders_summary_lock:
+        hit = _folders_summary_cache.get(key)
+    if hit and not force and now - hit[0] < FOLDERS_SUMMARY_SEC:
+        return hit[1]
+    res = folder_progress(db_file, limit=None)
+    data = None
+    if res.get("ok") and not res.get("empty"):
+        names = [f["name"] for f in res["folders"] if f["complete"]]
+        data = {"total": res["total"], "complete": len(names), "names": names}
+    with _folders_summary_lock:
+        _folders_summary_cache[key] = (now, data)
+    return data
+
+
+# Демо «Папок»: (имя, файлов, скачано, ждут Яндекса, не скачались, ГБ, есть подпапки, лежит в папке)
+_DEMO_PROGRESS = {
+    "disk:/": [("Видео", 120, 64, 56, 0, 41.0, False, True), ("Документы", 412, 412, 0, 0, 1.2, False, True),
+               ("Загрузки", 236, 236, 0, 0, 3.4, False, True), ("Музыка", 1210, 1210, 0, 0, 7.8, False, False),
+               ("Работа", 530, 498, 20, 12, 2.1, False, True), ("Фото", 3507, 2177, 1330, 0, 18.6, True, True)],
+    "disk:/Фото": [("2022", 1102, 1102, 0, 0, 5.9, False, True), ("2023", 1240, 610, 630, 0, 6.5, False, True),
+                   ("2024", 1153, 453, 700, 0, 6.2, False, True)],
+}
+
+
+def demo_folder_progress(parent: str) -> dict:
+    path, prefix = _folder_split(parent)
+    folders = []
+    for name, files, done, deferred, failed, size_gb, sub, on_disk in _DEMO_PROGRESS.get(path, []):
+        size = int(size_gb * 1024 ** 3)
+        folders.append({"name": name, "path": prefix + name, "files": files, "done": done,
+                        "deferred": deferred, "failed": failed, "waiting": files - done - deferred - failed,
+                        "excluded": 0, "bytes": size, "bytes_done": size * done // files,
+                        "complete": done >= files, "has_sub": sub, "on_disk": on_disk})
+    here = ({"files": 12, "done": 12, "deferred": 0, "failed": 0, "waiting": 0, "excluded": 0,
+             "bytes": 48 * 1024 ** 2, "bytes_done": 48 * 1024 ** 2, "complete": True}
+            if path == "disk:/Фото" else None)
+    return {"ok": True, "path": path, "folders": folders, "here": here, "more": 0, "empty": not folders,
+            "complete": sum(1 for f in folders if f["complete"]), "total": len(folders)}
+
+
+@app.get("/api/disk/folder_progress")
+def api_disk_folder_progress(path: str = "disk:/", demo: str | None = None):
+    """Какие папки Диска уже скачаны целиком — карточка «Папки» в «Подробнее» у Диска."""
+    if demo and os.environ.get("YADISK_DEMO") == "1":
+        return demo_folder_progress(path)
+    return folder_progress(DB_FILE, path, get_config()["download_dir"])
 
 
 @app.get("/api/unlim/preview")

@@ -32,7 +32,7 @@ CASE_INSENSITIVE_PATHS = IS_WINDOWS or sys.platform == "darwin"
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
-APP_VERSION = "2.5.1"
+APP_VERSION = "2.6.0"
 
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 
@@ -71,10 +71,11 @@ def remove_preview(preview_path: str | None, download_dir: str) -> bool:
     """Удаляет страховочное превью, когда оригинал уже сохранён. True — превью больше нет.
 
     Трогает только записанный в базе путь внутри <download_dir>/_превью (и после
-    разворота ссылок и junction тоже) и только файл .jpg. Опустевшие подпапки до
-    _превью убирает, саму _превью и чужие файлы — никогда. Не бросает: False — путь
-    чужой или файл не удалился (например, открыт в программе просмотра); запись в
-    базе тогда остаётся, и уборка попробует снова при следующем запуске.
+    разворота ссылок и junction тоже) и только файл .jpg. Если папку скачивания сменили,
+    превью лежит в «_превью» прежней папки — тогда граница та «_превью», где оно лежит.
+    Опустевшие подпапки до _превью убирает, саму _превью и чужие файлы — никогда.
+    Не бросает: False — путь чужой или файл не удалился (например, открыт в программе
+    просмотра); запись в базе тогда остаётся, и уборка попробует снова при следующем запуске.
     """
     if not preview_path:
         return True
@@ -83,6 +84,8 @@ def remove_preview(preview_path: str | None, download_dir: str) -> bool:
     try:
         root = os.path.abspath(os.path.join(_strip_long_prefix(download_dir), PREVIEW_DIRNAME))
         target = os.path.abspath(_strip_long_prefix(preview_path))
+        if not _inside(target, root):
+            root = _own_previews_root(target) or root
         if not target.lower().endswith(".jpg") or not _inside(target, root):
             return False
         long_target = to_long_path(target)  # без \\?\ realpath глубокого пути в Windows падает
@@ -97,6 +100,24 @@ def remove_preview(preview_path: str | None, download_dir: str) -> bool:
         return False
     _remove_empty_dirs(os.path.dirname(target), root)
     return True
+
+
+def _own_previews_root(target: str) -> str | None:
+    """Самая внешняя папка «_превью» на пути target — превью из прежней папки скачивания.
+
+    Человек сменил папку (например, на внешний диск), а оригинал докачался уже в новую:
+    превью осталось там, куда программа его записала, и убирать его надо там же.
+    """
+    head, parts = target, []
+    while True:
+        head, tail = os.path.split(head)
+        if not tail:
+            break
+        parts.append((head, tail))
+    for head, tail in reversed(parts):  # от корня диска вглубь
+        if path_key(tail) == path_key(PREVIEW_DIRNAME):
+            return os.path.join(head, tail)
+    return None
 
 
 def _inside(path: str, root: str) -> bool:
@@ -727,6 +748,67 @@ def is_sqlite_disk_error(exc: BaseException) -> bool:
     text = str(exc).lower()
     return any(t in text for t in ("disk is full", "disk i/o error", "readonly database",
                                    "unable to open database"))
+
+
+# ── Файловая система папки скачивания ───────────────────────────────────────
+
+# На FAT не записать файл больше 4 ГБ, даже если место есть. Так часто размечены флешки
+# и внешние диски для телевизоров; Windows тогда отвечает «на диске нет места»
+_FAT_FILESYSTEMS = frozenset({"fat", "fat12", "fat16", "fat32", "vfat", "msdos"})
+
+
+def is_fat_filesystem(fs: str | None) -> bool:
+    return bool(fs) and fs.strip().lower() in _FAT_FILESYSTEMS
+
+
+def fs_type_from_mounts(path: str, mounts: str) -> str | None:
+    """Тип файловой системы для path по тексту /proc/mounts: самая длинная точка монтирования."""
+    best, fs = None, None
+    for line in mounts.splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        # Пробелы и прочее в точке монтирования записаны восьмеричными кодами: \040
+        mount = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[1])
+        inside = path == mount or path.startswith(mount.rstrip("/") + "/")
+        if inside and (best is None or len(mount) > len(best)):
+            best, fs = mount, fields[2]
+    return fs
+
+
+def filesystem_type(path: str) -> str | None:
+    """Файловая система тома, где лежит папка path: NTFS, exFAT, FAT32, vfat… None — не узнать.
+
+    Папки может ещё не быть — смотрим ближайшую существующую. На macOS не определяем.
+    """
+    try:
+        p = os.path.abspath(_strip_long_prefix(path))
+        while not os.path.exists(p):
+            parent = os.path.dirname(p)
+            if parent == p:
+                return None
+            p = parent
+        if IS_WINDOWS:
+            return _windows_fs_type(p)
+        if sys.platform.startswith("linux"):
+            with open("/proc/mounts", encoding="utf-8", errors="replace") as f:
+                return fs_type_from_mounts(os.path.realpath(p), f.read())
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _windows_fs_type(path: str) -> str | None:
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    volume = ctypes.create_unicode_buffer(1024)
+    if not kernel32.GetVolumePathNameW(path, volume, len(volume)):
+        return None
+    name = ctypes.create_unicode_buffer(64)
+    if not kernel32.GetVolumeInformationW(volume.value, None, 0, None, None, None, name, len(name)):
+        return None
+    return name.value or None
 
 
 def human_bytes(n: float) -> str:

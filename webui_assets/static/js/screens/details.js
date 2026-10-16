@@ -39,6 +39,85 @@
       ${problems.total > problems.items.length ? `<p class="tiny" style="margin-top:8px">Показаны первые ${problems.items.length} из ${fmt.num(problems.total)}.</p>` : ''}`);
   }
 
+  // ── «Папки»: какие папки Диска уже скачаны целиком — их можно переносить на другой диск ──
+  let fpPath = 'disk:/';
+  let folders = null;
+  let foldersAt = 0;
+
+  async function loadFolders(path) {
+    if (path !== undefined) fpPath = path;
+    foldersAt = Date.now();
+    const want = fpPath;
+    const res = await App.api.get(`/api/disk/folder_progress?path=${encodeURIComponent(want)}${App.demo ? '&demo=1' : ''}`);
+    if (want !== fpPath) return; // пока ждали ответа, открыли другую папку
+    folders = res.ok ? res.data : { error: res.error || 'Не получилось загрузить папки' };
+    paintFolders();
+  }
+
+  function crumbs(path) {
+    const parts = path.replace(/^disk:\/*/, '').split('/').filter(Boolean);
+    if (!parts.length) return '<nav class="crumbs" aria-label="Папка"><b>Весь Диск</b></nav>';
+    let acc = 'disk:';
+    const items = parts.map((p, i) => {
+      acc += `/${p}`;
+      return i === parts.length - 1 ? `<b>${esc(p)}</b>`
+        : `<button class="link" data-action="fp-open" data-path="${esc(acc)}">${esc(p)}</button>`;
+    });
+    return `<nav class="crumbs" aria-label="Папка"><button class="link" data-action="fp-open" data-path="disk:/">Весь Диск</button>` +
+      items.map((x) => `<span aria-hidden="true">›</span>${x}`).join('') + '</nav>';
+  }
+
+  function folderBadge(f) {
+    if (!f.files) return ['', 'не выбрана'];
+    if (f.complete) return ['ok', 'скачана целиком'];
+    if (f.failed) return ['err', `не скачались: ${fmt.num(f.failed)}`];
+    if (f.deferred) return ['wait', `ждут Яндекса: ${fmt.num(f.deferred)}`];
+    return ['', `в очереди: ${fmt.num(f.waiting)}`];
+  }
+
+  function folderRow(f, title) {
+    const [cls, text] = folderBadge(f);
+    const seg = (c, n) => `<span class="${c}" style="width:${fmt.pct(n, f.files).toFixed(2)}%"></span>`;
+    const bar = f.files ? `<div class="bar thin" role="img" aria-label="Скачано ${f.done} из ${f.files}">${
+      seg('done', f.done)}${seg('work', f.waiting)}${seg('wait', f.deferred)}${seg('fail', f.failed)}</div>` : '';
+    const label = `${App.icon(title ? 'file' : 'folder')}<span class="fp-label">${esc(title || f.name)}</span>`;
+    const name = f.has_sub
+      ? `<button class="link fp-name" data-action="fp-open" data-path="${esc(f.path)}" title="Показать папки внутри">${label}${App.icon('chevron')}</button>`
+      : `<span class="fp-name">${label}</span>`;
+    const meta = f.files ? `${fmt.num(f.done)} из ${fmt.files(f.files)} · ${fmt.bytes(f.bytes_done)} из ${fmt.bytes(f.bytes)}`
+      : `${fmt.files(f.excluded)} — не выбраны в «Настройках»`;
+    let tail = '';
+    if (f.complete && f.on_disk) {
+      tail = `<button class="small ghost" data-action="open-disk-folder" data-path="${esc(f.path)}">${App.icon('folder')}Открыть папку</button>`;
+    } else if (f.complete && f.on_disk === false) {
+      tail = '<span class="tiny">в папке скачивания её уже нет</span>';
+    }
+    return `<li class="fp-row"><div class="fp-top">${name}<span class="badge ${cls}">${esc(text)}</span></div>${bar}
+      <div class="fp-meta"><span>${meta}</span>${tail}</div></li>`;
+  }
+
+  function paintFolders() {
+    const box = byId('det-folders');
+    if (!box) return;
+    if (!folders) { App.html(box, '<p class="muted">Загружаю…</p>'); return; }
+    if (folders.error) { App.html(box, `<p class="muted">${esc(folders.error)}</p>`); return; }
+    const root = (folders.path || fpPath) === 'disk:/';
+    const head = crumbs(folders.path || fpPath);
+    if (folders.empty) {
+      App.html(box, `${head}<div class="empty">${App.icon('hourglass')}${root
+        ? 'Список файлов Диска ещё не собран — папки появятся после запуска.' : 'В этой папке нет файлов из списка.'}</div>`);
+      return;
+    }
+    const sum = !folders.total ? '' : folders.complete === folders.total
+      ? `<p class="fp-sum ok">${App.icon('check')}<span>Все папки здесь скачаны целиком</span></p>`
+      : `<p class="fp-sum"><span>Скачаны целиком: <b>${fmt.num(folders.complete)}</b> из ${fmt.num(folders.total)} ${
+        fmt.plural(folders.total, 'папки', 'папок', 'папок')}</span></p>`;
+    const rows = (folders.folders || []).map((f) => folderRow(f)).join('') +
+      (folders.here ? folderRow(folders.here, root ? 'Файлы в корне Диска' : 'Файлы прямо в этой папке') : '');
+    const more = folders.more ? `<p class="tiny">И ещё ${fmt.num(folders.more)} — показаны первые ${fmt.num((folders.folders || []).length)} по алфавиту.</p>` : '';
+    App.html(box, `${head}${sum}<ul class="fp-list">${rows}</ul>${more}`);
+  }
+
   function taskLog(s) {
     const tasks = s.tasks || {};
     const keys = source === 'disk' ? ['disk'] : Object.keys(tasks).filter((k) => k.startsWith('unlim')).sort();
@@ -59,6 +138,9 @@
         <div class="stack">
           <div class="card"><div id="det-steps"></div><div class="counters" id="det-counters" style="margin-top:18px"></div>
             <p class="small muted" id="det-hosts" style="margin-top:14px"></p></div>
+          <div class="card" id="det-folders-card">${head('folder', 'ok', 'Папки',
+            'Скачанную целиком папку можно перенести на другой диск — программа помнит, что уже скачала, и не будет качать её заново')}
+            <div id="det-folders"></div></div>
           <div class="card">${head('alert', 'wait', 'Что не скачалось и почему', 'Файлы, которые ждут Яндекса, программа повторяет сама')}<div id="det-problems"></div></div>
           <div class="card">${head('check', 'ok', 'Последние скачанные', 'Эти файлы уже лежат в вашей папке')}<div id="det-recent"></div></div>
           <div class="card"><details><summary>Для опытных: журнал и пересбор списка</summary><div class="body">
@@ -74,6 +156,13 @@
       App.text(byId('det-title'), App.SOURCE_NAMES[source]);
       paintProblems();
       loadProblems();
+      // У Безлимита папок нет: все фото лежат в одной папке «_unlim»
+      byId('det-folders-card').classList.toggle('hidden', source !== 'disk');
+      if (source === 'disk') {
+        folders = null;
+        paintFolders();
+        loadFolders('disk:/');
+      }
     },
     update(s) {
       const r = s.rescue || {};
@@ -99,8 +188,18 @@
       byId('det-relist').disabled = running;
       App.text(byId('det-log'), taskLog(s));
       if (Date.now() - problemsAt > 20000) loadProblems();
+      if (source === 'disk' && Date.now() - foldersAt > 30000) loadFolders();
     },
   };
+
+  App.action('fp-open', (btn) => {
+    folders = null;
+    fpPath = btn.dataset.path || 'disk:/';
+    paintFolders();
+    loadFolders();
+  });
+  App.action('open-disk-folder', (btn) => App.run(btn, () =>
+    App.api.post('/api/open_folder', { which: 'disk_folder', path: btn.dataset.path })));
 
   App.action('details-relist', async (btn) => {
     const yes = await App.confirm({ title: 'Собрать список файлов заново?', ok: 'Собрать',

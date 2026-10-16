@@ -117,7 +117,8 @@ global.localStorage = { getItem: () => null, setItem() {} };
 global.matchMedia = () => ({ matches: false, addEventListener() {} });
 for (const f of ['core.js', 'components.js', 'screens/home.js']) require(path.join(process.env.JS_DIR, f));
 window.App.screens.home.update(JSON.parse(require('fs').readFileSync(0, 'utf8')));
-process.stdout.write(JSON.stringify({ stats: nodes['home-stats'].innerHTML, where: nodes['home-where'].innerHTML }));
+process.stdout.write(JSON.stringify({ stats: nodes['home-stats'].innerHTML, where: nodes['home-where'].innerHTML,
+  space: nodes['home-space'].innerHTML, sources: nodes['home-sources'].innerHTML }));
 """
 
 
@@ -145,6 +146,25 @@ def test_folder_size_says_more_when_not_fully_counted(monkeypatch):
     html = _render_home(done)
     assert "31,0 ГБ" in html["stats"] and "больше" not in html["stats"]
     assert "Уже в папке: 31,0 ГБ" in html["where"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_home_warns_about_space_and_counts_complete_folders(monkeypatch):
+    monkeypatch.setenv("YADISK_DEMO", "1")
+    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    low = _render_home(client.get("/api/status?demo=low_space").json())
+    assert "Места на диске может не хватить" in low["space"] and "свободно 40,0 ГБ" in low["space"]
+    assert "Выбрать другую папку" not in low["space"]  # идёт скачивание: папку меняют после остановки
+    assert "Скачаны целиком: <b>2</b> из 6 папок" in low["sources"] and 'href="#/details/disk"' in low["sources"]
+    assert _render_home(client.get("/api/status?demo=downloading").json())["space"] == ""
+    paused = client.get("/api/status?demo=stopped").json()
+    paused["rescue"]["space"]["short"] = True
+    assert "Выбрать другую папку" in _render_home(paused)["space"]
+    full = client.get("/api/status?demo=disk_full").json()
+    full["rescue"]["space"]["short"] = True
+    assert _render_home(full)["space"] == ""  # про место уже говорит баннер «нужно действие»
+    assert "Все папки скачаны целиком" in _render_home(client.get("/api/status?demo=done").json())["sources"]
 
 
 # «Нас поддерживают»: строка внизу главной и суммы — в node, без браузера
@@ -238,3 +258,56 @@ def test_donate_card_asks_once_per_milestone():
     assert 'data-action="donate-open"' in out["card"] and 'data-key="m-10000"' in out["card"]
     assert "Уже 10 000 файлов на вашем компьютере" in out["card_ms"]
     assert "https://dalink.to/davronsvv" in out["card_ms"]
+
+
+# «Папки» в «Подробнее» у Диска: список, сводка и переход внутрь папки — в node, fetch подменён
+_FOLDERS_HARNESS = r"""
+const path = require('path');
+global.window = globalThis;
+global.addEventListener = () => {};
+global.location = { search: '', hash: '', pathname: '/' };
+const nodes = {};
+const el = () => ({ innerHTML: '', textContent: '', className: '', dataset: {}, style: {},
+  addEventListener() {}, setAttribute() {}, classList: { add() {}, remove() {}, toggle() {} } });
+global.document = Object.assign(el(), { documentElement: el(), body: el(), createElement: el,
+  querySelectorAll: () => [], querySelector: () => null, getElementById: (id) => (nodes[id] = nodes[id] || el()) });
+global.localStorage = { getItem: () => null, setItem() {} };
+global.matchMedia = () => ({ matches: false, addEventListener() {} });
+const pages = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const asked = [];
+global.fetch = async (url) => {
+  const want = new URL(url, 'http://localhost').searchParams.get('path');
+  if (want) asked.push(want);
+  return { ok: true, status: 200, json: async () => pages[want] || { items: [], reasons: {}, total: 0 } };
+};
+for (const f of ['core.js', 'components.js', 'screens/details.js']) require(path.join(process.env.JS_DIR, f));
+const App = window.App;
+const tick = () => new Promise((r) => setTimeout(r, 20));
+(async () => {
+  App.screens.details.mount(el());
+  App.screens.details.show({ source: 'disk' });
+  await tick();
+  const root = nodes['det-folders'].innerHTML;
+  App.actions['fp-open']({ dataset: { path: 'disk:/Фото' } });
+  await tick();
+  process.stdout.write(JSON.stringify({ root, inner: nodes['det-folders'].innerHTML, asked }));
+})();
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_details_shows_which_folders_are_complete():
+    pages = {p: webui.demo_folder_progress(p) for p in ("disk:/", "disk:/Фото")}
+    res = subprocess.run(["node", "-e", _FOLDERS_HARNESS], input=json.dumps(pages), capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    root, inner = out["root"], out["inner"]
+    assert out["asked"] == ["disk:/", "disk:/Фото"]
+    assert "<b>Весь Диск</b>" in root and "Скачаны целиком: <b>3</b> из 6 папок" in root
+    assert root.count("скачана целиком") == 3 and "ждут Яндекса: 1 330" in root.replace("\xa0", " ")
+    assert 'data-action="fp-open" data-path="disk:/Фото"' in root  # в «Фото» есть подпапки
+    assert root.count('data-action="open-disk-folder"') == 2  # «Музыку» уже перенесли
+    assert "в папке скачивания её уже нет" in root
+    assert 'data-path="disk:/">Весь Диск</button>' in inner and "<b>Фото</b>" in inner
+    assert "Файлы прямо в этой папке" in inner and "2022" in inner and "не скачались" not in inner

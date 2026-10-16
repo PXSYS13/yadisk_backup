@@ -364,6 +364,12 @@ button.small .i,.btn.small .i{width:16px;height:16px}
 .source-foot{margin-top:auto;display:flex;justify-content:space-between;align-items:center;gap:4px 12px;flex-wrap:wrap;padding-top:4px;border-top:1px solid var(--border);font-size:14px;color:var(--text-3)}
 .more{display:inline-flex;align-items:center;gap:2px;min-height:40px;font-weight:500;font-size:14px}
 .more .i{width:16px;height:16px}
+/* «Скачаны целиком: 2 из 6 папок» на карточке Диска */
+.folders-line{display:inline-flex;align-items:center;gap:8px;margin-top:10px;min-height:32px;font-size:14px;color:var(--text-2)}
+.folders-line b{font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
+.folders-line .i{width:16px;height:16px;color:var(--text-3)}
+.folders-line:hover{text-decoration:none}
+.folders-line:hover span{text-decoration:underline}
 
 /* Этапы: доступ → список → скачивание → готово (четыре полоски) */
 .steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;list-style:none}
@@ -550,6 +556,7 @@ fieldset.bare:disabled .tree,fieldset.bare:disabled .folders-summary{opacity:.6}
 .access-row .state{display:flex;align-items:flex-start;gap:8px;margin-top:2px;color:var(--text-2);font-size:15px;overflow-wrap:anywhere}
 .access-row .state .dot{margin-top:7px}
 .access-row .state.err{color:var(--err)}
+.access-row .state .note{display:block;margin-top:2px;color:var(--warn)}
 .access-row>.row{flex:0 1 auto;max-width:100%}
 .access-form{width:100%;padding:18px;margin-top:4px;border-radius:var(--radius-md);background:var(--surface-2)}
 .access-form ol{display:flex;flex-direction:column;gap:4px}
@@ -595,6 +602,24 @@ table.list tbody tr:hover td{background:var(--surface-2)}
 table.list td.name{word-break:break-all}
 .scroll{max-height:440px;overflow:auto;border-radius:var(--radius-md);border:1px solid var(--border)}
 .console{background:var(--console-bg);color:var(--console-text);border-radius:var(--radius-md);padding:14px;font-family:var(--mono);font-size:12px;max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+/* «Папки» в «Подробнее»: какие папки Диска уже скачаны целиком */
+.crumbs{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;font-size:14px;color:var(--text-3);margin-bottom:10px}
+.crumbs b{font-weight:600;color:var(--text)}
+.crumbs button.link{font-size:14px;min-height:36px}
+.fp-sum{display:flex;align-items:center;gap:8px;font-size:15px;color:var(--text-2);margin-bottom:4px}
+.fp-sum b{font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
+.fp-sum.ok{color:var(--ok)}
+.fp-list{list-style:none;display:flex;flex-direction:column}
+.fp-row{display:flex;flex-direction:column;gap:8px;padding:14px 0;border-top:1px solid var(--border)}
+.fp-row:first-child{border-top:none}
+.fp-top{display:flex;align-items:center;justify-content:space-between;gap:6px 12px;flex-wrap:wrap}
+.fp-name{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:100%;font-size:15px;font-weight:500;color:var(--text)}
+button.fp-name{min-height:36px;color:var(--link);text-align:left}
+.fp-name .i{width:16px;height:16px;flex:none}
+span.fp-name .i{color:var(--text-3)}
+.fp-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.fp-meta{display:flex;align-items:center;justify-content:space-between;gap:6px 12px;flex-wrap:wrap;font-size:13px;color:var(--text-3)}
+.bar.thin{height:6px}
 ul.reasons{list-style:none;display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
 ul.reasons li{display:flex;align-items:center;gap:10px;font-size:15px}
 ul.reasons li::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--text-3);flex:none}

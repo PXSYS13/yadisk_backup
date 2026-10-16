@@ -231,8 +231,31 @@
       <div><div class="progress-line"><div class="big-number"><b>${fmt.num(f.done)}</b> из ${fmt.files(selected)}</div>
         <span class="pct-badge">${fmt.pctText(f.done, selected)}</span></div>
         <div class="bytes-line">${fmt.bytes(b.done)} из ${fmt.bytes(b.selected || b.total)}${speed}</div>
-        <div style="margin-top:10px">${bar}</div><div class="legend">${legend}</div></div>
+        <div style="margin-top:10px">${bar}</div><div class="legend">${legend}</div>${foldersLine(name, src)}</div>
       ${activity}${foot}</div>`;
+  };
+
+  // «Скачаны целиком: 2 из 6 папок» — такие папки можно переносить, не дожидаясь остальных
+  function foldersLine(name, src) {
+    const fl = src.folders;
+    if (name !== 'disk' || !fl || fl.total < 2) return '';
+    const text = fl.complete >= fl.total ? 'Все папки скачаны целиком'
+      : `Скачаны целиком: <b>${fmt.num(fl.complete)}</b> из ${fmt.num(fl.total)} ${fmt.plural(fl.total, 'папки', 'папок', 'папок')}`;
+    return `<a class="folders-line" href="#/details/disk">${icon('folder')}<span>${text}</span>${icon('chevron')}</a>`;
+  }
+
+  // ── «Места может не хватить»: осталось скачать больше, чем свободно на диске с папкой ──
+  App.spaceBanner = (r) => {
+    const sp = r && r.space;
+    const act = r && r.action && r.action.id;
+    if (!sp || !sp.short || act === 'free_space' || act === 'setup') return '';
+    const btn = r.running ? ''
+      : `<div class="row actions"><button data-action="go-access" data-field="folder">${icon('folder')}Выбрать другую папку</button></div>`;
+    return `<div class="banner safety"><span class="b-icon">${icon('hdd')}</span><div>
+      <h3>Места на диске может не хватить</h3>
+      <p>Осталось скачать ${fmt.bytes(sp.need)}, а на диске с папкой свободно ${fmt.bytes(sp.free)}. Когда место
+        закончится, программа остановится и попросит выбрать другую папку — например, на внешнем диске. Скачанное
+        останется где лежит и второй раз качаться не будет.</p>${btn}</div></div>`;
   };
 
   // ── Лента «Что происходит» ──
@@ -416,7 +439,9 @@
     folder: `<div class="access-form" data-form="folder">
         <label class="field"><span>Куда сохранять файлы — полный путь к папке</span>
           <input type="text" data-field="folder-input" spellcheck="false" placeholder="D:\\YandexBackup"></label>
-        <p class="tiny">Лучше отдельная папка на диске, где хватит места. Корень диска (C:\\) выбрать нельзя.</p>
+        <p class="tiny">Лучше отдельная папка на диске, где хватит места, — подойдёт и внешний диск, например
+          E:\\Яндекс Диск. Корень диска (C:\\ или E:\\) выбрать нельзя. Если сменить папку посреди скачивания,
+          скачанное останется в старой папке, а остальное докачается в новую — второй раз ничего не качается.</p>
         <div class="row" style="margin-top:10px"><button class="primary" data-action="folder-save">${icon('check')}Сохранить папку</button>
           <span class="small muted" data-field="folder-result"></span></div></div>`,
     cookies: `<div class="access-form" data-form="cookies">
@@ -478,9 +503,14 @@
       }
       if (q('[data-row="folder"]')) {
         const cfg = s.config || {};
-        const free = s.free_space && s.free_space.free != null ? ` · свободно ${fmt.bytes(s.free_space.free)}` : '';
-        App.text(q('[data-field="folder-state"]'), `${cfg.download_dir || '—'}${cfg.download_dir_set ? '' : ' (по умолчанию)'}${free}`);
-        tone('folder', actionId === 'free_space' ? 'err' : cfg.download_dir_set ? 'ok' : 'wait');
+        const fsp = s.free_space || {};
+        const space = (s.rescue || {}).space || {};
+        const free = fsp.free != null ? ` · свободно ${fmt.bytes(fsp.free)}` : '';
+        const short = space.short ? `<span class="note">Осталось скачать ${fmt.bytes(space.need)} — всё не поместится</span>` : '';
+        const fat = fsp.fat ? `<span class="note">Диск в формате ${esc(fsp.fs || 'FAT32')}: файлы больше 4 ГБ на него не запишутся</span>` : '';
+        App.html(q('[data-field="folder-state"]'),
+          `${esc(cfg.download_dir || '—')}${cfg.download_dir_set ? '' : ' (по умолчанию)'}${free}${short}${fat}`);
+        tone('folder', actionId === 'free_space' ? 'err' : short || fat || !cfg.download_dir_set ? 'wait' : 'ok');
         const linksRunning = !!(s.links && s.links.running);
         App.html(q('[data-field="folder-buttons"]'), !withButtons ? '' : running || linksRunning
           ? `<span class="tiny">Сменить папку можно после остановки скачивания${running ? '' : ' по ссылкам'}</span>`
@@ -554,9 +584,11 @@
     if (!dir) return { ok: false, error: 'Укажите папку — например D:\\YandexBackup' };
     const res = await App.api.post('/api/config/download_dir', { download_dir: dir });
     if (res.ok) {
-      App.text(field(root, 'folder-result'), 'Сохранено');
+      const fsp = (res.data || {}).free_space || {};
+      const fat = fsp.fat ? ` Диск в формате ${fsp.fs || 'FAT32'}: файлы больше 4 ГБ на него не запишутся — лучше диск в NTFS или exFAT.` : '';
+      App.text(field(root, 'folder-result'), `Сохранено.${fat}`);
       root.dispatchEvent(new CustomEvent('access-saved', { bubbles: true, detail: { kind: 'folder' } }));
-      return { ok: true, data: { msg: 'Папка сохранена' } };
+      return { ok: true, data: { msg: `Папка сохранена.${fat}` } };
     }
     return res;
   }));

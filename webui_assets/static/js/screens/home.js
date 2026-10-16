@@ -221,6 +221,7 @@
           <div id="home-stats"></div>
           <p class="hero-what" id="home-what"></p>
         </section>
+        <div class="mt" id="home-space"></div>
         <div class="mt" id="home-safety"></div>
         <div class="mt" id="home-notice"></div>
         <div class="mt" id="home-donate"></div>
@@ -249,6 +250,7 @@
       App.html(byId('home-stats'), stats(r, s, offline));
       App.html(byId('home-what'), setup || offline ? '' : whatLine(s));
       byId('home-what').classList.toggle('hidden', setup || offline);
+      App.html(byId('home-space'), offline || setup ? '' : App.spaceBanner(r));
       // Плашка про молчащие серверы уже просит ничего не удалять — второй раз не повторяем
       const showSafety = r.state !== 'idle' && !((r.summary || {}).complete) && !r.notice;
       App.html(byId('home-safety'), showSafety && !offline ? App.safetyNote() : '');
