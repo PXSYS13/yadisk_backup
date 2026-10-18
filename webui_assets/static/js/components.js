@@ -225,12 +225,13 @@
       f.failed ? `<span><i class="l-fail"></i>не скачались <b>${fmt.num(f.failed)}</b></span>` : '',
       f.preview_only ? `<span><i class="l-prev"></i>есть превью <b>${fmt.num(f.preview_only)}</b></span>` : '',
     ].join('');
+    // Куски строки не рвутся внутри: на телефоне «осталось ≈ | 1 ч 25 мин» читалось плохо
     const speed = src.state === 'downloading' && src.speed_bps
-      ? ` · ${fmt.speed(src.speed_bps)}${src.eta_sec ? ` · осталось ≈ ${fmt.duration(src.eta_sec)}` : ''}` : '';
+      ? ` · <span>${fmt.speed(src.speed_bps)}</span>${src.eta_sec ? ` · <span>осталось ≈ ${fmt.duration(src.eta_sec)}</span>` : ''}` : '';
     return `<div class="card source">${head}${steps}
       <div><div class="progress-line"><div class="big-number"><b>${fmt.num(f.done)}</b> из ${fmt.files(selected)}</div>
         <span class="pct-badge">${fmt.pctText(f.done, selected)}</span></div>
-        <div class="bytes-line">${fmt.bytes(b.done)} из ${fmt.bytes(b.selected || b.total)}${speed}</div>
+        <div class="bytes-line"><span>${fmt.bytes(b.done)} из ${fmt.bytes(b.selected || b.total)}</span>${speed}</div>
         <div style="margin-top:10px">${bar}</div><div class="legend">${legend}</div>${foldersLine(name, src)}</div>
       ${activity}${foot}</div>`;
   };

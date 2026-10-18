@@ -334,6 +334,7 @@ button.small .i,.btn.small .i{width:16px;height:16px}
 .big-number b{font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
 .pct-badge{font-weight:600;font-size:15px;color:var(--text);font-variant-numeric:tabular-nums}
 .bytes-line{font-size:13px;color:var(--text-3);margin-top:2px}
+.bytes-line span{white-space:nowrap}
 .bar{height:10px;border-radius:99px;background:var(--surface-3);overflow:hidden;display:flex;gap:2px}
 .bar span{height:100%;display:block;min-width:3px;transition:width .6s ease}
 .bar span[style*="width:0.00%"]{display:none}

@@ -32,7 +32,7 @@ CASE_INSENSITIVE_PATHS = IS_WINDOWS or sys.platform == "darwin"
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.6.1"
 
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 

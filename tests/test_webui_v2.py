@@ -37,6 +37,17 @@ def test_settings_roundtrip_and_validation(client, monkeypatch):
     assert client.post("/api/settings", json={"gentle": False}).status_code == 200
 
 
+def test_gentle_toggle_during_download_asks_for_restart(client, monkeypatch):
+    # Скачивание не идёт — режим сработает при запуске, подсказка не нужна
+    assert "msg" not in client.post("/api/settings", json={"gentle": True}).json()
+    monkeypatch.setattr(webui.pipeline, "is_running", lambda: True)
+    msg = client.post("/api/settings", json={"gentle": False}).json()["msg"]
+    assert "Обычный режим" in msg and "«Остановить»" in msg and "«Продолжить»" in msg
+    # Значение не поменялось — молчим
+    assert "msg" not in client.post("/api/settings", json={"gentle": False}).json()
+    assert "Бережный режим" in client.post("/api/settings", json={"gentle": True}).json()["msg"]
+
+
 def test_rescue_start_uses_saved_settings(client, monkeypatch):
     calls = {}
     monkeypatch.setattr(webui, "preflight_sources", lambda d, u: {"error": None, "notes": [], "run_disk": d, "run_unlim": u})

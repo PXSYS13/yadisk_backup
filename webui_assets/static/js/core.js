@@ -50,7 +50,14 @@
       if (m) return `${m} мин`;
       return 'меньше минуты';
     },
-    speed: (bps) => (bps ? `${App.fmt.bytes(bps)}/с` : ''),
+    // «8,5 МБ/с (71 Мбит/с)»: провайдер и Speedtest пишут скорость в мегабитах, и без
+    // перевода люди сравнивают МБ/с с тарифом и думают, что программа качает в 8 раз медленнее
+    speed(bps) {
+      if (!bps) return '';
+      const mbit = (bps * 8) / 1e6;
+      const m = mbit >= 10 ? String(Math.round(mbit)) : mbit.toFixed(1).replace('.', ',');
+      return `${App.fmt.bytes(bps)}/с (${m} Мбит/с)`;
+    },
     // Сколько уже в папке (rescue.sources.*.folder): «больше 31,0 ГБ», если папка
     // большая и программа не успела посчитать все файлы
     folderSize: (folder) => `${(folder || {}).size_partial ? 'больше ' : ''}${App.fmt.bytes((folder || {}).size_bytes || 0)}`,

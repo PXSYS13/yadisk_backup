@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import calendar
+import errno
 import json
 import logging
 import mimetypes
@@ -23,6 +24,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -136,6 +138,12 @@ def _port_from_env() -> int:
 
 
 PORT = _port_from_env()
+# Порт задан явно — не подменяем его. Иначе, если 8000 держит чужая программа (в Linux —
+# служба печати ghostscript-printer-app), main() берёт следующий свободный: 8001, 8002…
+PORT_FIXED = bool((os.environ.get("YADISK_PORT") or "").strip())
+PORT_TRIES = 20
+# Так вторая копия узнаёт первую на занятом порте (/api/hello)
+APP_ID = "yadisk-backup"
 
 log = logging.getLogger("webui")
 
@@ -223,6 +231,14 @@ app = FastAPI(title="Yandex.Disk Backup UI")
 
 _ALLOWED_ORIGINS = {f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}"}
 _ALLOWED_HOSTS = {f"localhost:{PORT}", f"127.0.0.1:{PORT}", "localhost", "127.0.0.1"}
+
+
+def _use_port(port: int) -> None:
+    """Порт выбран при запуске: проверка Host и Origin должна пускать именно его."""
+    global PORT, _ALLOWED_ORIGINS, _ALLOWED_HOSTS
+    PORT = port
+    _ALLOWED_ORIGINS = {f"http://localhost:{port}", f"http://127.0.0.1:{port}"}
+    _ALLOWED_HOSTS = {f"localhost:{port}", f"127.0.0.1:{port}", "localhost", "127.0.0.1"}
 
 
 @app.middleware("http")
@@ -2852,6 +2868,7 @@ def api_set_settings(p: SettingsPayload):
                     or p.disk_folders is not None or p.all_folders)
     if changes_what and pipeline.is_running():
         raise HTTPException(409, "Сначала остановите скачивание — потом можно изменить, что качать")
+    gentle_was = get_settings()["gentle"] if p.gentle is not None else None
     updates: dict[str, str] = {}
     folders_note = ""
     if p.all_folders:
@@ -2888,7 +2905,13 @@ def api_set_settings(p: SettingsPayload):
     # Имена папок в журнал не пишем: журнал уходит в отчёт для поддержки
     shown = [f"{k}={folders_note if k == 'BACKUP_DISK_FOLDERS' else v}" for k, v in updates.items()]
     log.info("настройки сохранены: %s", ", ".join(shown) or "без изменений")
-    return {"ok": True, "settings": get_settings()}
+    out = {"ok": True, "settings": get_settings()}
+    # Число одновременных скачиваний задаётся при запуске: идущее скачивание
+    # переключатель не меняет, и человек ждал бы, что интернет освободится сразу
+    if p.gentle is not None and p.gentle != gentle_was and pipeline.is_running():
+        out["msg"] = (f"{'Бережный' if p.gentle else 'Обычный'} режим заработает после перезапуска: "
+                      f"нажмите на Главной «Остановить», а потом «Продолжить». Скачанное сохранится.")
+    return out
 
 
 def _rescue_workers(settings: dict) -> tuple[int, int]:
@@ -4369,7 +4392,117 @@ if (TEMPLATES_DIR / "static").exists():
               name="static")
 
 
+@app.get("/api/hello")
+def api_hello():
+    """Кто держит порт: вторая копия программы находит по нему первую и не запускается."""
+    return {"app": APP_ID, "version": APP_VERSION, "folder": str(PROJECT)}
+
+
 # ── Запуск ──────────────────────────────────────────────────────────────────
+
+_ADDR_IN_USE = {errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", errno.EADDRINUSE)}
+
+
+def _bind_port(port: int) -> socket.socket | None:
+    """Занимает 127.0.0.1:port так же, как занял бы uvicorn; None — порт занят или запрещён.
+
+    SO_REUSEADDR — только не в Windows: в Linux и macOS без него порт после перезапуска
+    держали бы старые соединения, а в Windows с ним можно сесть на порт чужой программы.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if not IS_WINDOWS:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((HOST, port))
+    except OSError:
+        sock.close()
+        return None
+    return sock
+
+
+def _ipv6_port_taken(port: int) -> bool:
+    """Порт на ::1 держит другая программа — адрес localhost:порт в браузере открыл бы её."""
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    except OSError:  # IPv6 выключен
+        return False
+    try:
+        if not IS_WINDOWS:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("::1", port))
+    except OSError as e:
+        return e.errno in _ADDR_IN_USE
+    finally:
+        sock.close()
+    return False
+
+
+def _ask_port(port: int, path: str, timeout: float) -> dict | None:
+    """GET http://127.0.0.1:port/path: JSON-объект при ответе 200, иначе None."""
+    import http.client
+    conn = http.client.HTTPConnection(HOST, port, timeout=timeout)
+    try:
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return None
+        data = json.loads(resp.read())
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    finally:
+        conn.close()
+    return data if isinstance(data, dict) else None
+
+
+def _our_copy_on(port: int) -> dict | None:
+    """Порт держит другая копия этой программы? Её /api/hello или None."""
+    hello = _ask_port(port, "/api/hello", 2)
+    if hello is not None:
+        return hello if hello.get("app") == APP_ID else None
+    # Версии до 2.6.1 не знают /api/hello — узнаём их по /api/status
+    status = _ask_port(port, "/api/status", 5)
+    return {"app": APP_ID} if status is not None and "tasks" in status else None
+
+
+def choose_port(first: int, tries: int) -> tuple[socket.socket | None, int, dict | None]:
+    """Где запускаться.
+
+    (сокет, порт, None) — порт свободен и уже занят нами; (None, порт, сведения) — там
+    работает другая копия программы; (None, first, None) — все порты держат чужие программы.
+    Вторую копию не запускаем: две копии мешали бы друг другу в одних и тех же базах.
+    """
+    for port in range(first, min(first + tries, 65536)):
+        sock = _bind_port(port)
+        if sock is not None:
+            if not _ipv6_port_taken(port):
+                return sock, port, None
+            sock.close()
+            continue
+        ours = _our_copy_on(port)
+        if ours is not None:
+            return None, port, ours
+    return None, first, None
+
+
+def _show_running_copy(port: int, info: dict) -> None:
+    """Программа уже запущена — показываем её, а не запускаем вторую."""
+    url = f"http://{HOST}:{port}"
+    folder = str(info.get("folder") or "")
+    if folder and os.path.normcase(os.path.abspath(folder)) != os.path.normcase(str(PROJECT)):
+        print(f"  На {url} уже работает эта программа из другой папки:")
+        print(f"  {folder}")
+        print("  Открываю её. Чтобы запустить программу из этой папки, закройте окно той и запустите снова.")
+    else:
+        print(f"  Программа уже работает в другом окне: {url}")
+        print("  Открываю её в браузере. Это окно можно закрыть.")
+    log.info("порт %d: уже работает копия программы (%s), вторую не запускаю", port,
+             folder or "версия до 2.6.1")
+    if os.getenv("YADISK_NO_BROWSER") != "1":
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            pass
 
 
 def _open_browser_when_ready(host: str, port: int):
@@ -4403,7 +4536,24 @@ def main():
              platform.python_version(), platform.platform(), PROJECT)
 
     import uvicorn
+
+    wanted = PORT
+    sock, port, running = choose_port(wanted, 1 if PORT_FIXED else PORT_TRIES)
+    if running is not None:
+        _show_running_copy(port, running)
+        return
+    if sock is None:
+        last = wanted + (0 if PORT_FIXED else PORT_TRIES - 1)
+        if PORT_FIXED:
+            print(f"  Порт {wanted} из YADISK_PORT занят другой программой. Укажите другой порт или уберите YADISK_PORT.")
+        else:
+            print(f"  Порты {wanted}–{last} заняты другими программами. Закройте лишние программы и запустите снова.")
+        log.warning("не запустился: порты %d–%d заняты", wanted, last)
+        sys.exit(1)
+    _use_port(port)
     url = f"http://{HOST}:{PORT}"
+    if PORT != wanted:
+        log.info("порт %d занят другой программой, работаю на %d", wanted, PORT)
 
     # Монитор Яндекса: два лёгких запроса в минуту, история в logs/yandex_health.jsonl
     health_monitor = HealthMonitor(token_getter=lambda: get_config()["token"], log_path=HEALTH_LOG)
@@ -4415,6 +4565,10 @@ def main():
     print(f"  YouTube: {YOUTUBE_VIDEO_URL}")
     print("=" * 65)
     print()
+    if PORT != wanted:
+        print(f"  Порт {wanted} занят другой программой (в Linux так бывает со службой печати),")
+        print(f"  поэтому программа работает на {url}")
+        print()
     print("  Сервер запускается, браузер откроется автоматически.")
     print("  Чтобы остановить — закрой это окно или нажми Ctrl+C.")
     print()
@@ -4427,7 +4581,13 @@ def main():
             daemon=True,
         ).start()
 
-    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
+    # Порт уже занят нами в choose_port: uvicorn получает готовый сокет, и между
+    # проверкой и запуском его никто не перехватит
+    server = uvicorn.Server(uvicorn.Config(app, host=HOST, port=PORT, log_level="warning"))
+    try:
+        server.run(sockets=[sock])
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
