@@ -138,12 +138,32 @@ def _our_copy_on(port: int) -> dict | None:
     return {"app": APP_ID} if status is not None and "tasks" in status else None
 
 
+def same_folder(info: dict | None) -> bool:
+    """Копия программы на порту запущена из этой же папки, то есть над этими же базами.
+
+    Версии до 2.6.1 папку не сообщают — считаем, что из этой: лучше не запуститься,
+    чем открыть вторую копию над теми же базами.
+    """
+    folder = str((info or {}).get("folder") or "")
+    if not folder:
+        return True
+    return os.path.normcase(os.path.abspath(folder)) == os.path.normcase(os.path.abspath(str(paths.PROJECT)))
+
+
+def other_copy_on(port: int) -> dict | None:
+    """На порту работает эта же программа, но из другой папки — например, для второго аккаунта."""
+    info = _our_copy_on(port)
+    return info if info is not None and not same_folder(info) else None
+
+
 def choose_port(first: int, tries: int) -> tuple[socket.socket | None, int, dict | None]:
     """Где запускаться.
 
     (сокет, порт, None) — порт свободен и уже занят нами; (None, порт, сведения) — там
-    работает другая копия программы; (None, first, None) — все порты держат чужие программы.
-    Вторую копию не запускаем: две копии мешали бы друг другу в одних и тех же базах.
+    работает эта программа из этой же папки; (None, first, None) — все порты заняты.
+    Вторую копию над теми же базами не запускаем: две копии мешали бы друг другу. Копия
+    из другой папки — это другой аккаунт со своими ключом, базами и папкой для файлов:
+    рядом с ней можно работать, поэтому просто берём следующий порт.
     """
     for port in range(first, min(first + tries, 65536)):
         sock = bind_port(port)
@@ -153,24 +173,18 @@ def choose_port(first: int, tries: int) -> tuple[socket.socket | None, int, dict
             sock.close()
             continue
         ours = _our_copy_on(port)
-        if ours is not None:
+        if ours is not None and same_folder(ours):
             return None, port, ours
     return None, first, None
 
 
 def show_running_copy(port: int, info: dict) -> None:
-    """Программа уже запущена — показываем её, а не запускаем вторую."""
+    """Программа из этой папки уже запущена — показываем её, а не запускаем вторую."""
     url = f"http://{HOST}:{port}"
-    folder = str(info.get("folder") or "")
-    if folder and os.path.normcase(os.path.abspath(folder)) != os.path.normcase(str(paths.PROJECT)):
-        print(f"  На {url} уже работает эта программа из другой папки:")
-        print(f"  {folder}")
-        print("  Открываю её. Чтобы запустить программу из этой папки, закройте окно той и запустите снова.")
-    else:
-        print(f"  Программа уже работает в другом окне: {url}")
-        print("  Открываю её в браузере. Это окно можно закрыть.")
-    log.info("порт %d: уже работает копия программы (%s), вторую не запускаю", port,
-             folder or "версия до 2.6.1")
+    print(f"  Программа уже работает в другом окне: {url}")
+    print("  Открываю её в браузере. Это окно можно закрыть.")
+    log.info("порт %d: уже работает копия программы из этой папки (%s), вторую не запускаю", port,
+             info.get("version") or "версия до 2.6.1")
     if os.getenv("YADISK_NO_BROWSER") != "1":
         try:
             import webbrowser

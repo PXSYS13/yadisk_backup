@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import utils
+import webapp.paths
 import webapp.ports
 import webui
 
@@ -92,10 +93,34 @@ def test_fixed_port_held_by_foreign_program_gives_up():
 
 def test_running_copy_is_opened_instead_of_starting_a_second_one():
     port = _two_free_ports()
-    hello = {"app": webapp.ports.APP_ID, "version": "2.6.1", "folder": "/home/user/yadisk_backup"}
+    # Та же папка — те же базы: вторую копию не запускаем, открываем первую
+    hello = {"app": webapp.ports.APP_ID, "version": "2.7.3", "folder": str(webapp.paths.PROJECT)}
     with _Occupant(port, {"/api/hello": hello}):
         sock, chosen, running = webapp.ports.choose_port(port, 5)
-    assert sock is None and chosen == port and running["folder"] == "/home/user/yadisk_backup"
+    assert sock is None and chosen == port and running["folder"] == str(webapp.paths.PROJECT)
+
+
+def test_copy_from_another_folder_runs_next_to_it():
+    """Свой аккаунт и аккаунт жены — две папки программы: вторая работает рядом, на следующем порту."""
+    port = _two_free_ports()
+    hello = {"app": webapp.ports.APP_ID, "version": "2.7.3", "folder": "/home/user/yadisk_backup_wife"}
+    with _Occupant(port, {"/api/hello": hello}):
+        sock, chosen, running = webapp.ports.choose_port(port, 5)
+        try:
+            assert sock is not None and chosen == port + 1 and running is None
+            assert webapp.ports.other_copy_on(port)["folder"] == "/home/user/yadisk_backup_wife"
+        finally:
+            sock.close()
+
+
+def test_same_folder_compares_paths_not_strings():
+    project = str(webapp.paths.PROJECT)
+    assert webapp.ports.same_folder({"folder": project})
+    assert webapp.ports.same_folder({"folder": project + "/"})
+    assert not webapp.ports.same_folder({"folder": project + "_wife"})
+    # До 2.6.1 папку не сообщали — считаем той же: лучше не запуститься, чем делить базы
+    assert webapp.ports.same_folder({"app": webapp.ports.APP_ID})
+    assert webapp.ports.same_folder(None)
 
 
 def test_copy_of_an_old_version_is_recognized_by_status():

@@ -76,8 +76,11 @@ def main():
         sys.exit(1)
     ports.use_port(port)
     url = f"http://{ports.HOST}:{port}"
+    # Кто держит наш обычный порт: копия этой программы из другой папки (второй аккаунт) или чужая программа
+    neighbour = ports.other_copy_on(wanted) if port != wanted else None
     if port != wanted:
-        log.info("порт %d занят другой программой, работаю на %d", wanted, port)
+        log.info("порт %d занят %s, работаю на %d", wanted,
+                 "копией программы из другой папки" if neighbour else "другой программой", port)
 
     # Монитор Яндекса: два лёгких запроса в минуту, история в logs/yandex_health.jsonl
     diagnostics.start_health_monitor(lambda: config.get_config()["token"])
@@ -88,7 +91,12 @@ def main():
     print(f"  YouTube: {YOUTUBE_VIDEO_URL}")
     print("=" * 65)
     print()
-    if port != wanted:
+    if neighbour:
+        print(f"  На http://{ports.HOST}:{wanted} уже работает эта программа из другой папки:")
+        print(f"  {neighbour.get('folder')}")
+        print(f"  Эта копия работает рядом, на {url}. У каждой копии свои ключ доступа, папка и прогресс.")
+        print()
+    elif port != wanted:
         print(f"  Порт {wanted} занят другой программой (в Linux так бывает со службой печати),")
         print(f"  поэтому программа работает на {url}")
         print()
