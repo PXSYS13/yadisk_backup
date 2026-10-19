@@ -259,6 +259,42 @@
         останется где лежит и второй раз качаться не будет.</p>${btn}</div></div>`;
   };
 
+  // ── «Вышла версия X.Y.Z» (/api/status.update): только подсказка — программа сама
+  //    ничего не скачивает. На Главной её можно скрыть до следующей версии ──
+  App.UPDATE_ZIP_URL = 'https://github.com/PXSYS13/yadisk_backup/archive/refs/heads/main.zip';
+  const RELEASES_URL = 'https://github.com/PXSYS13/yadisk_backup/releases/latest';
+  const UPDATE_KEY = 'yadisk-update-hidden';
+  let updateMemory = '';
+  App.updateHidden = {
+    get() {
+      try {
+        const v = localStorage.getItem(UPDATE_KEY);
+        if (typeof v === 'string') updateMemory = v;
+      } catch (e) { /* без хранилища помним до перезагрузки страницы */ }
+      return updateMemory;
+    },
+    save(version) {
+      updateMemory = String(version || '');
+      try { localStorage.setItem(UPDATE_KEY, updateMemory); } catch (e) { /* то же */ }
+    },
+  };
+
+  App.updateBanner = (u, hideable = false) => {
+    if (!u || !u.latest) return '';
+    const hide = hideable
+      ? `<button class="link" data-action="update-hide" data-version="${esc(u.latest)}">Скрыть до следующей версии</button>` : '';
+    return `<section class="banner update" aria-label="Новая версия программы"><span class="b-icon">${icon('sparkles')}</span>
+      <div><h3>Вышла версия ${esc(u.latest)}</h3>
+        <p>У вас версия ${esc(u.current)}. Скачайте архив, закройте чёрное окно программы и распакуйте архив
+          поверх старой папки с заменой файлов, затем запустите программу снова. Ключ, данные входа, папка
+          и прогресс скачивания сохранятся.</p>
+        <div class="row actions">
+          <a class="btn" href="${esc(App.UPDATE_ZIP_URL)}" target="_blank" rel="noopener">${icon('download')}Скачать новую версию</a>
+          <a class="btn" href="${esc(u.url || RELEASES_URL)}" target="_blank" rel="noopener">${icon('external')}Что нового</a>
+          ${hide}
+        </div></div></section>`;
+  };
+
   // ── Лента «Что происходит» ──
   App.feedCard = (r) => {
     const items = ((r && r.events) || []).slice(0, 8).map((e) => `<li class="${esc(e.kind)}">

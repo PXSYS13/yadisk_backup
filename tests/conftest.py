@@ -19,6 +19,7 @@ def _isolate_project_files(tmp_path, monkeypatch):
     import public_download
     import supporters
     import webapp.paths
+    import webapp.updates
 
     monkeypatch.setattr(webapp.paths, "ENV_FILE", tmp_path / ".env")
     monkeypatch.setattr(webapp.paths, "COOKIES_FILE", tmp_path / "cookies.json")
@@ -35,6 +36,10 @@ def _isolate_project_files(tmp_path, monkeypatch):
     monkeypatch.setattr(supporters, "REMOTE_URL", "")
     monkeypatch.setattr(supporters, "LOCAL_FILE", tmp_path / "supporters.json")
     monkeypatch.setattr(supporters, "_cache", None)
+    # Проверка новой версии: без похода на GitHub, память о прошлых ответах — с нуля
+    monkeypatch.setattr(webapp.updates, "RELEASES_URL", "")
+    monkeypatch.setattr(webapp.updates, "_state", {"asked_at": None, "latest": None, "busy": False})
+    monkeypatch.setattr(webapp.updates, "_thread", None)
     # Настройки, которые программа пишет прямо в os.environ: после теста — как было.
     # Пустое значение = «по умолчанию» (всё качать, превью включены, демо выключено)
     for key in ("BACKUP_SOURCES", "BACKUP_CATEGORIES", "BACKUP_DISK_FOLDERS", "GENTLE_MODE",

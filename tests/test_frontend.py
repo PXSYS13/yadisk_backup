@@ -314,3 +314,75 @@ def test_details_shows_which_folders_are_complete():
     assert "в папке скачивания её уже нет" in root
     assert 'data-path="disk:/">Весь Диск</button>' in inner and "<b>Фото</b>" in inner
     assert "Файлы прямо в этой папке" in inner and "2022" in inner and "не скачались" not in inner
+
+
+# «Вышла версия X.Y.Z»: плашка на Главной и строка в «Помощи» — в node, хранилище подменено
+_UPDATE_HARNESS = r"""
+const path = require('path');
+global.window = globalThis;
+global.addEventListener = () => {};
+global.location = { search: '', hash: '', pathname: '/' };
+const nodes = {};
+const el = () => ({ innerHTML: '', textContent: '', className: '', dataset: {}, style: {},
+  addEventListener() {}, setAttribute() {}, classList: { add() {}, remove() {}, toggle() {} } });
+global.document = Object.assign(el(), { documentElement: el(), body: el(), createElement: el,
+  querySelectorAll: () => [], querySelector: () => null, getElementById: (id) => (nodes[id] = nodes[id] || el()) });
+const store = {};
+let broken = false;
+global.localStorage = {
+  getItem: (k) => { if (broken) throw new Error('нет доступа'); return k in store ? store[k] : null; },
+  setItem: (k, v) => { if (broken) throw new Error('нет доступа'); store[k] = String(v); },
+};
+global.matchMedia = () => ({ matches: false, addEventListener() {} });
+for (const f of ['core.js', 'components.js', 'screens/home.js', 'screens/help.js']) require(path.join(process.env.JS_DIR, f));
+const App = window.App;
+App.toast = () => {};
+const st = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const withUpdate = (latest) => Object.assign({}, st, { update: Object.assign({}, st.update, { latest }) });
+const home = (s) => { App.screens.home.update(s); return nodes['home-update'].innerHTML; };
+const help = (s) => { App.screens.help.update(s); return nodes['help-update'].innerHTML; };
+App.screens.help.mount(el());
+const out = { shown: home(st), help: help(st) };
+out.action = home(Object.assign({}, st, { rescue: Object.assign({}, st.rescue, { action: { id: 'token' } }) }));
+out.none = home(Object.assign({}, st, { update: null }));
+App.actions['update-hide']({ dataset: { version: st.update.latest } });
+out.stored = store['yadisk-update-hidden'];
+out.hidden = home(st);
+out.help_after_hide = help(st);
+out.next = home(withUpdate('99.0.0'));
+broken = true;  // приватный режим: хранилище бросает исключения
+out.broken = home(withUpdate('98.0.0'));
+App.actions['update-hide']({ dataset: { version: '98.0.0' } });
+out.broken_hidden = home(withUpdate('98.0.0'));
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_update_banner_on_home_and_in_help(monkeypatch):
+    monkeypatch.setenv("YADISK_DEMO", "1")
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    st = client.get("/api/status?demo=update").json()
+    latest = st["update"]["latest"]
+    res = subprocess.run(["node", "-e", _UPDATE_HARNESS], input=json.dumps(st), capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    shown = out["shown"]
+    assert f"Вышла версия {latest}" in shown and f"У вас версия {utils.APP_VERSION}" in shown
+    # Программа только подсказывает: архив скачивает сам человек по ссылке
+    assert 'href="https://github.com/PXSYS13/yadisk_backup/archive/refs/heads/main.zip"' in shown
+    assert f'href="{st["update"]["url"]}"' in shown and "Что нового" in shown
+    assert "поверх старой папки" in shown and "прогресс скачивания сохранятся" in shown
+    assert f'data-action="update-hide" data-version="{latest}"' in shown
+    # В «Помощи» та же строка, но без «Скрыть»: туда приходят с проблемой, а новая версия может её решать
+    assert f"Вышла версия {latest}" in out["help"] and "update-hide" not in out["help"]
+    # Пока нужно действие — плашки нет; новой версии нет — тоже
+    assert out["action"] == "" and out["none"] == ""
+    # «Скрыть до следующей версии»: эту версию больше не показываем, следующую — снова
+    assert out["stored"] == latest and out["hidden"] == ""
+    assert f"Вышла версия {latest}" in out["help_after_hide"]
+    assert "Вышла версия 99.0.0" in out["next"]
+    # Хранилище недоступно — плашка работает, а скрытие помнится до перезагрузки страницы
+    assert "Вышла версия 98.0.0" in out["broken"] and out["broken_hidden"] == ""

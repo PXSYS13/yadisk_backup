@@ -11,7 +11,7 @@ import time
 from fastapi import APIRouter
 
 from utils import APP_VERSION, DONATION_URL, LINKS_DIRNAME, TELEGRAM_CHANNEL, TELEGRAM_HANDLE, YOUTUBE_VIDEO_URL
-from webapp import access, config, diagnostics, paths
+from webapp import access, config, diagnostics, paths, updates
 from webapp.demo import DEMO_STATES, demo_rescue
 from webapp.folders import disk_folders_summary
 from webapp.links import demo_links, links_status
@@ -90,4 +90,6 @@ def api_status(demo: str | None = None):
         "free_space": free,
         "news": diagnostics.NEWS_LINKS,
         "exit_codes": {str(code): text for code, text in diagnostics.EXIT_EXPLAIN.items()},
+        # Вышла новая версия: {current, latest, url}, иначе None. GitHub спрашивается в фоне
+        "update": (updates.demo() if demo == "update" else None) if demo_data else updates.snapshot(),
     }

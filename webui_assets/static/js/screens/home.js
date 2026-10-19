@@ -204,9 +204,23 @@
     App.toast('Спасибо, что поддерживаете проект!', 'ok');
   });
 
+  // «Вышла версия X.Y.Z»: не мешает, пока нужно ваше действие; скрытая — до следующей версии
+  function updateNote(s, r, offline) {
+    const u = s.update;
+    if (offline || !u || r.action || App.updateHidden.get() === u.latest) return '';
+    return App.updateBanner(u, true);
+  }
+
+  App.action('update-hide', (el) => {
+    App.updateHidden.save(el.dataset.version);
+    App.html(byId('home-update'), '');
+    App.toast('Скрыто до следующей версии. Ссылка на обновление осталась в «Помощи»', 'ok');
+  });
+
   App.screens.home = {
     mount(el) {
       el.innerHTML = `<div id="home-banner"></div>
+        <div id="home-update"></div>
         <section class="card hero" id="home-hero" aria-labelledby="home-headline">
           <div class="hero-top"><span id="home-pill"></span><span id="home-beat"></span></div>
           <div class="hero-body">
@@ -237,6 +251,7 @@
       const offline = App.state.offline;
       const setup = isSetup(r);
       App.html(byId('home-banner'), offline ? '' : App.actionBanner(r.action, s));
+      App.html(byId('home-update'), updateNote(s, r, offline));
       byId('home-hero').className = `card hero state-${offline ? 'needs_action' : r.state || 'idle'}`;
       App.html(byId('home-pill'), pill(r, offline));
       App.html(byId('home-beat'), heartbeat(r, offline));

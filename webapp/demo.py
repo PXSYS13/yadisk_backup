@@ -12,7 +12,8 @@ from webapp.queue_db import empty_db_stats
 from webapp.rescue_view import build_rescue_status
 
 DEMO_STATES = ("setup", "ready", "listing", "downloading", "low_space", "waiting", "token", "cookies",
-               "disk_full", "done", "done_partial", "stopped")
+               "disk_full", "done", "done_partial", "stopped", "update")
+# update — как ready, и на GitHub «вышла» новая версия (/api/status.update — webapp.updates.demo)
 
 _DEMO_DISK_FILES = ("Документы/Договор аренды.pdf", "Фото/2023/Отпуск/IMG_2041.JPG",
                     "Фото/2023/Отпуск/IMG_2042.JPG", "Видео/День рождения.mp4", "Музыка/Плейлист.m3u")

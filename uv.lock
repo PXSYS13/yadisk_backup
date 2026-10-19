@@ -770,7 +770,7 @@ sync-defaults = [
 
 [[package]]
 name = "yadisk-backup"
-version = "2.7.1"
+version = "2.7.2"
 source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
