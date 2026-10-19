@@ -13,6 +13,14 @@ from fastapi.testclient import TestClient
 
 import downloader
 import main
+import webapp.access
+import webapp.folders
+import webapp.listing
+import webapp.paths
+import webapp.queue_db
+import webapp.rescue
+import webapp.rescue_view
+import webapp.tasks
 import webui
 from state import CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER, SELECTION_MARKERS, State
 from utils import (
@@ -30,7 +38,7 @@ class Script:
     def __init__(self, monkeypatch, rescue, codes):
         self.codes = {slot: list(seq) for slot, seq in codes.items()}
         self.started = []
-        monkeypatch.setattr(webui.tm, "start", self._start)
+        monkeypatch.setattr(webapp.tasks.tm, "start", self._start)
         monkeypatch.setattr(rescue, "_wait_task", self._wait)
         monkeypatch.setattr(rescue, "_wait_workers", lambda ids: [0 for _ in ids])
 
@@ -244,7 +252,7 @@ def test_scan_reports_missing_and_shared_folders_at_the_end(monkeypatch, capsys,
     assert 'folder_missing | {"path": "disk:/B"}' in lines
     assert 'shared_folders | {"names": ["Общая"]}' in lines
     assert lines.index('folder_missing | {"path": "disk:/B"}') > lines.index("Найдено: 2")
-    assert webui._listing_found({"log_tail": lines}) == 2
+    assert webapp.rescue_view.listing_found({"log_tail": lines}) == 2
 
 
 # ── webui: очередь по выбору папок ──────────────────────────────────────────
@@ -277,12 +285,12 @@ def test_folder_filter_uses_exact_prefixes_and_can_be_undone(tmp_path):
         ("disk:/фото/e.jpg", 1, "pending", None), ("disk:/Other/f.jpg", 1, "failed", "server_50x | x"),
         ("disk:/Other/g.jpg", 1, "downloaded", None), ("disk:/Фото/h.jpg", 1, "failed", "x"),
     ])
-    assert webui.filter_to_folders(db, ["disk:/Фото", "disk:/50%_off"]) == (4, 2)
+    assert webapp.queue_db.filter_to_folders(db, ["disk:/Фото", "disk:/50%_off"]) == (4, 2)
     st = _statuses(db)
     assert {p for p, (s, e) in st.items() if e == FOLDER_SKIP_MARKER} == {
         "disk:/Фото2/b.jpg", "disk:/50X_off/d.jpg", "disk:/фото/e.jpg", "disk:/Other/f.jpg"}
     assert st["disk:/Other/g.jpg"] == ("downloaded", None) and st["disk:/Фото/h.jpg"][0] == "failed"
-    assert webui.unskip_markers(db, "files", SELECTION_MARKERS) == 4
+    assert webapp.queue_db.unskip_markers(db, "files", SELECTION_MARKERS) == 4
     assert all(s != "skipped" for s, _e in _statuses(db).values())
 
 
@@ -290,18 +298,18 @@ def test_db_stats_counts_both_selection_markers_as_not_chosen(tmp_path):
     db = tmp_path / "state.db"
     _disk_db(db, [("disk:/a", 10, "skipped", FOLDER_SKIP_MARKER), ("disk:/b", 5, "skipped", CATEGORY_SKIP_MARKER),
                   ("disk:/c", 3, "skipped", None), ("disk:/d", 7, "pending", None)])
-    s = webui.db_stats(db, "files", "remote_path")
+    s = webapp.queue_db.db_stats(db, "files", "remote_path")
     assert (s["category_skipped"], s["category_skipped_bytes"]) == (2, 15)
     assert (s["folder_skipped"], s["folder_skipped_bytes"]) == (1, 10)
     assert s["bytes_done"] == 3 and s["bytes_selected_total"] == 25 - 15
-    block = webui._source_block("disk", s, None, True, "", None, None)
+    block = webapp.rescue_view.source_block("disk", s, None, True, "", None, None)
     assert block["files"]["excluded"] == 2
 
 
 def test_category_counts_ignore_files_outside_chosen_folders(tmp_path):
     db = tmp_path / "state.db"
     _disk_db(db, [("disk:/A/a.jpg", 1, "pending", None), ("disk:/B/b.jpg", 1, "skipped", FOLDER_SKIP_MARKER)])
-    assert webui.preview_db(db, "files", "remote_path")["categories"]["photos"]["count"] == 1
+    assert webapp.queue_db.preview_db(db, "files", "remote_path")["categories"]["photos"]["count"] == 1
 
 
 # ── webui: настройки и дерево папок ─────────────────────────────────────────
@@ -318,12 +326,12 @@ def test_settings_store_folders_and_validate(client, monkeypatch):
     want = ["disk:/Договоры 'старые'", "disk:/Отчёты, 2024", "disk:/Фото"]
     assert st["disk_folders"] == want
     assert client.get("/api/settings").json()["disk_folders"] == want
-    assert decode_disk_folders(dotenv_values(webui.ENV_FILE)["BACKUP_DISK_FOLDERS"]) == want
+    assert decode_disk_folders(dotenv_values(webapp.paths.ENV_FILE)["BACKUP_DISK_FOLDERS"]) == want
     for bad in ([], ["/"], ["disk:/Корзина"]):
         r = client.post("/api/settings", json={"disk_folders": bad})
         assert r.status_code == 400 and r.json()["detail"]
     assert client.post("/api/settings", json={"all_folders": True}).json()["settings"]["disk_folders"] is None
-    monkeypatch.setattr(webui.pipeline, "is_running", lambda: True)
+    monkeypatch.setattr(webapp.rescue.rescue, "is_running", lambda: True)
     assert client.post("/api/settings", json={"disk_folders": ["/A"]}).status_code == 409
 
 
@@ -335,9 +343,9 @@ def test_folder_names_stay_out_of_the_server_log(client, caplog):
 
 def test_every_start_button_passes_the_saved_folders(client, monkeypatch):
     calls = []
-    monkeypatch.setattr(webui, "preflight_sources", lambda d, u: {"error": None, "notes": [], "run_disk": d, "run_unlim": u})
-    monkeypatch.setattr(webui.pipeline, "start", lambda **kw: (calls.append(kw), (True, "ok"))[1])
-    monkeypatch.setattr(webui.tm, "any_alive", lambda prefix: False)
+    monkeypatch.setattr(webapp.access, "preflight_sources", lambda d, u: {"error": None, "notes": [], "run_disk": d, "run_unlim": u})
+    monkeypatch.setattr(webapp.rescue.rescue, "start", lambda **kw: (calls.append(kw), (True, "ok"))[1])
+    monkeypatch.setattr(webapp.tasks.tm, "any_alive", lambda prefix: False)
     client.post("/api/settings", json={"disk_folders": ["/A"]})
     client.post("/api/rescue/start")
     client.post("/api/start", json={})
@@ -353,7 +361,7 @@ def test_folder_tree_needs_a_token(client):
 def test_folder_tree_lists_folders_and_explains_errors(client, monkeypatch):
     monkeypatch.setenv("YA_DISK_TOKEN", "y0_test")
     disk = FakeDisk({"disk:/Работа": [_dir("disk:/Работа/2024"), _file("disk:/Работа/a.pdf")]})
-    monkeypatch.setattr(webui, "make_browse_client", lambda token: disk)
+    monkeypatch.setattr(webapp.folders, "make_browse_client", lambda token: disk)
     r = client.get("/api/disk/folders", params={"path": "/Работа"}).json()
     assert r == {"ok": True, "path": "disk:/Работа", "truncated": False,
                  "folders": [{"name": "2024", "path": "disk:/Работа/2024", "shared": False, "owned": False}]}
@@ -367,9 +375,9 @@ def test_folder_tree_lists_folders_and_explains_errors(client, monkeypatch):
         def listdir(self, path, **kw):
             raise self.exc
 
-    monkeypatch.setattr(webui, "make_browse_client", lambda token: Broken(yadisk.exceptions.UnauthorizedError("401")))
+    monkeypatch.setattr(webapp.folders, "make_browse_client", lambda token: Broken(yadisk.exceptions.UnauthorizedError("401")))
     assert client.get("/api/disk/folders").json()["action"] == "token"
-    monkeypatch.setattr(webui, "make_browse_client", lambda token: Broken(RuntimeError("boom")))
+    monkeypatch.setattr(webapp.folders, "make_browse_client", lambda token: Broken(RuntimeError("boom")))
     r = client.get("/api/disk/folders").json()
     assert r["ok"] is False and "Яндекс" in r["msg"] and "boom" not in r["msg"]
 
@@ -387,9 +395,9 @@ def test_folder_tree_demo(client, monkeypatch):
 
 
 def _make_rescue(monkeypatch):
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": True, "login": "t", "used": 1})
-    monkeypatch.setattr(webui, "check_cookies", lambda: {"ok": True, "msg": "ok", "count": 5})
-    r = webui.Rescue()
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": True, "login": "t", "used": 1})
+    monkeypatch.setattr(webapp.access, "check_cookies", lambda: {"ok": True, "msg": "ok", "count": 5})
+    r = webapp.rescue.Rescue()
     r.retry_every = 0.05
     r.workers = 1
     r.skip_unlim = True
@@ -412,7 +420,7 @@ def test_selected_folders_are_listed_by_root(rescue, monkeypatch):
 
 def test_listing_plan_scans_only_what_is_missing():
     now = 1_000_000.0
-    plan = webui.disk_listing_plan
+    plan = webapp.listing.disk_listing_plan
     whole = {"at": now - 60, "whole": True, "folders": []}
     some = {"at": now - 60, "whole": False, "folders": ["disk:/A"]}
     assert plan(None, None, now) == ("all", None)                    # списка нет — весь выбор
@@ -423,7 +431,7 @@ def test_listing_plan_scans_only_what_is_missing():
     assert plan(["disk:/A", "disk:/B"], some, now) == ("new", ["disk:/B"])  # только новая папка
     # Весь Диск собран, а потом выбрали папку: её досканируем — в неё могли что-то скопировать
     assert plan(["disk:/Загрузки/Project1"], whole, now) == ("new", ["disk:/Загрузки/Project1"])
-    assert plan(None, dict(whole, at=now - webui.RESCUE_RELIST_SEC - 1), now) == ("all", None)
+    assert plan(None, dict(whole, at=now - webapp.listing.RESCUE_RELIST_SEC - 1), now) == ("all", None)
     assert plan(None, dict(whole, at=now + 3600), now) == ("all", None)  # часы ушли назад
 
 
@@ -431,57 +439,57 @@ def test_list_is_remembered_across_restarts(rescue, monkeypatch):
     sc = Script(monkeypatch, rescue, {"disk": [0, 0]})
     rescue._run()
     assert sc.steps("disk") == [("disk", "scan"), ("disk", "download")]
-    rec = webui.read_listing("disk")
+    rec = webapp.listing.read_listing("disk")
     assert rec["whole"] and rec["folders"] == []
     again = _make_rescue(monkeypatch)  # перезапуск программы: новый объект, та же база
     sc2 = Script(monkeypatch, again, {"disk": [0]})
     again._run()
     assert sc2.steps("disk") == [("disk", "download")]
     assert any(e["text"].startswith("Список файлов собран") for e in again.events)
-    assert webui.db_stats(webui.DB_FILE)["listed_at"] == rec["at"]
+    assert webapp.queue_db.db_stats(webapp.paths.DB_FILE)["listed_at"] == rec["at"]
 
 
 def test_forgetting_the_list_forgets_when_it_was_collected(rescue, monkeypatch):
     Script(monkeypatch, rescue, {"disk": [0, 0]})
     rescue._run()
-    assert webui.read_listing("disk")
+    assert webapp.listing.read_listing("disk")
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     assert client.post("/api/disk/clear").json()["ok"]
-    assert webui.read_listing("disk") is None
+    assert webapp.listing.read_listing("disk") is None
 
 
 def test_only_the_new_folder_is_scanned(rescue, monkeypatch):
-    webui.write_listing("disk", {"at": time.time(), "whole": False, "folders": ["disk:/A"]})
+    webapp.listing.write_listing("disk", {"at": time.time(), "whole": False, "folders": ["disk:/A"]})
     sc = Script(monkeypatch, rescue, {"disk": [0, 0]})
     rescue.disk_folders = ["disk:/A", "disk:/B"]
     rescue._run()
     assert ("disk", "main.py", ("scan", "--root=disk:/B")) in sc.started
-    assert webui.read_listing("disk")["folders"] == ["disk:/A", "disk:/B"]
+    assert webapp.listing.read_listing("disk")["folders"] == ["disk:/A", "disk:/B"]
 
 
 def test_folder_chosen_after_whole_disk_listing_is_scanned_alone(rescue, monkeypatch):
     """Project1 скопировали на Диск уже после сбора — отмеченную папку досканируем, весь Диск — нет."""
-    webui.write_listing("disk", {"at": time.time(), "whole": True, "folders": []})
+    webapp.listing.write_listing("disk", {"at": time.time(), "whole": True, "folders": []})
     sc = Script(monkeypatch, rescue, {"disk": [0, 0]})
     rescue.disk_folders = ["disk:/Загрузки/Project1"]
     rescue._run()
     assert [a for _s, _sc, a in sc.started if a[0] == "scan"] == [("scan", "--root=disk:/Загрузки/Project1")]
-    rec = webui.read_listing("disk")
+    rec = webapp.listing.read_listing("disk")
     assert rec["whole"] and rec["folders"] == ["disk:/Загрузки/Project1"]
 
 
 def test_missing_new_folder_is_not_remembered(rescue, monkeypatch):
-    webui.write_listing("disk", {"at": time.time(), "whole": False, "folders": ["disk:/A"]})
+    webapp.listing.write_listing("disk", {"at": time.time(), "whole": False, "folders": ["disk:/A"]})
     Script(monkeypatch, rescue, {"disk": [0, 0]})
     monkeypatch.setattr(rescue, "_task_lines", lambda slot: ['folder_missing | {"path": "disk:/B"}'])
     rescue.disk_folders = ["disk:/A", "disk:/B"]
     rescue._run()
-    assert webui.read_listing("disk")["folders"] == ["disk:/A"]  # следующий запуск проверит B снова
+    assert webapp.listing.read_listing("disk")["folders"] == ["disk:/A"]  # следующий запуск проверит B снова
 
 
 def test_relist_during_download_lists_again_right_after(rescue, monkeypatch):
     sc = Script(monkeypatch, rescue, {"disk": [0, 5, 0, 0]})  # список, скачивание (ждут Яндекса), …
-    start = webui.tm.start
+    start = webapp.tasks.tm.start
 
     def press_relist_on_first_download(slot, script, args):
         if args[0] == "download" and not any(a[0] == "download" for _s, _sc, a in sc.started):
@@ -489,7 +497,7 @@ def test_relist_during_download_lists_again_right_after(rescue, monkeypatch):
             rescue.branches["disk"].relist = True
         return start(slot, script, args)
 
-    monkeypatch.setattr(webui.tm, "start", press_relist_on_first_download)
+    monkeypatch.setattr(webapp.tasks.tm, "start", press_relist_on_first_download)
     rescue._run()
     # Без паузы между попытками: сразу новый список и снова скачивание
     assert sc.steps("disk") == [("disk", "scan"), ("disk", "download"), ("disk", "scan"), ("disk", "download")]
@@ -497,33 +505,33 @@ def test_relist_during_download_lists_again_right_after(rescue, monkeypatch):
 
 
 def test_relist_when_idle_forgets_and_asks_the_caller_to_start(rescue):
-    webui.write_listing("disk", {"at": time.time(), "whole": True, "folders": []})
+    webapp.listing.write_listing("disk", {"at": time.time(), "whole": True, "folders": []})
     assert rescue.relist("disk") == (None, "")
-    assert webui.read_listing("disk") is None
+    assert webapp.listing.read_listing("disk") is None
 
 
 def test_relist_api_starts_saving_when_idle(monkeypatch):
     calls = []
-    monkeypatch.setattr(webui.pipeline, "start", lambda **kw: calls.append(kw) or (True, "Спасение запущено"))
-    monkeypatch.setattr(webui, "preflight_sources", lambda disk, unlim: {"error": None, "notes": []})
-    webui.write_listing("disk", {"at": time.time(), "whole": True, "folders": []})
+    monkeypatch.setattr(webapp.rescue.rescue, "start", lambda **kw: calls.append(kw) or (True, "Спасение запущено"))
+    monkeypatch.setattr(webapp.access, "preflight_sources", lambda disk, unlim: {"error": None, "notes": []})
+    webapp.listing.write_listing("disk", {"at": time.time(), "whole": True, "folders": []})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     assert client.post("/api/rescue/relist", json={"source": "disk"}).json()["ok"]
-    assert calls and webui.read_listing("disk") is None
+    assert calls and webapp.listing.read_listing("disk") is None
     assert client.post("/api/rescue/relist", json={"source": "files"}).status_code == 422
 
 
 def test_check_new_files_forgets_both_lists_and_starts_once(monkeypatch):
     """«Проверить новые файлы» на экране «Готово»: оба списка собираются заново."""
     calls = []
-    monkeypatch.setattr(webui.pipeline, "start", lambda **kw: calls.append(kw) or (True, "Спасение запущено"))
-    monkeypatch.setattr(webui, "preflight_sources", lambda disk, unlim: {"error": None, "notes": []})
+    monkeypatch.setattr(webapp.rescue.rescue, "start", lambda **kw: calls.append(kw) or (True, "Спасение запущено"))
+    monkeypatch.setattr(webapp.access, "preflight_sources", lambda disk, unlim: {"error": None, "notes": []})
     for source in ("disk", "unlim"):
-        webui.write_listing(source, {"at": time.time(), "whole": True, "folders": []})
+        webapp.listing.write_listing(source, {"at": time.time(), "whole": True, "folders": []})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     assert client.post("/api/rescue/relist", json={"source": "all"}).json()["ok"]
     assert len(calls) == 1
-    assert webui.read_listing("disk") is None and webui.read_listing("unlim") is None
+    assert webapp.listing.read_listing("disk") is None and webapp.listing.read_listing("unlim") is None
 
 
 @pytest.mark.parametrize("state, flag, woken, ok", [
@@ -572,7 +580,7 @@ def test_all_chosen_folders_gone_asks_to_choose_again(rescue, monkeypatch):
     disk = rescue.status()["branches"]["disk"]
     assert disk["state"] == "needs_action" and disk["action"] == "folders"
     assert ("disk", "download") not in sc.steps("disk")
-    assert "folders" in webui._RESCUE_ACTIONS
+    assert "folders" in webapp.rescue_view.RESCUE_ACTIONS
 
 
 def test_some_folders_gone_and_shared_folders_found_become_events(rescue, monkeypatch):
@@ -592,7 +600,7 @@ def test_queue_follows_folders_then_categories(rescue, monkeypatch, tmp_path):
     _disk_db(db, [("disk:/A/x.jpg", 1, "pending", None), ("disk:/A/y.pdf", 1, "pending", None),
                   ("disk:/B/z.jpg", 1, "pending", None), ("disk:/B/w.jpg", 1, "skipped", FOLDER_SKIP_MARKER),
                   ("disk:/A/v.jpg", 1, "skipped", CATEGORY_SKIP_MARKER)])
-    monkeypatch.setattr(webui, "DB_FILE", db)
+    monkeypatch.setattr(webapp.paths, "DB_FILE", db)
     rescue.disk_folders = ["disk:/A"]
     rescue.disk_categories = ["photos"]
     rescue._apply_disk_selection()

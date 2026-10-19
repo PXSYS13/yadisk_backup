@@ -9,6 +9,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 import public_download as pd
+import webapp.access
+import webapp.config
+import webapp.control
+import webapp.diagnostics
+import webapp.links
+import webapp.paths
+import webapp.rescue
+import webapp.tasks
 import webui
 from utils import LINKS_DIRNAME
 
@@ -24,8 +32,8 @@ def client():
 def started(monkeypatch):
     """Запуски задач вместо настоящих процессов."""
     calls = []
-    monkeypatch.setattr(webui.tm, "start", lambda slot, script, args: (calls.append((slot, script, list(args))), (True, "ok"))[1])
-    monkeypatch.setattr(webui.tm, "any_alive", lambda prefix: False)
+    monkeypatch.setattr(webapp.tasks.tm, "start", lambda slot, script, args: (calls.append((slot, script, list(args))), (True, "ok"))[1])
+    monkeypatch.setattr(webapp.tasks.tm, "any_alive", lambda prefix: False)
     return calls
 
 
@@ -46,12 +54,12 @@ class FakeApi:
 @pytest.fixture()
 def api(monkeypatch):
     FakeApi.answer = {"name": "Свадьба", "type": "dir"}
-    monkeypatch.setattr(webui, "PublicApi", FakeApi)
+    monkeypatch.setattr(webapp.links, "PublicApi", FakeApi)
     return FakeApi
 
 
 def _db():
-    return pd.connect_db(webui.LINKS_DB_FILE)
+    return pd.connect_db(webapp.paths.LINKS_DB_FILE)
 
 
 def test_adding_a_link_checks_it_and_starts_downloading(client, started, api):
@@ -95,8 +103,8 @@ def test_link_is_added_even_when_yandex_is_silent(client, started, api):
 
 def test_adding_while_downloading_pokes_the_running_task(client, monkeypatch, api):
     calls = []
-    monkeypatch.setattr(webui.tm, "start", lambda *a: calls.append(a) or (True, "ok"))
-    monkeypatch.setattr(webui.tm, "any_alive", lambda prefix: prefix == webui.SLOT_LINKS)
+    monkeypatch.setattr(webapp.tasks.tm, "start", lambda *a: calls.append(a) or (True, "ok"))
+    monkeypatch.setattr(webapp.tasks.tm, "any_alive", lambda prefix: prefix == webapp.tasks.SLOT_LINKS)
     assert client.post("/api/links/add", json={"url": LINK}).json()["ok"]
     assert not calls
     conn = _db()
@@ -147,8 +155,8 @@ def test_relist_and_resume_and_stop(client, started, api, monkeypatch):
     assert client.post("/api/links/resume").json()["ok"]
     assert "и так остановлено" in client.post("/api/links/stop").json()["msg"]
     stopped = []
-    monkeypatch.setattr(webui.tm, "any_alive", lambda prefix: True)
-    monkeypatch.setattr(webui.tm, "stop", lambda slot: stopped.append(slot) or (True, "ok"))
+    monkeypatch.setattr(webapp.tasks.tm, "any_alive", lambda prefix: True)
+    monkeypatch.setattr(webapp.tasks.tm, "stop", lambda slot: stopped.append(slot) or (True, "ok"))
     assert client.post("/api/links/stop").json()["ok"] and stopped == ["links"]
 
 
@@ -173,7 +181,7 @@ def _row(**kw):
     (_row(done=10), None, {}, "done", "все файлы скачаны"),
 ])
 def test_link_states_are_told_in_plain_words(row, task, meta, state, words):
-    st = webui.build_links_status([row], meta, task, 1000.0, "/dl/_ссылки")
+    st = webapp.links.build_links_status([row], meta, task, 1000.0, "/dl/_ссылки")
     item = st["items"][0]
     assert item["state"] == state and words in item["status_text"]
     assert st["folder"] == "/dl/_ссылки"
@@ -181,12 +189,12 @@ def test_link_states_are_told_in_plain_words(row, task, meta, state, words):
 
 def test_whole_links_block_reports_running_waiting_and_a_full_disk():
     rows = [_row(pending=3, deferred=3)]
-    waiting = webui.build_links_status(rows, {"state": "waiting", "next_retry_at": "5000"},
+    waiting = webapp.links.build_links_status(rows, {"state": "waiting", "next_retry_at": "5000"},
                                        {"running": True, "last_line_at": 990.0}, 1000.0, "f")
     assert (waiting["state"], waiting["next_retry_at"], waiting["last_activity_at"]) == ("waiting", 5000.0, 990.0)
-    full = webui.build_links_status(rows, {}, {"running": False, "exit_code": 4}, 1000.0, "f")
+    full = webapp.links.build_links_status(rows, {}, {"running": False, "exit_code": 4}, 1000.0, "f")
     assert full["state"] == "paused" and full["problem"]["kind"] == "local_disk"
-    assert webui.build_links_status([], {}, None, 1000.0, "f")["state"] == "idle"
+    assert webapp.links.build_links_status([], {}, None, 1000.0, "f")["state"] == "idle"
 
 
 def test_status_carries_the_links_block(client, started, api):
@@ -205,17 +213,17 @@ def test_demo_status_shows_every_link_state(client, monkeypatch):
 def test_link_log_lines_do_not_become_disk_banners(monkeypatch):
     fake = SimpleNamespace(alive=lambda: True, finished_at=None,
                            log=deque(["storage_down | Отложено 5 файлов"] * 5 + ["refused | x"] * 5))
-    monkeypatch.setitem(webui.tm._tasks, webui.SLOT_LINKS, fake)
-    assert webui.tm.recent_log_lines(40, exclude=(webui.SLOT_LINKS,)) == []
-    assert webui.diagnose_tasks().get("kind") not in ("storage_down", "refused", "bulk_disabled")
+    monkeypatch.setitem(webapp.tasks.tm._tasks, webapp.tasks.SLOT_LINKS, fake)
+    assert webapp.tasks.tm.recent_log_lines(40, exclude=(webapp.tasks.SLOT_LINKS,)) == []
+    assert webapp.diagnostics.diagnose_tasks().get("kind") not in ("storage_down", "refused", "bulk_disabled")
 
 
 def test_open_folder_of_a_link_comes_from_the_database_only(client, started, api, monkeypatch, tmp_path):
     opened = []
-    monkeypatch.setattr(webui.os, "startfile", lambda p: opened.append(p), raising=False)
-    monkeypatch.setattr(webui.subprocess, "Popen", lambda args: opened.append(args[-1]))
+    monkeypatch.setattr(webapp.control.os, "startfile", lambda p: opened.append(p), raising=False)
+    monkeypatch.setattr(webapp.control.subprocess, "Popen", lambda args: opened.append(args[-1]))
     client.post("/api/links/add", json={"url": LINK})
-    base = Path(webui.get_config()["download_dir"])
+    base = Path(webapp.config.get_config()["download_dir"])
     (base / LINKS_DIRNAME / "Свадьба").mkdir(parents=True)
     assert client.post("/api/open_folder", json={"which": "links", "link_id": 1}).json()["ok"]
     assert opened[-1].endswith(str(Path(LINKS_DIRNAME) / "Свадьба"))
@@ -227,7 +235,7 @@ def test_open_folder_of_a_link_comes_from_the_database_only(client, started, api
 
 
 def test_folder_change_and_sorting_wait_for_link_downloads(client, monkeypatch, tmp_path):
-    monkeypatch.setattr(webui.tm, "any_alive", lambda prefix: prefix == webui.SLOT_LINKS)
+    monkeypatch.setattr(webapp.tasks.tm, "any_alive", lambda prefix: prefix == webapp.tasks.SLOT_LINKS)
     r = client.post("/api/config/download_dir", json={"download_dir": str(tmp_path / "new")})
     assert r.status_code == 409 and "ссылкам" in r.json()["detail"]
     (tmp_path / "sort").mkdir()
@@ -237,21 +245,21 @@ def test_folder_change_and_sorting_wait_for_link_downloads(client, monkeypatch, 
 
 def test_stopping_the_rescue_leaves_link_downloads_alone(monkeypatch):
     prefixes = []
-    monkeypatch.setattr(webui.tm, "stop_matching", lambda prefix: prefixes.append(prefix) or [])
-    r = webui.Rescue()
+    monkeypatch.setattr(webapp.tasks.tm, "stop_matching", lambda prefix: prefixes.append(prefix) or [])
+    r = webapp.rescue.Rescue()
     r._thread = SimpleNamespace(is_alive=lambda: True, join=lambda timeout=None: None)
     r.stop()
-    assert prefixes and not any(webui.SLOT_LINKS.startswith(p) for p in prefixes)
+    assert prefixes and not any(webapp.tasks.SLOT_LINKS.startswith(p) for p in prefixes)
 
 
 def test_old_wizard_is_not_blocked_by_link_downloads(client, monkeypatch):
-    monkeypatch.setattr(webui.tm, "any_alive", lambda prefix: prefix == webui.SLOT_LINKS)
-    monkeypatch.setattr(webui, "preflight_sources", lambda d, u: {"error": None, "notes": [], "run_disk": d, "run_unlim": u})
-    monkeypatch.setattr(webui.pipeline, "start", lambda **kw: (True, "ok"))
+    monkeypatch.setattr(webapp.tasks.tm, "any_alive", lambda prefix: prefix == webapp.tasks.SLOT_LINKS)
+    monkeypatch.setattr(webapp.access, "preflight_sources", lambda d, u: {"error": None, "notes": [], "run_disk": d, "run_unlim": u})
+    monkeypatch.setattr(webapp.rescue.rescue, "start", lambda **kw: (True, "ok"))
     assert client.post("/api/plan/start", json={}).json()["ok"] is True
 
 
 def test_links_tab_screen_and_task_kind_exist():
-    html = Path(webui.TEMPLATES_DIR, "app.html").read_text(encoding="utf-8")
+    html = Path(webapp.paths.TEMPLATES_DIR, "app.html").read_text(encoding="utf-8")
     assert 'data-route="links"' in html and 'id="screen-links"' in html and "screens/links.js" in html
-    assert webui.task_kind(["public_download.py", "--wait"]) == "links"
+    assert webapp.tasks.task_kind(["public_download.py", "--wait"]) == "links"

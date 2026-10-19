@@ -10,9 +10,15 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import utils
+import webapp.access
+import webapp.demo
+import webapp.folders
+import webapp.pages
+import webapp.paths
 import webui
 
-ASSETS = Path(webui.TEMPLATES_DIR)
+ASSETS = Path(webapp.paths.TEMPLATES_DIR)
 APP_HTML = ASSETS / "app.html"
 JS_FILES = sorted((ASSETS / "static" / "js").rglob("*.js"))
 
@@ -80,18 +86,18 @@ def test_index_switches_between_new_and_old_ui(monkeypatch):
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     new = client.get("/?ui=new").text
     assert "/static/js/core.js?v=" in new and "__APP_VERSION__" not in new
-    assert webui.APP_VERSION in new
+    assert utils.APP_VERSION in new
     old = client.get("/?ui=old").text
     assert "/static/js/core.js" not in old
-    monkeypatch.setattr(webui, "UI_DEFAULT", "new")
+    monkeypatch.setattr(webapp.pages, "UI_DEFAULT", "new")
     assert "/static/js/core.js" in client.get("/").text
 
 
 def test_demo_states_are_complete(monkeypatch):
     monkeypatch.setenv("YADISK_DEMO", "1")
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
-    for state in webui.DEMO_STATES:
+    for state in webapp.demo.DEMO_STATES:
         st = client.get(f"/api/status?demo={state}").json()
         assert st["demo"] == state
         r = st["rescue"]
@@ -133,7 +139,7 @@ def _render_home(status: dict) -> dict:
 def test_folder_size_says_more_when_not_fully_counted(monkeypatch):
     # Большую папку программа не успевает посчитать — «больше X», а не заниженная цифра без пометки
     monkeypatch.setenv("YADISK_DEMO", "1")
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     paused = client.get("/api/status?demo=stopped").json()
     assert paused["rescue"]["sources"]["disk"]["folder"]["size_partial"] is True
@@ -151,7 +157,7 @@ def test_folder_size_says_more_when_not_fully_counted(monkeypatch):
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
 def test_home_warns_about_space_and_counts_complete_folders(monkeypatch):
     monkeypatch.setenv("YADISK_DEMO", "1")
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     low = _render_home(client.get("/api/status?demo=low_space").json())
     assert "Места на диске может не хватить" in low["space"] and "свободно 40,0 ГБ" in low["space"]
@@ -297,7 +303,7 @@ const tick = () => new Promise((r) => setTimeout(r, 20));
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
 def test_details_shows_which_folders_are_complete():
-    pages = {p: webui.demo_folder_progress(p) for p in ("disk:/", "disk:/Фото")}
+    pages = {p: webapp.folders.demo_folder_progress(p) for p in ("disk:/", "disk:/Фото")}
     res = subprocess.run(["node", "-e", _FOLDERS_HARNESS], input=json.dumps(pages), capture_output=True, text=True,
                          encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
     assert res.returncode == 0, res.stderr

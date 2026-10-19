@@ -393,6 +393,25 @@ class State:
                 stats["bytes_downloaded"] += r["bytes"] or 0
         return stats
 
+    def get_deferred_stats(self) -> dict[str, int]:
+        """Отложенные файлы (их серверы хранения молчат): сколько, сколько байт, на скольких серверах.
+
+        Это часть pending: get_stats() считает их вместе с ещё не пробованными файлами.
+        """
+        row = self._conn().execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS b, COUNT(DISTINCT storage_host) AS h "
+            "FROM files WHERE status = 'pending' AND error LIKE ?",
+            (DEFERRED_MARKER + "%",),
+        ).fetchone()
+        return {"files": int(row["n"]), "bytes": int(row["b"]), "hosts": int(row["h"])}
+
+    def last_downloaded_at(self) -> str | None:
+        """Когда последний раз скачался файл (UTC, как в колонке downloaded_at)."""
+        row = self._conn().execute(
+            "SELECT MAX(downloaded_at) AS at FROM files WHERE status = 'downloaded'"
+        ).fetchone()
+        return row["at"] if row else None
+
     def get_existing_remote_paths(self) -> set[str]:
         """Все уже зарегистрированные пути — для инкрементального scan."""
         return {

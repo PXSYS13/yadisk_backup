@@ -14,12 +14,15 @@
 Запуск:
   python unlim_worker.py --id 1
   python unlim_worker.py --id 2 --mode zip
+  python unlim_worker.py --id 1 --wait   # отложенные повторять каждые 30 минут, как Web UI
 
 Коды выхода:
   0 — очередь пуста, работа закончена
+  1 — очередь пройдена, часть файлов не скачалась
   2 — куки протухли (auth_expired), нужен новый cookies.json
   3 — Яндекс больше часа не отдаёт файлы (bulk_unavailable и др.), повторить позже
   4 — на локальном диске нет места
+  5 — всё доступное скачано, остальные файлы ждут, когда оживут серверы Яндекса
 """
 
 from __future__ import annotations
@@ -53,6 +56,7 @@ from unlim_common import (
     CookiesFormatError,
     UnlimError,
     YandexUnavailableError,
+    clear_dead_hosts,
     connect_unlim_db,
     count_deferred,
     count_failed,
@@ -70,18 +74,25 @@ from utils import (
     EXIT_AUTH,
     EXIT_DEFERRED,
     EXIT_DISK_FULL,
+    EXIT_INTERRUPTED,
     EXIT_OUTAGE,
     EXIT_PARTIAL,
     TELEGRAM_CHANNEL,
     categorize,
+    deferred_round_text,
     ensure_utf8_stdio,
+    files_text,
+    hhmm,
     human_bytes,
     is_local_disk_error,
+    keep_awake,
     preview_path_for,
     previews_enabled,
     remove_preview,
     remove_quiet,
+    retry_every_sec,
     sanitize_component,
+    under_webui,
 )
 
 # Отдельное имя модуля — тесты подменяют его через monkeypatch
@@ -1369,7 +1380,7 @@ class Worker:
         if without_success >= OUTAGE_GIVE_UP_SEC:
             self.say("storage_down | Выход: больше часа доступных файлов нет — оставшиеся лежат на серверах "
                      "хранения Яндекса, которые не отвечают (пострадавшие дата-центры). Попытки не сожжены: "
-                     f"программа повторит их позже. Новости: {TELEGRAM_CHANNEL}")
+                     f"файлы скачает следующая попытка. Новости: {TELEGRAM_CHANNEL}")
             self._exit(EXIT_DEFERRED)
         self.say(f"batch {self.batch_idx}: все {deferred} файлов пачки на серверах хранения, которые не отвечают. "
                  f"Пауза {pause} с (без успеха {int(without_success // 60)} мин)")
@@ -1604,6 +1615,8 @@ def main() -> int:
                     help="direct — по одному файлу (работает при отключённых архивах), "
                          "zip — архивами пачек")
     ap.add_argument("--retry-failed", action="store_true", help="Сбросить failed-файлы обратно в pending")
+    ap.add_argument("--wait", action="store_true",
+                    help="Не выходить, пока есть отложенные файлы: повторять их каждые 30 минут, как Web UI")
     args = ap.parse_args()
 
     _setup_logging()
@@ -1649,11 +1662,55 @@ def main() -> int:
                    f"Проверьте, что диск подключён, или выберите другую папку.")
         return EXIT_DISK_FULL
 
+    if args.wait:
+        # Компьютер не засыпает и между попытками: серверы Яндекса оживают когда угодно
+        with keep_awake():
+            return _run_rounds(worker)
     worker.authorize()
     code = worker.run()
     log.info("worker %d завершён: код %s, %d файлов, %s", worker.id, code,
              worker.total_files, human_bytes(worker.total_bytes))
+    if code == EXIT_DEFERRED and not under_webui():
+        # Под Web UI отложенные повторяет интерфейс; в консоли — только если попросить
+        worker.say("Повторить отложенные: запустите воркер снова позже — или с ключом --wait, "
+                   "и он будет пробовать их сам каждые 30 минут.")
     return code
+
+
+def _run_rounds(worker: Worker) -> int:
+    """--wait: раунды, как у Web UI. После прохода очереди отложенные файлы пробуются
+    снова каждые retry_every_sec(), пока не скачаются. Выход — когда ждать нечего,
+    нужен человек (код 2 или 4) или Ctrl+C.
+    """
+    round_no = 1
+    while True:
+        waited = count_deferred(DB_FILE)
+        try:
+            worker.authorize()
+            code = worker.run()
+        except SystemExit as e:  # authorize() и _exit() выходят через sys.exit
+            code = e.code if isinstance(e.code, int) else EXIT_PARTIAL
+        log.info("worker %d, попытка %d: код %s, %d файлов, %s", worker.id, round_no, code,
+                 worker.total_files, human_bytes(worker.total_bytes))
+        if round_no > 1 and waited:
+            worker.say(f"попытка №{round_no}: {deferred_round_text(waited, worker.total_files)}")
+        if code not in (EXIT_DEFERRED, EXIT_OUTAGE):
+            return code
+        left = count_deferred(DB_FILE)
+        next_at = time.time() + retry_every_sec()
+        why = f"Ждут Яндекса: {files_text(left)}" if left else "Яндекс сейчас не отвечает"
+        worker.say(f"{why}. Следующая попытка в {hhmm(next_at)}. Остановить — Ctrl+C, скачанное сохранится.")
+        try:
+            while (rest := next_at - time.time()) > 0:
+                time.sleep(min(rest, 5.0))
+        except KeyboardInterrupt:
+            worker.say("Остановлено. Скачанное сохранено, отложенные файлы остались в очереди.")
+            return EXIT_INTERRUPTED
+        # Молчавшим серверам — новый шанс; свежий воркер — без счётчиков прошлой попытки
+        clear_dead_hosts(DB_FILE)
+        recover_stuck(worker_id=worker.id)
+        worker = Worker(worker.id, worker.target_batch, worker.mode)
+        round_no += 1
 
 
 if __name__ == "__main__":

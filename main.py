@@ -5,6 +5,7 @@
     python main.py scan --root /Фото --root "/Работа/2024"   # только эти папки
     python main.py download             # скачать всё pending
     python main.py download --workers 4 # с заданным числом потоков
+    python main.py download --wait      # не выходить: отложенные повторять каждые 30 минут
     python main.py retry-failed         # сбросить failed → pending и скачать
     python main.py stats                # статистика по БД
     python main.py verify               # проверить md5 локальных файлов
@@ -29,6 +30,7 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from downloader import (
+    DEAD_HOSTS,
     RootNotFound,
     download_all,
     make_client,
@@ -43,6 +45,7 @@ from utils import (
     EXIT_AUTH,
     EXIT_DEFERRED,
     EXIT_DISK_FULL,
+    EXIT_INTERRUPTED,
     EXIT_OK,
     EXIT_OUTAGE,
     EXIT_PARTIAL,
@@ -50,13 +53,21 @@ from utils import (
     TELEGRAM_CHANNEL,
     YOUTUBE_VIDEO_URL,
     compute_md5,
+    deferred_round_text,
     ensure_dir,
     ensure_utf8_stdio,
     file_size_safe,
+    files_text,
+    hhmm,
     human_bytes,
     human_duration,
     is_sqlite_disk_error,
+    keep_awake,
+    plural,
+    retry_every_sec,
     safe_int,
+    under_webui,
+    utc_ts,
 )
 
 # Где лежит проект — все относительные пути считаем отсюда
@@ -162,9 +173,12 @@ def _download_exit_code(counters: dict) -> int:
     return EXIT_OK if counters.get("failed", 0) == 0 else EXIT_PARTIAL
 
 
-def _run_download(cfg: dict, state: State, workers: int) -> int:
-    """Запускает download_all и печатает итог. Коды выхода — _download_exit_code, 130 — Ctrl+C."""
-    print(f"Старт скачивания в {workers} потоков → {cfg['download_dir']}")
+def _run_download(cfg: dict, state: State, workers: int, wait: bool = False) -> int:
+    """Запускает download_all и печатает итог. Коды выхода — _download_exit_code, 130 — Ctrl+C.
+
+    wait — идёт main.py download --wait: о следующей попытке скажет он сам.
+    """
+    print(f"Старт скачивания в {workers} {plural(workers, 'поток', 'потока', 'потоков')} → {cfg['download_dir']}")
     try:
         ensure_dir(cfg["download_dir"])
     except OSError as e:
@@ -205,9 +219,29 @@ def _run_download(cfg: dict, state: State, workers: int) -> int:
     elif aborted == "auth":
         print("auth_expired | Остановлено: Яндекс перестал принимать токен. Получите новый.", flush=True)
     elif counters.get("deferred", 0) > 0:
-        print(f"storage_down | Отложено {counters['deferred']} файлов: их серверы хранения Яндекса "
-              f"сейчас не отвечают. Программа повторит их позже.", flush=True)
+        print(f"storage_down | Отложено {files_text(counters['deferred'])}: их серверы хранения Яндекса "
+              f"сейчас не отвечают. Файлы не потеряны — их скачает следующая попытка.", flush=True)
+        if not wait and not under_webui():
+            _print_deferred_hint(state)
     return _download_exit_code(counters)
+
+
+def _deferred_text(state: State) -> str:
+    """«1 234 файла на 301 сервере хранения» — сколько файлов ждёт молчащих серверов Яндекса."""
+    d = state.get_deferred_stats()
+    hosts = d["hosts"]
+    where = f" на {hosts} {plural(hosts, 'сервере', 'серверах', 'серверах')} хранения" if hosts else ""
+    return f"{files_text(d['files'])}{where}"
+
+
+def _print_deferred_hint(state: State) -> None:
+    """Консоль: сама программа отложенные не повторит, если её не попросить.
+
+    В Web UI повторы каждые 30 минут ведёт интерфейс, поэтому там подсказка не печатается.
+    """
+    print(f"\n  Скачано всё, что Яндекс отдаёт сейчас. Ждут Яндекса: {_deferred_text(state)}.")
+    print("  Повторить их: python main.py download. С ключом --wait программа будет пробовать их сама")
+    print("  каждые 30 минут, пока не скачает всё: python main.py download --wait", flush=True)
 
 
 class _ScanProgress:
@@ -377,20 +411,80 @@ def cmd_scan_media(cfg: dict, args: argparse.Namespace) -> int:
     return 0
 
 
+def _scan_if_empty(cfg: dict, state: State, args: argparse.Namespace) -> None:
+    if state.get_stats().get("pending", 0) == 0:
+        print("В БД нет pending-файлов. Сначала выполни: python main.py scan")
+        # Но всё-равно попробуем — может пользователь сначала запустил download
+        if not args.no_scan:
+            print("Запускаю scan автоматически (--no-scan чтобы отключить)...")
+            with closing(make_client(cfg["token"])) as client:
+                scan_tree(client, state, root=args.root)
+
+
 def cmd_download(cfg: dict, args: argparse.Namespace) -> int:
-    if (code := _require_token(cfg)) is not None:
-        return code
+    workers = args.workers or cfg["max_workers"]
+    if not args.wait:
+        if (code := _require_token(cfg)) is not None:
+            return code
+        with State(str(DB_FILE)) as state:
+            _scan_if_empty(cfg, state, args)
+            return _run_download(cfg, state, workers)
+    # Компьютер не засыпает и между попытками: серверы Яндекса оживают когда угодно
+    with keep_awake():
+        return _download_rounds(cfg, args, workers)
 
-    with State(str(DB_FILE)) as state:
-        if state.get_stats().get("pending", 0) == 0:
-            print("В БД нет pending-файлов. Сначала выполни: python main.py scan")
-            # Но всё-равно попробуем — может пользователь сначала запустил download
-            if not args.no_scan:
-                print("Запускаю scan автоматически (--no-scan чтобы отключить)...")
-                with closing(make_client(cfg["token"])) as client:
-                    scan_tree(client, state, root=args.root)
 
-        return _run_download(cfg, state, args.workers or cfg["max_workers"])
+def _download_rounds(cfg: dict, args: argparse.Namespace, workers: int) -> int:
+    """--wait: раунды, как у Web UI. Отложенные файлы пробуются каждые retry_every_sec(),
+    пока не скачаются. Выход — когда ждать нечего, нужен человек (код 2 или 4) или Ctrl+C.
+    """
+    every = retry_every_sec()
+    round_no = 1
+    while True:
+        waiting = ""
+        code = _require_token(cfg)
+        if code is None:
+            with State(str(DB_FILE)) as state:
+                if round_no == 1:
+                    _scan_if_empty(cfg, state, args)
+                deferred_before = state.get_deferred_stats()["files"]
+                downloaded_before = state.get_stats()["downloaded"]
+                code = _run_download(cfg, state, workers, wait=True)
+                if round_no > 1:
+                    got = state.get_stats()["downloaded"] - downloaded_before
+                    _print_round_result(round_no, deferred_before, got)
+                if code == EXIT_DEFERRED:
+                    waiting = _deferred_text(state)
+        if code not in (EXIT_DEFERRED, EXIT_OUTAGE):
+            if round_no > 1 and code in (EXIT_OK, EXIT_PARTIAL):
+                print("Отложенных файлов больше нет — повторять нечего.", flush=True)
+            return code
+        next_at = time.time() + every
+        why = f"Ждут Яндекса: {waiting}" if waiting else "Яндекс сейчас не отвечает"
+        print(f"\n{why}. Следующая попытка в {hhmm(next_at)}. "
+              f"Остановить — Ctrl+C, скачанное сохранится.", flush=True)
+        if not _sleep_until(next_at):
+            return EXIT_INTERRUPTED
+        # Молчавшим серверам — новый шанс: файлы каждого пробуются хотя бы раз
+        DEAD_HOSTS.clear()
+        round_no += 1
+
+
+def _print_round_result(round_no: int, deferred_before: int, downloaded: int) -> None:
+    """Итог повторной попытки: сколько отложенных отдал Яндекс — видно, оживают ли его серверы."""
+    if deferred_before:
+        print(f"Попытка №{round_no}: {deferred_round_text(deferred_before, downloaded)}.", flush=True)
+
+
+def _sleep_until(ts: float) -> bool:
+    """Ждёт до ts. False — человек нажал Ctrl+C."""
+    try:
+        while (left := ts - time.time()) > 0:
+            time.sleep(min(left, 5.0))
+    except KeyboardInterrupt:
+        print("\nОстановлено. Скачанное сохранено, отложенные файлы остались в очереди.", flush=True)
+        return False
+    return True
 
 
 def cmd_retry_failed(cfg: dict, args: argparse.Namespace) -> int:
@@ -408,15 +502,27 @@ def cmd_retry_failed(cfg: dict, args: argparse.Namespace) -> int:
 def cmd_stats(cfg: dict, args: argparse.Namespace) -> int:
     with State(str(DB_FILE)) as state:
         s = state.get_stats()
+        d = state.get_deferred_stats()
+        last = utc_ts(state.last_downloaded_at())
 
     print("Статистика по БД state.db:")
     print(f"  Всего файлов:        {s['total']}")
     print(f"    pending:           {s['pending']}")
+    print(f"      ещё не пробовали:  {s['pending'] - d['files']}")
+    print(f"      ждут Яндекса:      {d['files']} ({human_bytes(d['bytes'])}, серверов хранения: {d['hosts']})")
     print(f"    downloaded:        {s['downloaded']}")
     print(f"    skipped:           {s['skipped']}")
     print(f"    failed:            {s['failed']}")
     print(f"  Объём всего:         {human_bytes(s['bytes_total'])}")
     print(f"  Объём скачано/skip:  {human_bytes(s['bytes_downloaded'])}")
+    if last:
+        when = time.strftime("%d.%m %H:%M", time.localtime(last))
+        print(f"  Последний файл скачан: {when} (по часам этого компьютера)")
+    if d["files"] and s["pending"] == d["files"]:
+        # Ровно об этом спрашивают чаще всего: «упала доля успешных скачиваний — у всех так?»
+        print("\n  Всё, что Яндекс отдаёт сейчас, уже скачано: в очереди только файлы, чьи серверы")
+        print("  хранения молчат. Поэтому новые попытки почти все неудачные — это не поломка.")
+        print("  Пусть программа повторяет их сама: python main.py download --wait")
     return 0
 
 
@@ -521,6 +627,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_dl.add_argument("--workers", type=int, default=None, help=f"Число потоков (макс {MAX_DISK_WORKERS})")
     p_dl.add_argument("--root", default="/", help="Корень для авто-scan если БД пуста")
     p_dl.add_argument("--no-scan", action="store_true", help="Не делать авто-scan если БД пуста")
+    p_dl.add_argument("--wait", action="store_true",
+                      help="Не выходить, пока есть отложенные файлы: повторять их каждые 30 минут, как Web UI")
     p_dl.set_defaults(func=cmd_download)
 
     p_retry = sub.add_parser("retry-failed", help="Перезапустить failed -> pending")

@@ -1,6 +1,6 @@
 [project]
 name = "yadisk-backup"
-version = "2.6.1"
+version = "2.7.0"
 description = "Бесплатная программа, которая сохраняет на компьютер весь Яндекс.Диск и безлимит фото"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,6 +32,7 @@ filterwarnings = [
     "error::DeprecationWarning:state",
     "error::DeprecationWarning:utils",
     "error::DeprecationWarning:downloader",
+    "error::DeprecationWarning:webapp",
     "error::EncodingWarning",
 ]
 

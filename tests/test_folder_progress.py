@@ -7,6 +7,16 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import webapp.access
+import webapp.config
+import webapp.control
+import webapp.folders
+import webapp.local_disk
+import webapp.paths
+import webapp.queue_db
+import webapp.rescue
+import webapp.rescue_view
+import webapp.tasks
 import webui
 from state import CATEGORY_SKIP_MARKER, DEFERRED_MARKER, FOLDER_SKIP_MARKER, State
 from utils import EXIT_DEFERRED, filesystem_type, fs_type_from_mounts, is_fat_filesystem, remove_preview
@@ -44,7 +54,7 @@ ROWS = [
 def test_progress_of_top_level_folders(tmp_path):
     db = tmp_path / "state.db"
     _fill(db, ROWS)
-    res = webui.folder_progress(db, "disk:/")
+    res = webapp.folders.folder_progress(db, "disk:/")
     by = {f["name"]: f for f in res["folders"]}
     assert list(by) == ["50%_off", "50X-off", "Документы", "Музыка", "Фото", "Фото2"]
     assert (by["Документы"]["files"], by["Документы"]["done"], by["Документы"]["complete"]) == (2, 2, True)
@@ -65,7 +75,7 @@ def test_progress_of_top_level_folders(tmp_path):
 def test_progress_inside_a_folder(tmp_path, parent):
     db = tmp_path / "state.db"
     _fill(db, ROWS)
-    res = webui.folder_progress(db, parent)
+    res = webapp.folders.folder_progress(db, parent)
     assert res["path"] == "disk:/Фото"
     by = {f["name"]: f for f in res["folders"]}
     assert set(by) == {"2023", "2024"}
@@ -77,9 +87,9 @@ def test_progress_inside_a_folder(tmp_path, parent):
 def test_progress_prefix_is_exact(tmp_path):
     db = tmp_path / "state.db"
     _fill(db, ROWS)
-    res = webui.folder_progress(db, "disk:/50%_off")
+    res = webapp.folders.folder_progress(db, "disk:/50%_off")
     assert res["folders"] == [] and res["here"]["files"] == 1 and res["here"]["complete"]
-    assert webui.folder_progress(db, "disk:/Нет такой")["empty"] is True
+    assert webapp.folders.folder_progress(db, "disk:/Нет такой")["empty"] is True
 
 
 def test_progress_knows_which_folders_are_in_the_download_folder(tmp_path):
@@ -88,7 +98,7 @@ def test_progress_knows_which_folders_are_in_the_download_folder(tmp_path):
     dl = tmp_path / "dl"
     (dl / "Документы").mkdir(parents=True)
     (dl / "Встреча_ итоги").mkdir()  # имя очищено так же, как при скачивании
-    by = {f["name"]: f for f in webui.folder_progress(db, "disk:/", str(dl))["folders"]}
+    by = {f["name"]: f for f in webapp.folders.folder_progress(db, "disk:/", str(dl))["folders"]}
     assert by["Документы"]["on_disk"] is True and by["Встреча: итоги"]["on_disk"] is True
     assert by["Фото2"]["on_disk"] is False  # скачана целиком и уже перенесена
 
@@ -96,31 +106,31 @@ def test_progress_knows_which_folders_are_in_the_download_folder(tmp_path):
 def test_progress_limit_and_missing_database(tmp_path):
     db = tmp_path / "state.db"
     _fill(db, [(f"disk:/П{i:02d}/f.txt", "downloaded", None, 1) for i in range(5)])
-    res = webui.folder_progress(db, limit=3)
+    res = webapp.folders.folder_progress(db, limit=3)
     assert [f["name"] for f in res["folders"]] == ["П00", "П01", "П02"] and res["more"] == 2
     assert res["total"] == res["complete"] == 5  # сводка считает все папки, не только показанные
-    empty = webui.folder_progress(tmp_path / "нет.db")
+    empty = webapp.folders.folder_progress(tmp_path / "нет.db")
     assert empty["ok"] and empty["empty"] and empty["folders"] == []
 
 
 def test_summary_is_cached_until_forced(tmp_path):
     db = tmp_path / "state.db"
     _fill(db, ROWS)
-    first = webui.disk_folders_summary(db)
+    first = webapp.folders.disk_folders_summary(db)
     assert (first["total"], first["complete"]) == (5, 3)
     assert set(first["names"]) == {"50%_off", "Документы", "Фото2"}
     con = sqlite3.connect(db)
     con.execute("UPDATE files SET status='downloaded', error=NULL WHERE remote_path LIKE 'disk:/Фото/%'")
     con.commit()
     con.close()
-    assert webui.disk_folders_summary(db) is first  # опрос статуса каждые 1,5 с базу не пересчитывает
-    assert webui.disk_folders_summary(db, force=True)["complete"] == 4
-    assert webui.disk_folders_summary(tmp_path / "нет.db", force=True) is None
+    assert webapp.folders.disk_folders_summary(db) is first  # опрос статуса каждые 1,5 с базу не пересчитывает
+    assert webapp.folders.disk_folders_summary(db, force=True)["complete"] == 4
+    assert webapp.folders.disk_folders_summary(tmp_path / "нет.db", force=True) is None
 
 
 def test_folder_progress_endpoint_and_demo(client, tmp_path, monkeypatch):
-    _fill(webui.DB_FILE, ROWS)
-    monkeypatch.setattr(webui, "get_config", lambda: {"download_dir": str(tmp_path / "dl")})
+    _fill(webapp.paths.DB_FILE, ROWS)
+    monkeypatch.setattr(webapp.config, "get_config", lambda: {"download_dir": str(tmp_path / "dl")})
     res = client.get("/api/disk/folder_progress", params={"path": "disk:/Фото"}).json()
     assert res["ok"] and {f["name"] for f in res["folders"]} == {"2023", "2024"}
     assert all(f["on_disk"] is False for f in res["folders"])
@@ -139,9 +149,9 @@ def test_open_a_disk_folder_inside_the_download_folder(client, tmp_path, monkeyp
     (dl / "Фото" / "2023").mkdir(parents=True)
     (dl / "Встреча_ итоги").mkdir()
     opened = []
-    monkeypatch.setattr(webui, "get_config", lambda: {"download_dir": str(dl)})
-    monkeypatch.setattr(webui.os, "startfile", lambda p: opened.append(p), raising=False)
-    monkeypatch.setattr(webui.subprocess, "Popen", lambda args, **kw: opened.append(args[-1]))
+    monkeypatch.setattr(webapp.config, "get_config", lambda: {"download_dir": str(dl)})
+    monkeypatch.setattr(webapp.control.os, "startfile", lambda p: opened.append(p), raising=False)
+    monkeypatch.setattr(webapp.control.subprocess, "Popen", lambda args, **kw: opened.append(args[-1]))
 
     def post(path):
         return client.post("/api/open_folder", json={"which": "disk_folder", "path": path})
@@ -163,10 +173,10 @@ def test_open_a_disk_folder_inside_the_download_folder(client, tmp_path, monkeyp
 
 def _rescue_with_steps(monkeypatch, steps):
     """Спасение только Диска; шаг скачивания — функция, меняющая базу и отдающая код выхода."""
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": True, "login": "t", "used": 1})
-    monkeypatch.setattr(webui, "check_cookies", lambda: {"ok": False, "msg": "нет"})
-    monkeypatch.setattr(webui.tm, "start", lambda slot, script, args: (True, "ok"))
-    r = webui.Rescue()
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": True, "login": "t", "used": 1})
+    monkeypatch.setattr(webapp.access, "check_cookies", lambda: {"ok": False, "msg": "нет"})
+    monkeypatch.setattr(webapp.tasks.tm, "start", lambda slot, script, args: (True, "ok"))
+    r = webapp.rescue.Rescue()
     r.retry_every = 0.05
     r.skip_unlim = True
     steps = list(steps)
@@ -174,7 +184,7 @@ def _rescue_with_steps(monkeypatch, steps):
     def wait(slot, on_finish_msg=""):
         if r.branches["disk"].state != "downloading":
             return 0  # сбор списка: база уже заполнена
-        con = sqlite3.connect(webui.DB_FILE)
+        con = sqlite3.connect(webapp.paths.DB_FILE)
         code = steps.pop(0)(con)
         con.commit()
         con.close()
@@ -189,7 +199,7 @@ def _done(con, *paths):
 
 
 def test_feed_says_when_a_folder_is_complete(monkeypatch):
-    _fill(webui.DB_FILE, [("disk:/A/1.txt", "pending", None, 1), ("disk:/B/2.txt", "pending", None, 1),
+    _fill(webapp.paths.DB_FILE, [("disk:/A/1.txt", "pending", None, 1), ("disk:/B/2.txt", "pending", None, 1),
                           ("disk:/C/3.txt", "downloaded", None, 1)])
 
     def first(con):
@@ -213,7 +223,7 @@ def test_feed_says_when_a_folder_is_complete(monkeypatch):
 
 def test_feed_groups_many_complete_folders(monkeypatch):
     names = ["Д", "Г", "В", "Б", "А"]
-    _fill(webui.DB_FILE, [(f"disk:/{n}/f.txt", "pending", None, 1) for n in names])
+    _fill(webapp.paths.DB_FILE, [(f"disk:/{n}/f.txt", "pending", None, 1) for n in names])
     r = _rescue_with_steps(monkeypatch, [lambda con: _done(con, *(f"disk:/{n}/f.txt" for n in names)) or 0])
     r._run()
     texts = [e["text"] for e in r.events if e["text"].startswith("Скачано целиком")]
@@ -225,7 +235,7 @@ def test_feed_groups_many_complete_folders(monkeypatch):
 
 
 def _db(**kw):
-    st = webui._empty_db_stats()
+    st = webapp.queue_db.empty_db_stats()
     st.update(kw)
     st["recent"] = []
     return st
@@ -241,7 +251,7 @@ def test_status_tells_when_space_is_short():
     cfg = {"download_dir": "D:\\Яндекс"}
 
     def build(free, **kw):
-        return webui.build_rescue_status({"branches": {}}, disk, unlim, tok, coo, cfg, free_space=free, **kw)
+        return webapp.rescue_view.build_rescue_status({"branches": {}}, disk, unlim, tok, coo, cfg, free_space=free, **kw)
 
     r = build({"free": 5 * gb, "fs": "NTFS", "fat": False}, disk_folders={"total": 6, "complete": 2, "names": ["x"]})
     assert r["space"] == {"free": 5 * gb, "need": 7 * gb, "short": True, "fs": "NTFS", "fat": False}
@@ -254,9 +264,9 @@ def test_status_tells_when_space_is_short():
 
 
 def test_free_space_reports_the_filesystem(tmp_path, monkeypatch):
-    monkeypatch.setattr(webui, "filesystem_type", lambda path: "FAT32")
-    monkeypatch.setattr(webui, "_fs_cache", {})
-    info = webui._free_space(str(tmp_path / "ещё нет"))
+    monkeypatch.setattr(webapp.local_disk, "filesystem_type", lambda path: "FAT32")
+    monkeypatch.setattr(webapp.local_disk, "_fs_cache", {})
+    info = webapp.local_disk.free_space(str(tmp_path / "ещё нет"))
     assert info["fs"] == "FAT32" and info["fat"] is True and info["free"] > 0
 
 

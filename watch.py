@@ -16,6 +16,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+from state import DEFERRED_MARKER
 from utils import TELEGRAM_CHANNEL, ensure_utf8_stdio, human_bytes, sqlite_ro_uri
 from utils import human_duration_ru as human_duration
 
@@ -63,6 +64,16 @@ def fetch_state() -> dict | None:
             stats["bytes_total"] += row["b"] or 0
             if row["status"] in ("downloaded", "skipped"):
                 stats["bytes_done"] += row["b"] or 0
+
+        # Отложенные: pending, чьи серверы хранения Яндекса молчат. Их не качают, а ждут
+        stats["deferred"] = stats["deferred_hosts"] = 0
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, COUNT(DISTINCT storage_host) AS h FROM files "
+                "WHERE status='pending' AND error LIKE ?", (DEFERRED_MARKER + "%",)).fetchone()
+            stats["deferred"], stats["deferred_hosts"] = row["n"], row["h"]
+        except sqlite3.OperationalError:  # база версии до 1.2: колонки storage_host нет
+            pass
 
         # Последние скачанные
         recent = list(
@@ -145,8 +156,9 @@ def main() -> int:
                 files_per_sec = 0
                 bytes_per_sec = 0
 
-            remaining_files = total - done - s["failed"]
-            eta_sec = (remaining_files / files_per_sec) if files_per_sec > 0 else None
+            # Прогноз — только по тем, что ещё не пробовали: отложенные ждут Яндекса, а не очереди
+            untried = max(0, s["pending"] - s["deferred"])
+            eta_sec = (untried / files_per_sec) if files_per_sec > 0 and untried else None
 
             print("\n  ФАЙЛЫ:")
             print(f"  {progress_bar(pct_files)}  {done} / {total}")
@@ -160,7 +172,8 @@ def main() -> int:
             print("\n  СТАТУСЫ:")
             print(f"     скачано:   {s['downloaded']:>6}")
             print(f"     пропущено: {s['skipped']:>6}  (уже было локально)")
-            print(f"     pending:   {s['pending']:>6}")
+            print(f"     в очереди: {untried:>6}  (ещё не пробовали)")
+            print(f"     ждут Яндекса: {s['deferred']:>3}  (серверов хранения: {s['deferred_hosts']})")
             print(f"     ОШИБОК:    {s['failed']:>6}")
 
             print("\n  СКОРОСТЬ:")
@@ -187,6 +200,11 @@ def main() -> int:
                     tag = "ЯНДЕКС" if any(w in err.lower() for w in ("сервер", "50", "429", "timeout", "reset")) else "FAIL"
                     print(f"     [{tag}] {name} — {err}")
                 print(f"     (Новости о сбоях дата-центров Яндекса: {TELEGRAM_CHANNEL})")
+
+            if s["deferred"] and not untried:
+                print("\n  Всё, что Яндекс отдаёт сейчас, уже скачано. Остальные файлы лежат на серверах,")
+                print("  которые молчат, — новые попытки почти все неудачные, это не поломка.")
+                print("  Повторять их сам будет:  python main.py download --wait")
 
             # Если всё доделано — мигаем и выходим
             if total > 0 and s["pending"] == 0:

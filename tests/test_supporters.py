@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import supporters
+import utils
 import webui
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -124,7 +125,7 @@ def test_endpoint_and_demo(monkeypatch):
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     res = client.get("/api/supporters").json()
     assert res["ok"] is True and res["supporters"] == [] and res["people"] == 0
-    assert res["donation_url"] == webui.DONATION_URL
+    assert res["donation_url"] == utils.DONATION_URL
     # Демо-список — только с YADISK_DEMO=1
     assert client.get("/api/supporters?demo=1").json()["supporters"] == []
     monkeypatch.setenv("YADISK_DEMO", "1")

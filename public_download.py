@@ -50,6 +50,8 @@ from utils import (
     categorize,
     ensure_dir,
     ensure_utf8_stdio,
+    files_text,
+    hhmm,
     human_bytes,
     keep_awake,
     local_copy_matches,
@@ -58,10 +60,11 @@ from utils import (
     remove_preview,
     remove_quiet,
     resolve_local_path,
-    safe_int,
+    retry_every_sec,
     sanitize_component,
     sqlite_tx,
     to_long_path,
+    under_webui,
 )
 
 PROJECT = Path(__file__).resolve().parent
@@ -647,17 +650,6 @@ def next_limit_reset(now: float) -> float:
     return reset.timestamp()
 
 
-def _hhmm(ts: float) -> str:
-    return time.strftime("%H:%M", time.localtime(ts))
-
-
-def _files(n: int) -> str:
-    n = int(n)
-    tail = "файл" if n % 10 == 1 and n % 100 != 11 else (
-        "файла" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "файлов")
-    return f"{n} {tail}"
-
-
 def _take_jobs(conn: sqlite3.Connection, now: float) -> list[Job]:
     rows = conn.execute(
         """
@@ -770,7 +762,7 @@ class Round:
                 self.conn.execute("UPDATE links SET limit_until=? WHERE id=?", (until, job.link_id))
                 row = self.conn.execute("SELECT id, name FROM links WHERE id=?", (job.link_id,)).fetchone()
                 print(f"link_limit | {label(row)}: Яндекс ограничил скачивание по этой ссылке — "
-                      f"продолжу в {_hhmm(until)}", flush=True)
+                      f"продолжу в {hhmm(until)}", flush=True)
         elif res.status == "gone":
             self._file_gone(job, res)
         elif res.status == "link_error":
@@ -884,10 +876,6 @@ class Round:
         return EXIT_PARTIAL if c["failed"] or c["link_errors"] else EXIT_OK
 
 
-def _retry_every() -> int:
-    return safe_int(os.environ.get("YADISK_RETRY_EVERY_SEC"), 1800, 60, 24 * 3600)
-
-
 def _nearest_limit(conn: sqlite3.Connection) -> float | None:
     row = conn.execute("SELECT MIN(limit_until) FROM links WHERE state='active' AND limit_until > ?",
                        (time.time(),)).fetchone()
@@ -920,22 +908,25 @@ def run(conn: sqlite3.Connection, download_dir: str, workers: int, wait_mode: bo
         code = rnd.exit_code()
         waiting, limited = rnd.waiting()
         if rnd.counters["deferred"]:
-            print(f"storage_down | Отложено {rnd.counters['deferred']} файлов: их серверы хранения Яндекса "
-                  f"сейчас не отвечают. Программа повторит их позже.", flush=True)
+            print(f"storage_down | Отложено {files_text(rnd.counters['deferred'])}: их серверы хранения Яндекса "
+                  f"сейчас не отвечают. Файлы не потеряны — их скачает следующая попытка.", flush=True)
+            if not wait_mode and not under_webui():
+                print("  Повторить их: python public_download.py --wait — программа будет пробовать их сама "
+                      "каждые 30 минут.", flush=True)
         if not wait_mode or code not in (EXIT_OUTAGE, EXIT_DEFERRED):
             meta_set(conn, "state", None)
             meta_set(conn, "next_retry_at", None)
             print("Готово: всё доступное по ссылкам скачано." if code == EXIT_OK else f"Раунд закончен (код {code}).",
                   flush=True)
             return code
-        delay = float(_retry_every())
+        delay = float(retry_every_sec())
         until = _nearest_limit(conn)
         if until and waiting and waiting == limited and not rnd.unlisted():
             delay = max(60.0, until - time.time())  # ждут только лимита — до полуночи раунды бесполезны
         next_at = time.time() + delay
         meta_set(conn, "state", "waiting")
         meta_set(conn, "next_retry_at", str(next_at))
-        print(f"Жду Яндекса: {_files(waiting)}. Следующая попытка в {_hhmm(next_at)}", flush=True)
+        print(f"Жду Яндекса: {files_text(waiting)}. Следующая попытка в {hhmm(next_at)}", flush=True)
         # Не даём компьютеру уснуть ради серверов, которые могут ожить, но не ради лимита до полуночи
         with keep_awake() if waiting > limited else nullcontext():
             if wait_until(conn, next_at):

@@ -11,7 +11,8 @@ import organize
 import storage_fetch as sf
 import unlim_worker as uw
 import utils
-import webui
+import webapp.queue_db
+import webapp.rescue_view
 from state import CATEGORY_SKIP_MARKER, State
 from unlim_common import clear_dead_hosts
 from utils import IS_WINDOWS, PREVIEW_DIRNAME, keep_awake, preview_path_for, previews_enabled, remove_preview
@@ -134,7 +135,7 @@ def test_disk_deferred_photo_gets_a_preview(tmp_path, disk_net):
     st.mark_deferred("disk:/Фото/a.HEIC", res.storage_host, res.error, preview_path=res.preview_path)
     assert st._conn().execute("SELECT preview_path FROM files").fetchone()[0] == res.preview_path
     st.close()
-    assert webui.db_stats(tmp_path / "state.db")["previews"] == 1
+    assert webapp.queue_db.db_stats(tmp_path / "state.db")["previews"] == 1
 
 
 def test_disk_no_preview_for_videos_or_when_switched_off(tmp_path, disk_net, monkeypatch):
@@ -203,7 +204,7 @@ def test_unlim_deferred_photo_gets_a_preview(tmp_path, unlim_db):
     assert rows["a.HEIC"] == str(preview)
     assert rows["v.MOV"] is None  # у видео превью — только кадр, его не сохраняем
     assert w.session.methods.count("mpfs/info") == 1
-    assert webui.db_stats(unlim_db, "unlim_files", "file_id")["previews"] == 1
+    assert webapp.queue_db.db_stats(unlim_db, "unlim_files", "file_id")["previews"] == 1
 
 
 def test_organize_never_sorts_previews_into_photos():
@@ -211,11 +212,11 @@ def test_organize_never_sorts_previews_into_photos():
 
 
 def test_waiting_subline_mentions_previews():
-    db = webui._empty_db_stats()
+    db = webapp.queue_db.empty_db_stats()
     db.update(total=10, pending=8, deferred=8, downloaded=2, previews=5)
     st = {"running": True, "started_at": 1.0, "state": "running", "next_retry_at": 1800.0,
           "branches": {"disk": {"state": "waiting"}, "unlim": {"state": "off"}}}
-    r = webui.build_rescue_status(st, db, webui._empty_db_stats(), {"ok": True}, {"ok": False},
+    r = webapp.rescue_view.build_rescue_status(st, db, webapp.queue_db.empty_db_stats(), {"ok": True}, {"ok": False},
                                   {"download_dir": "D:\\B"}, now=100.0)
     assert r["sources"]["disk"]["files"]["preview_only"] == 5
     assert "превью" in r["subline"]
@@ -354,7 +355,7 @@ def test_disk_preview_goes_away_when_the_original_arrives(tmp_path, disk_net, mo
     assert os.path.isdir(os.path.join(dl, PREVIEW_DIRNAME))
     assert _disk_row(st) == ("downloaded", None)
     st.close()
-    assert webui.db_stats(tmp_path / "state.db")["previews"] == 0
+    assert webapp.queue_db.db_stats(tmp_path / "state.db")["previews"] == 0
 
 
 def test_disk_preview_goes_away_when_the_original_is_already_in_the_folder(tmp_path, disk_net, monkeypatch):

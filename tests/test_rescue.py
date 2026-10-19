@@ -6,7 +6,14 @@ import time
 
 import pytest
 
-import webui
+import state
+import webapp.access
+import webapp.listing
+import webapp.paths
+import webapp.queue_db
+import webapp.rescue
+import webapp.rescue_view
+import webapp.tasks
 from utils import EXIT_AUTH, EXIT_DEFERRED, EXIT_DISK_FULL, EXIT_OUTAGE, EXIT_PARTIAL
 
 
@@ -18,7 +25,7 @@ class Script:
         self.worker_codes = list(worker_codes)
         self.started = []
         self.lock = threading.Lock()
-        monkeypatch.setattr(webui.tm, "start", self._start)
+        monkeypatch.setattr(webapp.tasks.tm, "start", self._start)
         monkeypatch.setattr(rescue, "_wait_task", self._wait)
         monkeypatch.setattr(rescue, "_wait_workers", self._wait_workers)
 
@@ -45,9 +52,9 @@ class Script:
 
 @pytest.fixture()
 def rescue(monkeypatch):
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": True, "login": "t", "used": 1})
-    monkeypatch.setattr(webui, "check_cookies", lambda: {"ok": True, "msg": "ok", "count": 5})
-    r = webui.Rescue()
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": True, "login": "t", "used": 1})
+    monkeypatch.setattr(webapp.access, "check_cookies", lambda: {"ok": True, "msg": "ok", "count": 5})
+    r = webapp.rescue.Rescue()
     r.retry_every = 0.05  # раунды в тесте — мгновенные
     r.workers = 1
     return r
@@ -79,7 +86,7 @@ def test_lists_are_remembered_across_restarts(rescue, monkeypatch):
     sc = Script(monkeypatch, rescue, {"disk": [0, 0], "unlim_collect": [0]})
     rescue._run()
     assert ("unlim_collect", "--collect") in sc.steps()
-    again = webui.Rescue()  # перезапуск программы: новый объект, те же базы
+    again = webapp.rescue.Rescue()  # перезапуск программы: новый объект, те же базы
     again.retry_every, again.workers = 0.05, 1
     sc2 = Script(monkeypatch, again, {"disk": [0], "unlim_collect": [0]})
     again._run()
@@ -88,9 +95,9 @@ def test_lists_are_remembered_across_restarts(rescue, monkeypatch):
     assert ("unlim_collect", "--collect") not in sc2.steps()
     texts = [e["text"] for e in again.events]
     assert any(t.startswith("Список фото и видео собран") for t in texts)
-    unlim = webui.db_stats(webui.UNLIM_DB_FILE, "unlim_files", "file_id")
-    assert unlim["listed_at"] == webui.read_listing("unlim")["at"]
-    block = webui._source_block("unlim", unlim, None, True, "", None, None)
+    unlim = webapp.queue_db.db_stats(webapp.paths.UNLIM_DB_FILE, "unlim_files", "file_id")
+    assert unlim["listed_at"] == webapp.listing.read_listing("unlim")["at"]
+    block = webapp.rescue_view.source_block("unlim", unlim, None, True, "", None, None)
     assert block["listed_at"] == unlim["listed_at"]
 
 
@@ -151,7 +158,7 @@ def test_expired_token_stops_only_the_disk(rescue, monkeypatch):
 
 def test_full_disk_pauses_both_branches(rescue, monkeypatch):
     stopped = []
-    monkeypatch.setattr(webui.tm, "stop_matching", lambda prefix: stopped.append(prefix) or [])
+    monkeypatch.setattr(webapp.tasks.tm, "stop_matching", lambda prefix: stopped.append(prefix) or [])
     Script(monkeypatch, rescue, {"disk": [0, EXIT_DISK_FULL], "unlim_collect": [0]},
            worker_codes=[EXIT_DEFERRED])
     rescue._run()
@@ -184,7 +191,7 @@ def test_partial_failures_finish_the_branch(rescue, monkeypatch):
 
 
 def test_unreachable_token_check_still_downloads_the_disk(rescue, monkeypatch):
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "unreachable": True, "msg": "timeout"})
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "unreachable": True, "msg": "timeout"})
     rescue.skip_unlim = True
     sc = Script(monkeypatch, rescue, {"disk": [0, 0]})
     rescue._run()
@@ -193,7 +200,7 @@ def test_unreachable_token_check_still_downloads_the_disk(rescue, monkeypatch):
 
 def test_start_while_waiting_retries_now_and_clears_dead_hosts(rescue, monkeypatch):
     cleared = []
-    monkeypatch.setattr(webui, "clear_dead_hosts", lambda path: cleared.append(path) or 0)
+    monkeypatch.setattr(webapp.rescue, "clear_dead_hosts", lambda path: cleared.append(path) or 0)
     rescue.retry_every = 3600  # без кнопки раунд не начнётся
     rescue.skip_unlim = True
     Script(monkeypatch, rescue, {"disk": [0, EXIT_DEFERRED, 0]})
@@ -215,7 +222,7 @@ def test_start_while_waiting_retries_now_and_clears_dead_hosts(rescue, monkeypat
 
 def test_stop_kills_every_disk_and_unlim_task(rescue, monkeypatch):
     stopped = []
-    monkeypatch.setattr(webui.tm, "stop_matching", lambda prefix: stopped.append(prefix) or [])
+    monkeypatch.setattr(webapp.tasks.tm, "stop_matching", lambda prefix: stopped.append(prefix) or [])
     rescue.retry_every = 3600
     Script(monkeypatch, rescue, {"disk": [0, EXIT_DEFERRED]}, worker_codes=[EXIT_DEFERRED])
     t = threading.Thread(target=rescue._run, daemon=True)
@@ -240,10 +247,10 @@ def test_choosing_everything_brings_back_deselected_categories(rescue, monkeypat
         " status TEXT NOT NULL DEFAULT 'pending', local_path TEXT, error TEXT, downloaded_at TIMESTAMP);"
     )
     con.execute("INSERT INTO files (remote_path, size, status, error) VALUES ('disk:/a.pdf', 1, 'skipped', ?)",
-                (webui.CATEGORY_SKIP_MARKER,))
+                (state.CATEGORY_SKIP_MARKER,))
     con.commit()
     con.close()
-    monkeypatch.setattr(webui, "DB_FILE", db)
+    monkeypatch.setattr(webapp.paths, "DB_FILE", db)
     rescue.skip_unlim = True
     Script(monkeypatch, rescue, {"disk": [0, 0]})
     rescue._run()  # disk_categories=None — «всё»
@@ -262,7 +269,7 @@ def test_a_crashed_download_is_not_reported_as_done(rescue, monkeypatch, tmp_pat
         "INSERT INTO files (remote_path, size) VALUES ('disk:/a.jpg', 1), ('disk:/b.jpg', 2);"
     )
     con.close()
-    monkeypatch.setattr(webui, "DB_FILE", db)
+    monkeypatch.setattr(webapp.paths, "DB_FILE", db)
     rescue.skip_unlim = True
     sc = Script(monkeypatch, rescue, {"disk": [0, EXIT_PARTIAL]})
     rescue._run()
@@ -270,7 +277,7 @@ def test_a_crashed_download_is_not_reported_as_done(rescue, monkeypatch, tmp_pat
     assert disk["state"] == "needs_action" and disk["action"] == "send_logs"
     assert rescue.state == "failed"
     # Три быстрые попытки, а не «Скачано почти всё» после первой
-    assert sc.steps("disk").count(("disk", "download")) == webui.RESCUE_STUCK_ROUNDS
+    assert sc.steps("disk").count(("disk", "download")) == webapp.rescue.RESCUE_STUCK_ROUNDS
     texts = [e["text"] for e in rescue.status()["events"]]
     assert "Скачивание прервалось — пробую ещё раз через минуту" in texts
     assert "Запускаю скачивание снова" in texts
@@ -284,7 +291,7 @@ def test_status_keeps_the_old_pipeline_shape(rescue):
 
 
 def test_combine_worker_codes():
-    combine = webui.Rescue._combine_worker_codes
+    combine = webapp.rescue.Rescue._combine_worker_codes
     assert combine([0, 0]) == 0
     assert combine([0, EXIT_DEFERRED]) == EXIT_DEFERRED
     assert combine([EXIT_DEFERRED, EXIT_AUTH]) == EXIT_AUTH
@@ -300,7 +307,7 @@ def test_failed_listing_on_an_empty_database_is_never_done(rescue, monkeypatch):
     disk = rescue.status()["branches"]["disk"]
     assert disk["state"] == "needs_action" and disk["action"] == "send_logs"
     assert rescue.state == "failed"
-    assert sc.steps("disk") == [("disk", "scan")] * webui.RESCUE_STUCK_ROUNDS
+    assert sc.steps("disk") == [("disk", "scan")] * webapp.rescue.RESCUE_STUCK_ROUNDS
     texts = [e["text"] for e in rescue.status()["events"]]
     assert not any(t.startswith("Готово") for t in texts)
     assert "Не получилось получить список файлов — пробую ещё раз через минуту" in texts
@@ -331,7 +338,7 @@ def test_orphaned_in_progress_rows_are_released_and_not_reported_as_done(rescue,
         " VALUES ('1', 'a.jpg', 1, 'in_progress', 1);"
     )
     con.close()
-    monkeypatch.setattr(webui, "UNLIM_DB_FILE", db)
+    monkeypatch.setattr(webapp.paths, "UNLIM_DB_FILE", db)
     rescue.skip_disk = True
     Script(monkeypatch, rescue, {"unlim_collect": [0]}, worker_codes=[1])
     rescue._run()
@@ -354,7 +361,7 @@ def test_requeued_flag_runs_another_round_instead_of_a_crash(rescue, monkeypatch
         "INSERT INTO files (remote_path, size) VALUES ('disk:/a.jpg', 1);"
     )
     con.close()
-    monkeypatch.setattr(webui, "DB_FILE", db)
+    monkeypatch.setattr(webapp.paths, "DB_FILE", db)
     b = rescue.branches["disk"]
     b.requeued = True
     assert rescue._after_exit(b, EXIT_PARTIAL, (db, "files", "remote_path")) is True
@@ -400,7 +407,7 @@ def test_unlim_branch_survives_a_database_from_an_old_version(rescue, monkeypatc
         " VALUES ('1', 'a.jpg', 1, 'failed', 'boom'), ('2', 'b.jpg', 1, 'downloaded', NULL);"
     )
     con.close()
-    monkeypatch.setattr(webui, "UNLIM_DB_FILE", db)
+    monkeypatch.setattr(webapp.paths, "UNLIM_DB_FILE", db)
     Script(monkeypatch, rescue, {"unlim_collect": [0]})
     b = rescue.branches["unlim"]
     assert rescue._unlim_prepare(b) == 0
@@ -417,7 +424,7 @@ def test_failures_from_versions_before_1_2_go_back_to_the_queue(tmp_path, monkey
     """До 1.2 таймаут молчащего сервера записывался ошибкой файла («RequestTimeoutError: …»,
     без метки). Такие 610 файлов у пользователя застряли навсегда: явный старт их не трогал."""
     db = tmp_path / "state.db"
-    monkeypatch.setattr(webui, "DB_FILE", db)
+    monkeypatch.setattr(webapp.paths, "DB_FILE", db)
     con = sqlite3.connect(db)
     con.execute("CREATE TABLE files (remote_path TEXT PRIMARY KEY, status TEXT, error TEXT)")
     con.executemany("INSERT INTO files VALUES (?, 'failed', ?)", [
@@ -431,7 +438,7 @@ def test_failures_from_versions_before_1_2_go_back_to_the_queue(tmp_path, monkey
     ])
     con.commit()
     con.close()
-    assert webui._reset_transient_disk_failures() == 5
+    assert webapp.queue_db.reset_transient_disk_failures() == 5
     con = sqlite3.connect(db)
     still = {r[0] for r in con.execute("SELECT remote_path FROM files WHERE status='failed'")}
     con.close()

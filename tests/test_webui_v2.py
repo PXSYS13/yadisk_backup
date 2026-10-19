@@ -6,6 +6,12 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import webapp.access
+import webapp.config
+import webapp.control
+import webapp.paths
+import webapp.queue_db
+import webapp.rescue
 import webui
 
 
@@ -31,7 +37,7 @@ def test_settings_roundtrip_and_validation(client, monkeypatch):
     assert client.post("/api/settings", json={"all_categories": True}).json()["settings"]["categories"] is None
     assert client.post("/api/settings", json={"sources": []}).status_code == 400
     assert client.post("/api/settings", json={"categories": ["nonsense"]}).status_code == 400
-    monkeypatch.setattr(webui.pipeline, "is_running", lambda: True)
+    monkeypatch.setattr(webapp.rescue.rescue, "is_running", lambda: True)
     assert client.post("/api/settings", json={"sources": ["disk"]}).status_code == 409
     # Переключатели можно менять и во время скачивания
     assert client.post("/api/settings", json={"gentle": False}).status_code == 200
@@ -40,7 +46,7 @@ def test_settings_roundtrip_and_validation(client, monkeypatch):
 def test_gentle_toggle_during_download_asks_for_restart(client, monkeypatch):
     # Скачивание не идёт — режим сработает при запуске, подсказка не нужна
     assert "msg" not in client.post("/api/settings", json={"gentle": True}).json()
-    monkeypatch.setattr(webui.pipeline, "is_running", lambda: True)
+    monkeypatch.setattr(webapp.rescue.rescue, "is_running", lambda: True)
     msg = client.post("/api/settings", json={"gentle": False}).json()["msg"]
     assert "Обычный режим" in msg and "«Остановить»" in msg and "«Продолжить»" in msg
     # Значение не поменялось — молчим
@@ -50,8 +56,8 @@ def test_gentle_toggle_during_download_asks_for_restart(client, monkeypatch):
 
 def test_rescue_start_uses_saved_settings(client, monkeypatch):
     calls = {}
-    monkeypatch.setattr(webui, "preflight_sources", lambda d, u: {"error": None, "notes": [], "run_disk": d, "run_unlim": u})
-    monkeypatch.setattr(webui.pipeline, "start", lambda **kw: (calls.update(kw), (True, "Спасение запущено"))[1])
+    monkeypatch.setattr(webapp.access, "preflight_sources", lambda d, u: {"error": None, "notes": [], "run_disk": d, "run_unlim": u})
+    monkeypatch.setattr(webapp.rescue.rescue, "start", lambda **kw: (calls.update(kw), (True, "Спасение запущено"))[1])
     client.post("/api/settings", json={"sources": ["disk"], "categories": ["photos"], "gentle": True})
     r = client.post("/api/rescue/start").json()
     assert r["ok"] is True
@@ -79,7 +85,7 @@ def test_problem_files_explain_reasons(client, tmp_path, monkeypatch):
         ("disk:/d.txt", 40, "pending", None, None),
         ("disk:/e.txt", 50, "downloaded", None, None),
     ])
-    monkeypatch.setattr(webui, "DB_FILE", db)
+    monkeypatch.setattr(webapp.paths, "DB_FILE", db)
     r = client.get("/api/disk/failed").json()
     assert r["total"] == 3
     states = {x["name"]: (x["state"], x["preview"]) for x in r["items"]}
@@ -93,8 +99,8 @@ def test_problem_files_explain_reasons(client, tmp_path, monkeypatch):
 def test_retry_failed_requeues_and_starts(client, tmp_path, monkeypatch):
     db = tmp_path / "state.db"
     _disk_db(db, [("disk:/b.pdf", 20, "failed", "server_50x | 500", None)])
-    monkeypatch.setattr(webui, "DB_FILE", db)
-    monkeypatch.setattr(webui, "api_rescue_start", lambda: {"ok": True, "msg": "Спасение запущено"})
+    monkeypatch.setattr(webapp.paths, "DB_FILE", db)
+    monkeypatch.setattr(webapp.control, "api_rescue_start", lambda: {"ok": True, "msg": "Спасение запущено"})
     r = client.post("/api/rescue/retry_failed", json={"source": "disk"}).json()
     assert r["ok"] and r["count"] == 1
     con = sqlite3.connect(db)
@@ -105,9 +111,9 @@ def test_retry_failed_requeues_and_starts(client, tmp_path, monkeypatch):
 def test_open_folder_only_opens_the_download_folder(client, tmp_path, monkeypatch):
     opened = []
     monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path))
-    monkeypatch.setattr(webui, "get_config", lambda: {"download_dir": str(tmp_path)})
-    monkeypatch.setattr(webui.os, "startfile", lambda p: opened.append(p), raising=False)
-    monkeypatch.setattr(webui.subprocess, "Popen", lambda args, **kw: opened.append(args[-1]))
+    monkeypatch.setattr(webapp.config, "get_config", lambda: {"download_dir": str(tmp_path)})
+    monkeypatch.setattr(webapp.control.os, "startfile", lambda p: opened.append(p), raising=False)
+    monkeypatch.setattr(webapp.control.subprocess, "Popen", lambda args, **kw: opened.append(args[-1]))
     assert client.post("/api/open_folder", json={"which": "download"}).json()["ok"] is True
     assert opened and str(opened[0]) == str(tmp_path)
     assert client.post("/api/open_folder", json={"which": "previews"}).json()["ok"] is False  # папки ещё нет
@@ -121,16 +127,16 @@ def test_token_snapshot_does_not_block_after_first_check(monkeypatch):
         calls.append(token)
         time.sleep(0.3)
         data = {"ok": True, "login": "x"}
-        webui._token_check_cache.update({"token": token, "at": time.time(), "data": data})
+        webapp.access._token_check_cache.update({"token": token, "at": time.time(), "data": data})
         return data
 
-    monkeypatch.setattr(webui, "check_token", slow)
-    monkeypatch.setitem(webui._token_check_cache, "token", None)
-    monkeypatch.setitem(webui._token_check_cache, "data", None)
-    assert webui.token_snapshot("t")["ok"] is True  # первый раз — синхронно
-    webui._token_check_cache["at"] = 0  # устарело
+    monkeypatch.setattr(webapp.access, "check_token", slow)
+    monkeypatch.setitem(webapp.access._token_check_cache, "token", None)
+    monkeypatch.setitem(webapp.access._token_check_cache, "data", None)
+    assert webapp.access.token_snapshot("t")["ok"] is True  # первый раз — синхронно
+    webapp.access._token_check_cache["at"] = 0  # устарело
     t0 = time.monotonic()
-    assert webui.token_snapshot("t")["ok"] is True  # отдаёт прошлое значение сразу
+    assert webapp.access.token_snapshot("t")["ok"] is True  # отдаёт прошлое значение сразу
     assert time.monotonic() - t0 < 0.2
     for _ in range(50):
         if len(calls) == 2:
@@ -140,6 +146,6 @@ def test_token_snapshot_does_not_block_after_first_check(monkeypatch):
 
 
 def test_reason_text_plain_language():
-    assert "не отвечает" in webui.reason_text("storage_down | x")
-    assert "медлен" in webui.reason_text("download_timeout | x") or "долго" in webui.reason_text("download_timeout | x")
-    assert webui.reason_text(None) == ""
+    assert "не отвечает" in webapp.queue_db.reason_text("storage_down | x")
+    assert "медлен" in webapp.queue_db.reason_text("download_timeout | x") or "долго" in webapp.queue_db.reason_text("download_timeout | x")
+    assert webapp.queue_db.reason_text(None) == ""

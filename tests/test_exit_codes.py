@@ -15,7 +15,7 @@ import main
 import unlim_common as uc
 import unlim_download as ud
 import unlim_worker as uw
-import webui
+import webapp.access
 from utils import EXIT_AUTH, EXIT_OUTAGE, EXIT_PARTIAL
 
 
@@ -56,9 +56,9 @@ def test_main_maps_token_state_to_exit_code(monkeypatch, state, code):
 
 
 def test_webui_marks_unreachable_token_check(monkeypatch):
-    monkeypatch.setattr(webui, "make_client", lambda token: _Client(requests.exceptions.ReadTimeout("slow")))
-    monkeypatch.setitem(webui._token_check_cache, "token", None)
-    data = webui.check_token("y0_unique-token-for-this-test")
+    monkeypatch.setattr(webapp.access, "make_client", lambda token: _Client(requests.exceptions.ReadTimeout("slow")))
+    monkeypatch.setitem(webapp.access._token_check_cache, "token", None)
+    data = webapp.access.check_token("y0_unique-token-for-this-test")
     assert data["ok"] is False
     assert data.get("unreachable") is True
 

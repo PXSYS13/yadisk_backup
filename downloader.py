@@ -930,7 +930,7 @@ def download_all(
     state.assign_local_paths(download_dir)
     _sweep_previews(state, download_dir)
 
-    counters ={"downloaded": 0, "skipped": 0, "failed": 0, "deferred": 0, "bytes": 0}
+    counters = {"downloaded": 0, "skipped": 0, "failed": 0, "deferred": 0, "bytes": 0}
     jobs_iter, total_files, total_bytes = _job_source(state, jobs)
     if total_files == 0:
         log.info("Нет файлов для скачивания.")
@@ -1135,6 +1135,8 @@ def _apply_result(
             )
         else:
             log.error("FAIL | %s | %s | %s", res.error, res.duration_ms, res.job.remote_path)
+    file_bar.set_postfix_str(f"скачано {counters['downloaded']}, ждут Яндекса {counters['deferred']}",
+                             refresh=False)
     file_bar.update(1)
     if preview:
         _drop_preview(state, res.job.remote_path, preview, download_dir)

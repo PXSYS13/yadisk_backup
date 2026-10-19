@@ -289,6 +289,8 @@ def test_round_downloads_defers_silent_storage_and_reports_progress(db, net, tmp
     m = PROGRESS_RE.search([ln for ln in out.splitlines() if ln.startswith("Прогресс:")][-1])
     assert m and (m.group(1), m.group(2), m.group(3)) == ("2", "2", "0")
     assert "отложено 1" in out and "storage_down | Отложено 1" in out
+    # В консоли без --wait программа сама не повторит — и не обещает этого
+    assert "Программа повторит" not in out and "public_download.py --wait" in out
     assert "https://" not in out  # адреса ссылок в журнал не попадают
     # Следующий запуск: сервер ожил — докачивается только отложенный файл
     fake.dead.clear()

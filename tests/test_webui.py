@@ -6,6 +6,18 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
+import utils
+import webapp.access
+import webapp.config
+import webapp.control
+import webapp.diagnostics
+import webapp.local_disk
+import webapp.pages
+import webapp.paths
+import webapp.queue_db
+import webapp.rescue
+import webapp.status
+import webapp.tasks
 import webui
 
 # ── классификация ───────────────────────────────────────────────────────────
@@ -25,7 +37,7 @@ import webui
     ],
 )
 def test_categorize(path, expected):
-    assert webui.categorize(path) == expected
+    assert utils.categorize(path) == expected
 
 
 # ── маскировка токена ───────────────────────────────────────────────────────
@@ -33,38 +45,38 @@ def test_categorize(path, expected):
 
 def test_mask_token_hides_middle():
     token = "y0_AgAAAABsecretsecretsecret"
-    masked = webui.mask_token(token)
+    masked = webapp.config.mask_token(token)
     assert "secretsecret" not in masked
     assert masked.startswith("y0_AgA")
 
 
 def test_mask_token_empty():
-    assert webui.mask_token("") == ""
-    assert webui.mask_token("short") == ""
+    assert webapp.config.mask_token("") == ""
+    assert webapp.config.mask_token("short") == ""
 
 
 # ── защита organize от системных папок ──────────────────────────────────────
 
 
 def test_organize_rejects_windows_dir():
-    ok, msg = webui._is_safe_organize_path(r"C:\Windows")
+    ok, msg = webapp.control.is_safe_organize_path(r"C:\Windows")
     assert ok is False
     assert "Системная" in msg
 
 
 def test_organize_rejects_program_files_subdir():
-    ok, _ = webui._is_safe_organize_path(r"C:\Program Files\что-то")
+    ok, _ = webapp.control.is_safe_organize_path(r"C:\Program Files\что-то")
     assert ok is False
 
 
 def test_organize_rejects_missing_dir(tmp_path):
-    ok, msg = webui._is_safe_organize_path(str(tmp_path / "нет-такой"))
+    ok, msg = webapp.control.is_safe_organize_path(str(tmp_path / "нет-такой"))
     assert ok is False
     assert "не существует" in msg
 
 
 def test_organize_allows_normal_dir(tmp_path):
-    ok, msg = webui._is_safe_organize_path(str(tmp_path))
+    ok, msg = webapp.control.is_safe_organize_path(str(tmp_path))
     assert ok is True, msg
 
 
@@ -107,7 +119,7 @@ def statuses(db):
 
 
 def test_filter_keeps_only_selected_categories(disk_db):
-    skipped, kept = webui.filter_to_categories(disk_db, "files", "remote_path", ["photos"])
+    skipped, kept = webapp.queue_db.filter_to_categories(disk_db, "files", "remote_path", ["photos"])
     assert (skipped, kept) == (2, 1)
     st = statuses(disk_db)
     assert st["disk:/a.jpg"] == "pending"
@@ -117,8 +129,8 @@ def test_filter_keeps_only_selected_categories(disk_db):
 
 
 def test_filter_is_reversible(disk_db):
-    webui.filter_to_categories(disk_db, "files", "remote_path", ["photos"])
-    n = webui.unskip_category_marker(disk_db, "files")
+    webapp.queue_db.filter_to_categories(disk_db, "files", "remote_path", ["photos"])
+    n = webapp.queue_db.unskip_category_marker(disk_db, "files")
     assert n == 2
     st = statuses(disk_db)
     assert st["disk:/b.mp4"] == "pending"
@@ -132,8 +144,8 @@ def test_unskip_does_not_touch_other_skips(disk_db):
     con.commit()
     con.close()
 
-    webui.filter_to_categories(disk_db, "files", "remote_path", ["photos"])
-    webui.unskip_category_marker(disk_db, "files")
+    webapp.queue_db.filter_to_categories(disk_db, "files", "remote_path", ["photos"])
+    webapp.queue_db.unskip_category_marker(disk_db, "files")
     st = statuses(disk_db)
     assert st["disk:/c.pdf"] == "skipped"  # дубликат остался дубликатом
 
@@ -142,7 +154,7 @@ def test_unskip_does_not_touch_other_skips(disk_db):
 
 
 def test_db_stats_counts(disk_db):
-    out = webui.db_stats(disk_db, "files", "remote_path")
+    out = webapp.queue_db.db_stats(disk_db, "files", "remote_path")
     assert out["total"] == 4
     assert out["pending"] == 3
     assert out["downloaded"] == 1
@@ -151,13 +163,13 @@ def test_db_stats_counts(disk_db):
 
 
 def test_db_stats_missing_file(tmp_path):
-    out = webui.db_stats(tmp_path / "нет.db", "files", "remote_path")
+    out = webapp.queue_db.db_stats(tmp_path / "нет.db", "files", "remote_path")
     assert out["total"] == 0
     assert out["recent"] == []
 
 
 def test_preview_groups_by_category(disk_db):
-    out = webui.preview_db(disk_db, "files", "remote_path")
+    out = webapp.queue_db.preview_db(disk_db, "files", "remote_path")
     assert out["empty"] is False
     assert out["categories"]["photos"]["count"] == 2
     assert out["categories"]["videos"]["count"] == 1
@@ -166,8 +178,8 @@ def test_preview_groups_by_category(disk_db):
 
 def test_local_size_marks_partial_scan(tmp_path):
     (tmp_path / "f.bin").write_bytes(b"12345")
-    webui._local_size_cache.clear()
-    out = webui.local_size(str(tmp_path))
+    webapp.local_disk._local_size_cache.clear()
+    out = webapp.local_disk.local_size(str(tmp_path))
     assert out["bytes"] == 5
     assert out["partial"] is False
 
@@ -181,76 +193,76 @@ def _tree(root):
 
 def test_local_size_counts_nested_folders(tmp_path):
     _tree(tmp_path)
-    webui._local_size_cache.clear()
-    assert webui.local_size(str(tmp_path)) == {"files": 3, "bytes": 9, "partial": False}
-    assert webui.local_size(str(tmp_path / "нет такой")) == {"files": 0, "bytes": 0, "partial": False}
+    webapp.local_disk._local_size_cache.clear()
+    assert webapp.local_disk.local_size(str(tmp_path)) == {"files": 3, "bytes": 9, "partial": False}
+    assert webapp.local_disk.local_size(str(tmp_path / "нет такой")) == {"files": 0, "bytes": 0, "partial": False}
 
 
 def test_walk_size_says_when_time_ran_out(tmp_path, monkeypatch):
     # Большая папка или медленный диск: не успели — так и говорим, а не выдаём неполную цифру за полную
     _tree(tmp_path)
     ticks = iter([0.0])  # перед корнем время ещё есть, дальше часы ушли за срок
-    assert webui._walk_size(str(tmp_path), 1.0, clock=lambda: next(ticks, 5.0)) == (1, 5, True)
-    assert webui._walk_size(str(tmp_path), float("inf")) == (3, 9, False)
+    assert webapp.local_disk._walk_size(str(tmp_path), 1.0, clock=lambda: next(ticks, 5.0)) == (1, 5, True)
+    assert webapp.local_disk._walk_size(str(tmp_path), float("inf")) == (3, 9, False)
     # В _unlim десятки тысяч фото в одной папке — срок проверяется и посреди неё
     flat = tmp_path / "flat"
     flat.mkdir()
     for i in range(5):
         (flat / f"{i}.jpg").write_bytes(b"x")
-    monkeypatch.setattr(webui, "_WALK_CLOCK_EVERY", 2)
+    monkeypatch.setattr(webapp.local_disk, "_WALK_CLOCK_EVERY", 2)
     ticks = iter([0.0])
-    files, _size, partial = webui._walk_size(str(flat), 1.0, clock=lambda: next(ticks, 5.0))
+    files, _size, partial = webapp.local_disk._walk_size(str(flat), 1.0, clock=lambda: next(ticks, 5.0))
     assert partial and files == 1
 
 
 def test_folder_size_partial_reaches_rescue_status(tmp_path, monkeypatch):
-    monkeypatch.setattr(webui, "get_config", lambda: {"token": "", "download_dir": str(tmp_path), "max_workers": 4})
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": True, "login": "test"})
+    monkeypatch.setattr(webapp.config, "get_config", lambda: {"token": "", "download_dir": str(tmp_path), "max_workers": 4})
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": True, "login": "test"})
     (tmp_path / "f.bin").write_bytes(b"12345")
-    webui._local_size_cache.clear()
-    folder = webui.api_status()["rescue"]["sources"]["disk"]["folder"]
+    webapp.local_disk._local_size_cache.clear()
+    folder = webapp.status.api_status()["rescue"]["sources"]["disk"]["folder"]
     assert folder == {"path": str(tmp_path), "size_bytes": 5, "size_partial": False}
 
-    monkeypatch.setattr(webui, "_walk_size", lambda path, deadline: (40, 40 * 1024 ** 3, True))
-    webui._local_size_cache.clear()
-    sources = webui.api_status()["rescue"]["sources"]
+    monkeypatch.setattr(webapp.local_disk, "_walk_size", lambda path, deadline: (40, 40 * 1024 ** 3, True))
+    webapp.local_disk._local_size_cache.clear()
+    sources = webapp.status.api_status()["rescue"]["sources"]
     assert sources["disk"]["folder"]["size_partial"] is True
     assert sources["disk"]["folder"]["size_bytes"] == 40 * 1024 ** 3
     assert sources["unlim"]["folder"]["size_partial"] is False  # папки _unlim нет — считать нечего
-    webui._local_size_cache.clear()
+    webapp.local_disk._local_size_cache.clear()
 
 
 def test_sql_ident_whitelist_rejects_injection(disk_db):
     with pytest.raises(ValueError, match="Недопустимый table"):
-        webui.db_stats(disk_db, "files; DROP TABLE files; --", "remote_path")
+        webapp.queue_db.db_stats(disk_db, "files; DROP TABLE files; --", "remote_path")
 
     with pytest.raises(ValueError, match="Недопустимый column"):
-        webui.preview_db(disk_db, "files", "1=1; --")
+        webapp.queue_db.preview_db(disk_db, "files", "1=1; --")
 
 
 def test_donate_redirect(monkeypatch):
     # Новый интерфейс: экран «Поддержать», а не «Главная» (там ?tab= не понимают)
-    resp = webui.donate()
+    resp = webapp.pages.donate()
     assert resp.status_code == 307
     assert resp.headers["location"] == "/#/support"
     # Прежний интерфейс по умолчанию — его вкладка доната
-    monkeypatch.setattr(webui, "UI_DEFAULT", "old")
-    assert webui.donate().headers["location"] == "/?tab=donate"
+    monkeypatch.setattr(webapp.pages, "UI_DEFAULT", "old")
+    assert webapp.pages.donate().headers["location"] == "/?tab=donate"
 
 
 def test_donation_url_constant():
-    assert webui.DONATION_URL == "https://dalink.to/davronsvv"
+    assert utils.DONATION_URL == "https://dalink.to/davronsvv"
 
 
 def test_api_status_does_not_leak_raw_token(monkeypatch):
     secret = "y0_AgAAAAA_super_secret_raw_token_xyz"
-    monkeypatch.setattr(webui, "get_config", lambda: {
+    monkeypatch.setattr(webapp.config, "get_config", lambda: {
         "token": secret,
         "download_dir": "D:/downloads",
         "max_workers": 4,
     })
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": True, "login": "test"})
-    st = webui.api_status()
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": True, "login": "test"})
+    st = webapp.status.api_status()
     cfg = st["config"]
     assert "token" not in cfg  # сырой токен НИКОГДА не должен отдаваться
     assert "token_masked" in cfg
@@ -258,18 +270,18 @@ def test_api_status_does_not_leak_raw_token(monkeypatch):
 
 
 def test_organize_rejects_other_drive_windows():
-    ok, msg = webui._is_safe_organize_path(r"D:\Windows")
+    ok, msg = webapp.control.is_safe_organize_path(r"D:\Windows")
     assert ok is False
     assert "Системная" in msg
 
-    ok2, _ = webui._is_safe_organize_path(r"E:\Program Files\App")
+    ok2, _ = webapp.control.is_safe_organize_path(r"E:\Program Files\App")
     assert ok2 is False
 
 
 def test_organize_rejects_user_home_dir():
     import os
     home = os.path.expanduser("~")
-    ok, msg = webui._is_safe_organize_path(home)
+    ok, msg = webapp.control.is_safe_organize_path(home)
     assert ok is False
     assert "домашнюю папку" in msg
 
@@ -298,7 +310,7 @@ def test_db_stats_excludes_category_skipped_from_bytes_done(tmp_path):
     con.commit()
     con.close()
 
-    out = webui.db_stats(db, "files", "remote_path")
+    out = webapp.queue_db.db_stats(db, "files", "remote_path")
     assert out["total"] == 4
     # bytes_done должен считать downloaded (10) + resumed (30), НО НЕ cat_skip (50)
     assert out["bytes_done"] == 40
@@ -307,7 +319,7 @@ def test_db_stats_excludes_category_skipped_from_bytes_done(tmp_path):
 
 
 def test_pipeline_status_elapsed():
-    pipe = webui.Pipeline()
+    pipe = webapp.rescue.Rescue()
     assert pipe.status()["elapsed"] is None
     pipe.started_at = 100.0
     pipe.finished_at = 150.0
@@ -324,7 +336,7 @@ def test_task_was_stopped():
             pass
         stdout = []
 
-    t = webui.Task("test_slot", FakeProc())
+    t = webapp.tasks.Task("test_slot", FakeProc())
     assert t.was_stopped is False
     t.stop()
     assert t.was_stopped is True
@@ -332,7 +344,7 @@ def test_task_was_stopped():
 
 def test_api_unlim_retry(tmp_path, monkeypatch):
     db_file = tmp_path / "test_unlim_api.db"
-    monkeypatch.setattr(webui, "UNLIM_DB_FILE", db_file)
+    monkeypatch.setattr(webapp.paths, "UNLIM_DB_FILE", db_file)
     con = sqlite3.connect(db_file)
     con.executescript(
         """
@@ -347,7 +359,7 @@ def test_api_unlim_retry(tmp_path, monkeypatch):
 
     # Мокаем запуск воркеров
     started_slots = []
-    monkeypatch.setattr(webui.tm, "start", lambda slot, script, args: (started_slots.append((slot, args)) or True, "ok"))
+    monkeypatch.setattr(webapp.tasks.tm, "start", lambda slot, script, args: (started_slots.append((slot, args)) or True, "ok"))
 
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     resp = client.post("/api/unlim/retry", json={"workers": 2, "batch": 15})
@@ -366,22 +378,22 @@ def test_api_unlim_retry(tmp_path, monkeypatch):
 
 def test_get_config_safe_max_workers(monkeypatch):
     monkeypatch.setenv("MAX_WORKERS", "invalid_garbage")
-    cfg = webui.get_config()
+    cfg = webapp.config.get_config()
     assert cfg["max_workers"] == 4
 
     monkeypatch.setenv("MAX_WORKERS", "100")
-    cfg = webui.get_config()
+    cfg = webapp.config.get_config()
     assert cfg["max_workers"] == 16
 
     monkeypatch.setenv("MAX_WORKERS", "-10")
-    cfg = webui.get_config()
+    cfg = webapp.config.get_config()
     assert cfg["max_workers"] == 1
 
 
 def test_api_set_dir_validation(tmp_path, monkeypatch):
     import os
 
-    monkeypatch.setattr(webui, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setattr(webapp.paths, "ENV_FILE", tmp_path / ".env")
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
 
     # Reject C:\
@@ -411,7 +423,7 @@ def test_api_set_dir_validation(tmp_path, monkeypatch):
 
 def test_api_set_cookies_validation(tmp_path, monkeypatch):
     cookies_path = tmp_path / "cookies.json"
-    monkeypatch.setattr(webui, "COOKIES_FILE", cookies_path)
+    monkeypatch.setattr(webapp.paths, "COOKIES_FILE", cookies_path)
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
 
     # Invalid JSON / not a list
@@ -442,7 +454,7 @@ def test_api_set_dir_quotes_hash_and_spaces(tmp_path, monkeypatch):
     from dotenv import dotenv_values
 
     env_file = tmp_path / ".env"
-    monkeypatch.setattr(webui, "ENV_FILE", env_file)
+    monkeypatch.setattr(webapp.paths, "ENV_FILE", env_file)
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
 
     target_dir = str(tmp_path / "my backup#1")
@@ -456,7 +468,7 @@ def test_api_set_dir_quotes_hash_and_spaces(tmp_path, monkeypatch):
 def test_disk_clear_waits_for_task_stop(tmp_path, monkeypatch):
     db_file = tmp_path / "state.db"
     db_file.write_text("fake db content", encoding="utf-8")
-    monkeypatch.setattr(webui, "DB_FILE", db_file)
+    monkeypatch.setattr(webapp.paths, "DB_FILE", db_file)
 
     calls = []
 
@@ -476,7 +488,7 @@ def test_disk_clear_waits_for_task_stop(tmp_path, monkeypatch):
         def join(self, timeout=2.0):
             calls.append("join")
 
-    monkeypatch.setitem(webui.tm._tasks, "disk", MockTask())
+    monkeypatch.setitem(webapp.tasks.tm._tasks, "disk", MockTask())
 
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     resp = client.post("/api/disk/clear")
@@ -487,7 +499,7 @@ def test_disk_clear_waits_for_task_stop(tmp_path, monkeypatch):
 
 
 class _FakeProc:
-    """Мёртвый процесс без вывода — чтобы собрать настоящий webui.Task."""
+    """Мёртвый процесс без вывода — чтобы собрать настоящий webapp.tasks.Task."""
     stdout = []
 
     def poll(self):
@@ -502,10 +514,10 @@ class _FakeProc:
 
 def test_clear_endpoints_work_with_real_task_objects(tmp_path, monkeypatch):
     """Раньше clear падал с AttributeError: код обращался к несуществующему Task.thread."""
-    monkeypatch.setattr(webui, "DB_FILE", tmp_path / "state.db")
-    monkeypatch.setattr(webui, "UNLIM_DB_FILE", tmp_path / "unlim_state.db")
-    monkeypatch.setitem(webui.tm._tasks, "disk", webui.Task("disk", _FakeProc()))
-    monkeypatch.setitem(webui.tm._tasks, "unlim_w1", webui.Task("unlim_w1", _FakeProc()))
+    monkeypatch.setattr(webapp.paths, "DB_FILE", tmp_path / "state.db")
+    monkeypatch.setattr(webapp.paths, "UNLIM_DB_FILE", tmp_path / "unlim_state.db")
+    monkeypatch.setitem(webapp.tasks.tm._tasks, "disk", webapp.tasks.Task("disk", _FakeProc()))
+    monkeypatch.setitem(webapp.tasks.tm._tasks, "unlim_w1", webapp.tasks.Task("unlim_w1", _FakeProc()))
 
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     assert client.post("/api/disk/clear").json()["ok"] is True
@@ -531,18 +543,18 @@ def test_task_manager_prefix_helpers(monkeypatch):
             pass
 
     w1, w2, collect = AliveTask(), AliveTask(), AliveTask()
-    monkeypatch.setitem(webui.tm._tasks, "unlim_w1", w1)
-    monkeypatch.setitem(webui.tm._tasks, "unlim_w2", w2)
-    monkeypatch.setitem(webui.tm._tasks, "unlim_collect", collect)
+    monkeypatch.setitem(webapp.tasks.tm._tasks, "unlim_w1", w1)
+    monkeypatch.setitem(webapp.tasks.tm._tasks, "unlim_w2", w2)
+    monkeypatch.setitem(webapp.tasks.tm._tasks, "unlim_collect", collect)
 
-    assert webui.tm.any_alive("unlim_w") is True
-    assert webui.tm.clear_logs("unlim_w*") == 2
+    assert webapp.tasks.tm.any_alive("unlim_w") is True
+    assert webapp.tasks.tm.clear_logs("unlim_w*") == 2
     assert w1.log == [] and collect.log == ["x"]
 
-    stopped = webui.tm.stop_matching("unlim_w")
+    stopped = webapp.tasks.tm.stop_matching("unlim_w")
     assert {id(t) for t in stopped} == {id(w1), id(w2)}
     assert collect.stopped is False
-    assert webui.tm.any_alive("unlim_w") is False
+    assert webapp.tasks.tm.any_alive("unlim_w") is False
 
 
 def test_launch_unlim_workers_caps_values():
@@ -552,9 +564,9 @@ def test_launch_unlim_workers_caps_values():
         launched.append((slot, args))
         return True, "ok"
 
-    res = webui._launch_unlim_workers(100, 10_000, starter=starter)
-    assert res["started"] == list(range(1, webui.MAX_UNLIM_WORKERS + 1))
-    assert all(args[-1] == str(webui.MAX_UNLIM_BATCH) for _, args in launched)
+    res = webapp.rescue.launch_unlim_workers(100, 10_000, starter=starter)
+    assert res["started"] == list(range(1, utils.MAX_UNLIM_WORKERS + 1))
+    assert all(args[-1] == str(utils.MAX_UNLIM_BATCH) for _, args in launched)
     assert launched[0][0] == "unlim_w1"
 
 
@@ -567,10 +579,10 @@ def test_get_from_foreign_host_is_blocked():
 
 
 def test_organize_rejects_project_dir():
-    ok, msg = webui._is_safe_organize_path(str(webui.PROJECT))
+    ok, msg = webapp.control.is_safe_organize_path(str(webapp.paths.PROJECT))
     assert ok is False
     assert "инструмента" in msg
-    ok, _ = webui._is_safe_organize_path(str(webui.PROJECT.parent))
+    ok, _ = webapp.control.is_safe_organize_path(str(webapp.paths.PROJECT.parent))
     assert ok is False
 
 
@@ -579,7 +591,7 @@ def test_organize_move_refused_while_downloading(tmp_path, monkeypatch):
         def alive(self):
             return True
 
-    monkeypatch.setitem(webui.tm._tasks, "unlim_w1", Alive())
+    monkeypatch.setitem(webapp.tasks.tm._tasks, "unlim_w1", Alive())
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     resp = client.post("/api/organize", json={"input": str(tmp_path), "action": "move"})
     assert resp.json()["ok"] is False
@@ -597,11 +609,11 @@ class _LogOnlyTask:
 
 
 def test_diagnose_explains_bulk_disabled(monkeypatch):
-    monkeypatch.setitem(webui.tm._tasks, "unlim_w1", _LogOnlyTask([
+    monkeypatch.setitem(webapp.tasks.tm._tasks, "unlim_w1", _LogOnlyTask([
         "12:00:01  [w1] batch 3: ⚠️ Сбой отдачи архива узлом Яндекса (1 файлов): not_zip | вместо ZIP пришёл text/html",
         "12:00:40  [w1] bulk_unavailable | Яндекс 5 пачек подряд не отдал архив.",
     ]))
-    diag = webui.diagnose_tasks()
+    diag = webapp.diagnostics.diagnose_tasks()
     assert diag["kind"] == "bulk_disabled"
     assert diag["counts"]["bulk_disabled"] == 2
     assert diag["affects"][0]["state"] == "ok"      # диск работает
@@ -610,10 +622,10 @@ def test_diagnose_explains_bulk_disabled(monkeypatch):
 
 
 def test_diagnose_auth_has_priority_and_keeps_legacy_flags(monkeypatch):
-    monkeypatch.setitem(webui.tm._tasks, "disk", _LogOnlyTask([
+    monkeypatch.setitem(webapp.tasks.tm._tasks, "disk", _LogOnlyTask([
         "FAIL | server_50x | BadGatewayError", "FAIL | auth_expired | UnauthorizedError",
     ]))
-    diag = webui.diagnose_tasks()
+    diag = webapp.diagnostics.diagnose_tasks()
     assert diag["kind"] == "auth_expired"
     assert diag["auth_expired_detected"] is True
     assert diag["server_50x_detected"] is False
@@ -621,10 +633,10 @@ def test_diagnose_auth_has_priority_and_keeps_legacy_flags(monkeypatch):
 
 
 def test_diagnose_local_disk_is_not_blamed_on_yandex(monkeypatch):
-    monkeypatch.setitem(webui.tm._tasks, "disk", _LogOnlyTask([
+    monkeypatch.setitem(webapp.tasks.tm._tasks, "disk", _LogOnlyTask([
         "FAIL | local_disk | OSError: [Errno 28] No space left on device: 'IMG_5003.jpg.part'",
     ]))
-    assert webui.diagnose_tasks()["kind"] == "local_disk"
+    assert webapp.diagnostics.diagnose_tasks()["kind"] == "local_disk"
 
 
 def test_db_stats_rate_window(tmp_path):
@@ -645,7 +657,7 @@ def test_db_stats_rate_window(tmp_path):
     )
     con.commit()
     con.close()
-    out = webui.db_stats(db)
+    out = webapp.queue_db.db_stats(db)
     assert out["done_10m"] == 1
     assert out["bytes_10m"] == 100
 
@@ -653,9 +665,9 @@ def test_db_stats_rate_window(tmp_path):
 def test_pipeline_unlim_only_skips_token_check(monkeypatch):
     """Только безлимит и нет cookies: токен не проверяем, и честно падаем — скачивать нечего."""
     calls = []
-    monkeypatch.setattr(webui, "check_token", lambda tok: calls.append(tok) or {"ok": False, "msg": "no"})
-    monkeypatch.setattr(webui, "check_cookies", lambda: {"ok": False, "msg": "нет кук"})
-    pipe = webui.Pipeline()
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: calls.append(tok) or {"ok": False, "msg": "no"})
+    monkeypatch.setattr(webapp.access, "check_cookies", lambda: {"ok": False, "msg": "нет кук"})
+    pipe = webapp.rescue.Rescue()
     pipe.skip_disk = True
     pipe._run()
     assert calls == []
@@ -664,7 +676,7 @@ def test_pipeline_unlim_only_skips_token_check(monkeypatch):
 
 
 def test_plan_sources_matrix():
-    ps = webui.plan_sources
+    ps = webapp.access.plan_sources
     full = ps(True, True, True, True)
     assert (full["run_disk"], full["run_unlim"], full["notes"], full["error"]) == (True, True, [], None)
 
@@ -685,11 +697,11 @@ def test_plan_sources_matrix():
 
 def test_pipeline_without_token_downloads_unlim_only(monkeypatch):
     """Ровно то, что было в логе: «Скачать всё» без токена, но с cookies — раньше падало целиком."""
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
-    monkeypatch.setattr(webui, "check_cookies", lambda: {"ok": True, "msg": "Куки OK (23 шт)", "count": 23})
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    monkeypatch.setattr(webapp.access, "check_cookies", lambda: {"ok": True, "msg": "Куки OK (23 шт)", "count": 23})
     started = []
-    monkeypatch.setattr(webui.tm, "start", lambda slot, script, args: (started.append(slot), (True, "ok"))[1])
-    pipe = webui.Pipeline()
+    monkeypatch.setattr(webapp.tasks.tm, "start", lambda slot, script, args: (started.append(slot), (True, "ok"))[1])
+    pipe = webapp.rescue.Rescue()
     monkeypatch.setattr(pipe, "_wait_task", lambda slot, on_finish_msg="": 0)
     pipe._run()
     assert pipe.state == "done"
@@ -700,13 +712,13 @@ def test_pipeline_without_token_downloads_unlim_only(monkeypatch):
 
 
 def test_api_start_refuses_when_nothing_configured(monkeypatch):
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     resp = client.post("/api/start", json={"do_disk": True, "do_unlim": True})
     body = resp.json()
     assert body["ok"] is False
     assert "ни токена, ни cookies" in body["msg"]
-    assert webui.pipeline.is_running() is False
+    assert webapp.rescue.rescue.is_running() is False
 
 
 def test_pipeline_applies_categories_after_scan(tmp_path, monkeypatch):
@@ -724,10 +736,10 @@ def test_pipeline_applies_categories_after_scan(tmp_path, monkeypatch):
     )
     con.commit()
     con.close()
-    monkeypatch.setattr(webui, "DB_FILE", db)
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": True, "login": "t", "used": 1})
-    monkeypatch.setattr(webui.tm, "start", lambda slot, script, args: (True, "ok"))
-    pipe = webui.Pipeline()
+    monkeypatch.setattr(webapp.paths, "DB_FILE", db)
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": True, "login": "t", "used": 1})
+    monkeypatch.setattr(webapp.tasks.tm, "start", lambda slot, script, args: (True, "ok"))
+    pipe = webapp.rescue.Rescue()
     pipe.skip_unlim = True
     pipe.disk_categories = ["photos"]
 
@@ -749,7 +761,7 @@ def test_pipeline_applies_categories_after_scan(tmp_path, monkeypatch):
 
 
 def test_api_plan_shape(monkeypatch):
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     plan = client.get("/api/plan").json()
     assert set(plan) >= {"access", "disk", "unlim", "free_space", "rate_bps", "recommended", "diagnostics"}
@@ -773,34 +785,34 @@ def test_unlim_preview_categorizes_by_name(tmp_path, monkeypatch):
     )
     con.commit()
     con.close()
-    out = webui.preview_db(db, "unlim_files", "file_id")
+    out = webapp.queue_db.preview_db(db, "unlim_files", "file_id")
     assert out["categories"]["photos"]["count"] == 1
     assert out["categories"]["videos"]["count"] == 1
-    skipped, kept = webui.filter_to_categories(db, "unlim_files", "file_id", ["photos"])
+    skipped, kept = webapp.queue_db.filter_to_categories(db, "unlim_files", "file_id", ["photos"])
     assert (skipped, kept) == (1, 1)
 
 
 def test_onboarding_state_next_step():
     cfg_unset = {"download_dir_set": False}
     empty = {"total": 0, "downloaded": 0}
-    st = webui.onboarding_state(cfg_unset, {"ok": False}, {"ok": False}, empty, empty)
+    st = webapp.access.onboarding_state(cfg_unset, {"ok": False}, {"ok": False}, empty, empty)
     assert st["next"] == "token" and st["token"] is False
-    st = webui.onboarding_state(cfg_unset, {"ok": True}, {"ok": False}, empty, empty)
+    st = webapp.access.onboarding_state(cfg_unset, {"ok": True}, {"ok": False}, empty, empty)
     assert st["next"] == "dir"
-    st = webui.onboarding_state({"download_dir_set": True}, {"ok": True}, {"ok": False}, empty, empty)
+    st = webapp.access.onboarding_state({"download_dir_set": True}, {"ok": True}, {"ok": False}, empty, empty)
     assert st["next"] == "cookies"
-    st = webui.onboarding_state({"download_dir_set": True}, {"ok": True}, {"ok": True},
+    st = webapp.access.onboarding_state({"download_dir_set": True}, {"ok": True}, {"ok": True},
                                 {"total": 10, "downloaded": 0}, empty)
     assert st["next"] == "download" and st["scanned"] is True
-    st = webui.onboarding_state({"download_dir_set": True}, {"ok": True}, {"ok": True},
+    st = webapp.access.onboarding_state({"download_dir_set": True}, {"ok": True}, {"ok": True},
                                 {"total": 10, "downloaded": 10}, empty)
     assert st["next"] == "done"
 
 
 def test_status_exposes_onboarding_and_version(monkeypatch):
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
-    st = webui.api_status()
-    assert st["app_version"] == webui.APP_VERSION
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    st = webapp.status.api_status()
+    assert st["app_version"] == utils.APP_VERSION
     assert st["onboarding"]["next"] == "token"
     assert st["config"]["download_dir_set"] is False
 
@@ -817,7 +829,7 @@ def test_task_writes_log_file(tmp_path):
             return 0
 
     log_file = tmp_path / "logs" / "tasks" / "disk.log"
-    t = webui.Task("disk", Proc(), log_file=log_file, cmd=["main.py", "scan"])
+    t = webapp.tasks.Task("disk", Proc(), log_file=log_file, cmd=["main.py", "scan"])
     t.thread.join(timeout=2)
     text = log_file.read_text(encoding="utf-8")
     assert "старт: main.py scan" in text
@@ -852,7 +864,7 @@ def test_logs_bundle_contains_logs_and_support_info(tmp_path, monkeypatch):
     logs = tmp_path / "logs"
     logs.mkdir()
     (logs / "unlim_worker.log").write_text("w1 b1 download: not_zip\n", encoding="utf-8")
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     resp = client.get("/api/logs/bundle")
     assert resp.status_code == 200
@@ -862,7 +874,7 @@ def test_logs_bundle_contains_logs_and_support_info(tmp_path, monkeypatch):
         names = set(zf.namelist())
         assert "unlim_worker.log" in names and "support-info.json" in names
         info = json.loads(zf.read("support-info.json"))
-    assert info["app_version"] == webui.APP_VERSION
+    assert info["app_version"] == utils.APP_VERSION
     assert "token" not in info["config"]          # сырой токен не уходит
     assert info["config"]["token_ok"] is False
 
@@ -897,21 +909,21 @@ def test_guide_and_readme_images_exist_and_are_served():
     assert client.get("/docs/images/nope.webp").status_code == 404
     assert client.get("/docs/images/..%2F..%2F.env").status_code == 404
     assert client.get("/docs/images/README.md").status_code == 404
-    readme = (webui.PROJECT / "README.md").read_text(encoding="utf-8")
+    readme = (webapp.paths.PROJECT / "README.md").read_text(encoding="utf-8")
     for path in set(_re.findall(r"docs/images/[\w.-]+", readme)):
-        assert (webui.PROJECT / path).is_file(), path
+        assert (webapp.paths.PROJECT / path).is_file(), path
 
 
 def test_ui_has_no_bare_instruction_filename_links():
     """«INSTRUCTION_GET_TOKEN.md» как текст ссылки: Telegram и браузер считают .md доменом."""
-    html = (webui.TEMPLATES_DIR / "index.html").read_text(encoding="utf-8")
+    html = (webapp.paths.TEMPLATES_DIR / "index.html").read_text(encoding="utf-8")
     assert ">INSTRUCTION_GET_TOKEN.md<" not in html
     assert 'href="/guide"' in html
 
 
 def test_unlim_retry_without_db_does_not_create_it(tmp_path, monkeypatch):
     db_file = tmp_path / "unlim_state.db"
-    monkeypatch.setattr(webui, "UNLIM_DB_FILE", db_file)
+    monkeypatch.setattr(webapp.paths, "UNLIM_DB_FILE", db_file)
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     resp = client.post("/api/unlim/retry", json={"workers": 1, "batch": 5})
     assert resp.json()["ok"] is False
@@ -938,7 +950,7 @@ def test_db_stats_detailed_breakdown(tmp_path):
     con.commit()
     con.close()
 
-    stats = webui.db_stats(db)
+    stats = webapp.queue_db.db_stats(db)
     assert stats["bytes_pending"] == 100
     assert stats["bytes_in_progress"] == 200
     assert stats["bytes_failed"] == 300

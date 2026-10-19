@@ -5,6 +5,10 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
+import webapp.access
+import webapp.diagnostics
+import webapp.queue_db
+import webapp.tasks
 import webui
 
 
@@ -20,7 +24,7 @@ import webui
     ],
 )
 def test_task_kind(cmd, kind):
-    assert webui.task_kind(cmd) == kind
+    assert webapp.tasks.task_kind(cmd) == kind
 
 
 def test_db_stats_counts_deferred_files_and_hosts(tmp_path):
@@ -42,7 +46,7 @@ def test_db_stats_counts_deferred_files_and_hosts(tmp_path):
     )
     con.commit()
     con.close()
-    st = webui.db_stats(db, "unlim_files", "file_id")
+    st = webapp.queue_db.db_stats(db, "unlim_files", "file_id")
     assert st["pending"] == 4  # отложенные — часть очереди
     assert st["deferred"] == 3 and st["bytes_deferred"] == 60
     assert st["deferred_hosts"] == 2
@@ -60,8 +64,8 @@ class _Task:
 
 
 def _diag(monkeypatch, tasks):
-    monkeypatch.setattr(webui.tm, "_tasks", tasks)
-    return webui.diagnose_tasks()
+    monkeypatch.setattr(webapp.tasks.tm, "_tasks", tasks)
+    return webapp.diagnostics.diagnose_tasks()
 
 
 def test_single_refusal_does_not_claim_yandex_refuses(monkeypatch):
@@ -78,11 +82,11 @@ def test_sorting_file_names_do_not_become_yandex_banners(monkeypatch):
     summary = ('organize_summary | {"folders": 2, "examples": [{"from": "Отчёты/timeout_2024.docx", '
                '"to": "Документы/timeout_2024.docx"}]}')
     sorting = _Task([summary, "  err: D:/YAD-bak/local_disk.txt: [Errno 13] Permission denied"], alive=True)
-    assert _diag(monkeypatch, {webui.SLOT_ORGANIZE: sorting})["kind"] is None
+    assert _diag(monkeypatch, {webapp.tasks.SLOT_ORGANIZE: sorting})["kind"] is None
 
 
 def test_old_finished_tasks_do_not_keep_banners(monkeypatch):
-    old = _Task(["auth_expired | КРИТИЧЕСКАЯ ОШИБКА"], finished_ago=webui.DIAG_RECENT_SEC + 60)
+    old = _Task(["auth_expired | КРИТИЧЕСКАЯ ОШИБКА"], finished_ago=webapp.tasks.DIAG_RECENT_SEC + 60)
     assert _diag(monkeypatch, {"unlim_w1": old})["kind"] is None
     live = _Task(["auth_expired | КРИТИЧЕСКАЯ ОШИБКА"], alive=True)
     assert _diag(monkeypatch, {"unlim_w1": live})["kind"] == "auth_expired"
@@ -106,14 +110,14 @@ def test_stop_matching_terminates_everyone_before_waiting(monkeypatch):
         def wait_or_kill(self, timeout=5.0):
             events.append(f"wait {self.name}")
 
-    monkeypatch.setattr(webui.tm, "_tasks", {"unlim_w1": T("w1"), "unlim_w2": T("w2"), "disk": T("disk")})
-    stopped = webui.tm.stop_matching("unlim_w")
+    monkeypatch.setattr(webapp.tasks.tm, "_tasks", {"unlim_w1": T("w1"), "unlim_w2": T("w2"), "disk": T("disk")})
+    stopped = webapp.tasks.tm.stop_matching("unlim_w")
     assert len(stopped) == 2
     assert events == ["terminate w1", "terminate w2", "wait w1", "wait w2"]
 
 
 def test_status_exposes_exit_code_texts(monkeypatch):
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     codes = client.get("/api/status").json()["exit_codes"]
     assert set(codes) >= {"1", "2", "3", "4", "5"}

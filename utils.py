@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import errno
 import hashlib
 import json
@@ -11,6 +12,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -32,7 +34,7 @@ CASE_INSENSITIVE_PATHS = IS_WINDOWS or sys.platform == "darwin"
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
-APP_VERSION = "2.6.1"
+APP_VERSION = "2.7.0"
 
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 
@@ -262,7 +264,7 @@ def decode_disk_folders(raw: str | None) -> list[str] | None:
         return None
 
 
-# ── Коды выхода скриптов (их читают Rescue в webui.py и фронтенд) ──────────
+# ── Коды выхода скриптов (их читают Rescue в webapp/rescue.py и фронтенд) ──
 EXIT_OK = 0
 EXIT_PARTIAL = 1      # скачивание закончилось, часть файлов упала
 EXIT_AUTH = 2         # токен или cookies действительно недействительны
@@ -270,6 +272,23 @@ EXIT_OUTAGE = 3       # Яндекс не отвечает или отказыв
 EXIT_DISK_FULL = 4    # локальный диск переполнен или недоступен для записи
 EXIT_DEFERRED = 5     # всё доступное скачано, остальное лежит на молчащих серверах Яндекса
 EXIT_INTERRUPTED = 130
+
+# Web UI ставит её своим процессам. Подсказки «запустите снова» и «--wait» нужны только
+# в консоли: под Web UI раунды повторов ведёт сам интерфейс
+UNDER_WEBUI_ENV = "YADISK_WEBUI"
+
+
+def under_webui() -> bool:
+    """Скрипт запущен из Web UI, а не человеком в консоли."""
+    return os.environ.get(UNDER_WEBUI_ENV) == "1"
+
+
+def retry_every_sec() -> int:
+    """Пауза между раундами повторов отложенных файлов: 30 минут.
+
+    Общая для Web UI и консольного --wait. YADISK_RETRY_EVERY_SEC — для живых проверок.
+    """
+    return safe_int(os.environ.get("YADISK_RETRY_EVERY_SEC"), 1800, 60, 24 * 3600)
 
 # ── Расширения файлов по категориям ─────────────────────────────────────────
 
@@ -844,6 +863,51 @@ def human_duration_ru(seconds: float | None) -> str:
     if m > 0:
         return f"{m}м {s:02d}с"
     return f"{s}с"
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """Форма слова для числа: plural(3, "файл", "файла", "файлов") → «файла»."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
+
+
+def files_text(n: int) -> str:
+    """«1 234 файла»: тысячи разделены пробелом, слово — в нужной форме."""
+    return f"{int(n):,}".replace(",", " ") + " " + plural(n, "файл", "файла", "файлов")
+
+
+def hhmm(ts: float | None) -> str:
+    """Местное время «14:05»; пустая строка, если времени нет."""
+    return time.strftime("%H:%M", time.localtime(ts)) if ts else ""
+
+
+def deferred_round_text(waited: int, downloaded: int) -> str:
+    """Итог повтора отложенных файлов — по нему видно, оживают ли серверы Яндекса.
+
+    waited — сколько файлов ждали Яндекса перед попыткой, downloaded — сколько скачалось за неё.
+    Доля успешных попыток падает, когда живые файлы уже скачаны: остаются те, чьи серверы
+    молчат. Эта строка показывает именно повторы, а не общую долю.
+    """
+    of = f"{int(waited):,}".replace(",", " ") + " " + plural(waited, "файла", "файлов", "файлов")
+    if not downloaded:
+        return f"Яндекс пока не отдал ни одного из {of}, ждавших его: их серверы хранения ещё молчат"
+    got = f"{int(downloaded):,}".replace(",", " ")
+    share = f" ({downloaded * 100 // waited}%)" if 0 < downloaded <= waited else ""
+    return f"Из {of}, ждавших Яндекса, скачано {got}{share}"
+
+
+def utc_ts(value) -> float | None:
+    """downloaded_at из баз ('YYYY-MM-DD HH:MM:SS' или с 'T', время UTC) → секунды эпохи."""
+    if not value:
+        return None
+    try:
+        return float(calendar.timegm(time.strptime(str(value)[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")))
+    except ValueError:
+        return None
 
 
 def ensure_utf8_stdio() -> None:

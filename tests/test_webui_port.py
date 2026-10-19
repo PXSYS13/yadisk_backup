@@ -8,6 +8,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 from fastapi.testclient import TestClient
 
+import utils
+import webapp.ports
 import webui
 
 
@@ -56,7 +58,7 @@ def _two_free_ports() -> int:
         s.close()
         if port >= 65535:
             continue
-        nxt = webui._bind_port(port + 1)
+        nxt = webapp.ports.bind_port(port + 1)
         if nxt is not None:
             nxt.close()
             return port
@@ -65,7 +67,7 @@ def _two_free_ports() -> int:
 
 def test_free_port_is_used_as_is():
     port = _two_free_ports()
-    sock, chosen, running = webui.choose_port(port, 1)
+    sock, chosen, running = webapp.ports.choose_port(port, 1)
     try:
         assert sock is not None and chosen == port and running is None
     finally:
@@ -75,7 +77,7 @@ def test_free_port_is_used_as_is():
 def test_foreign_program_on_port_moves_to_the_next_one():
     port = _two_free_ports()
     with _Occupant(port):  # как ghostscript-printer-app: на наши адреса отвечает 404
-        sock, chosen, running = webui.choose_port(port, 5)
+        sock, chosen, running = webapp.ports.choose_port(port, 5)
         try:
             assert sock is not None and chosen == port + 1 and running is None
         finally:
@@ -85,28 +87,28 @@ def test_foreign_program_on_port_moves_to_the_next_one():
 def test_fixed_port_held_by_foreign_program_gives_up():
     port = _two_free_ports()
     with _Occupant(port):
-        assert webui.choose_port(port, 1) == (None, port, None)
+        assert webapp.ports.choose_port(port, 1) == (None, port, None)
 
 
 def test_running_copy_is_opened_instead_of_starting_a_second_one():
     port = _two_free_ports()
-    hello = {"app": webui.APP_ID, "version": "2.6.1", "folder": "/home/user/yadisk_backup"}
+    hello = {"app": webapp.ports.APP_ID, "version": "2.6.1", "folder": "/home/user/yadisk_backup"}
     with _Occupant(port, {"/api/hello": hello}):
-        sock, chosen, running = webui.choose_port(port, 5)
+        sock, chosen, running = webapp.ports.choose_port(port, 5)
     assert sock is None and chosen == port and running["folder"] == "/home/user/yadisk_backup"
 
 
 def test_copy_of_an_old_version_is_recognized_by_status():
     port = _two_free_ports()
     with _Occupant(port, {"/api/status": {"tasks": {}, "pipeline": {}}}):  # до 2.6.1 нет /api/hello
-        sock, chosen, running = webui.choose_port(port, 5)
-    assert sock is None and chosen == port and running == {"app": webui.APP_ID}
+        sock, chosen, running = webapp.ports.choose_port(port, 5)
+    assert sock is None and chosen == port and running == {"app": webapp.ports.APP_ID}
 
 
 def test_other_app_with_hello_is_not_mistaken_for_us():
     port = _two_free_ports()
     with _Occupant(port, {"/api/hello": {"app": "something-else"}}):
-        sock, chosen, running = webui.choose_port(port, 5)
+        sock, chosen, running = webapp.ports.choose_port(port, 5)
         try:
             assert chosen == port + 1 and running is None
         finally:
@@ -122,7 +124,7 @@ def test_listener_only_on_ipv6_localhost_is_skipped():
         pytest.skip("IPv6 недоступен")
     v6.listen()
     try:
-        sock, chosen, running = webui.choose_port(port, 5)
+        sock, chosen, running = webapp.ports.choose_port(port, 5)
         try:
             assert chosen == port + 1 and running is None
         finally:
@@ -134,13 +136,13 @@ def test_listener_only_on_ipv6_localhost_is_skipped():
 def test_hello_names_the_app():
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     data = client.get("/api/hello").json()
-    assert data["app"] == webui.APP_ID and data["version"] == webui.APP_VERSION and data["folder"]
+    assert data["app"] == webapp.ports.APP_ID and data["version"] == utils.APP_VERSION and data["folder"]
 
 
 def test_moved_port_is_trusted_by_the_csrf_guard(monkeypatch):
     for name in ("PORT", "_ALLOWED_ORIGINS", "_ALLOWED_HOSTS"):
-        monkeypatch.setattr(webui, name, getattr(webui, name))  # вернуть после теста
-    webui._use_port(8001)
+        monkeypatch.setattr(webapp.ports, name, getattr(webapp.ports, name))  # вернуть после теста
+    webapp.ports.use_port(8001)
     assert TestClient(webui.app, headers={"Host": "127.0.0.1:8001"}).get("/api/hello").status_code == 200
     assert TestClient(webui.app, headers={"Host": "127.0.0.1:8000"}).get("/api/hello").status_code == 403
     client = TestClient(webui.app, headers={"Host": "127.0.0.1:8001", "Origin": "http://127.0.0.1:8001"})

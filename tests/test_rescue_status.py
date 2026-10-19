@@ -1,5 +1,10 @@
 """Сводка «Режима спасения» для главного экрана: формат и тексты по состояниям."""
 
+import utils
+import webapp.access
+import webapp.queue_db
+import webapp.rescue_view
+import webapp.texts
 import webui
 
 CFG = {"download_dir": "D:\\Backup", "download_dir_set": True}
@@ -9,7 +14,7 @@ NO = {"ok": False}
 
 
 def db(**kw):
-    base = webui._empty_db_stats()
+    base = webapp.queue_db.empty_db_stats()
     base.update(kw)
     return base
 
@@ -23,7 +28,7 @@ def rescue_st(running=False, started=100.0, state="running", disk=None, unlim=No
 
 
 def build(st, disk_db=None, unlim_db=None, token=TOKEN_OK, cookies=COOKIES_OK, **kw):
-    return webui.build_rescue_status(st, disk_db or db(), unlim_db or db(), token, cookies, CFG,
+    return webapp.rescue_view.build_rescue_status(st, disk_db or db(), unlim_db or db(), token, cookies, CFG,
                                      now=kw.pop("now", 1000.0), **kw)
 
 
@@ -103,7 +108,7 @@ def test_live_signs_events_and_recent_files():
 
 
 def test_progress_meter_counts_recent_work():
-    m = webui.ProgressMeter()
+    m = webapp.rescue_view.ProgressMeter()
     assert m.sample("disk", 10, 5, now=1000.0) is None  # мало данных
     assert m.sample("disk", 12, 5, now=1010.0) is None
     r = m.sample("disk", 40, 9, now=1030.0)
@@ -123,19 +128,19 @@ def test_listing_found_and_source_live():
                           "log_tail": ["  Найдено: 13602 файлов (64.34 GB), новых 0"]},
         "unlim_w1": {"running": True, "last_line_at": 70.0, "log_tail": []},
     }
-    disk = webui.source_live("disk", tasks, "listing", None)
+    disk = webapp.rescue_view.source_live("disk", tasks, "listing", None)
     assert disk["listing_found"] == 2400 and disk["last_activity_at"] == 50.0
-    unlim = webui.source_live("unlim", tasks, "downloading", {"window_sec": 60, "checked": 1, "done": 1})
+    unlim = webapp.rescue_view.source_live("unlim", tasks, "downloading", {"window_sec": 60, "checked": 1, "done": 1})
     assert unlim["listing_found"] is None  # список уже собран
     assert unlim["last_activity_at"] == 70.0 and unlim["tasks_running"] == 1
-    assert webui.source_live("unlim", tasks, "listing", None)["listing_found"] == 13602
-    assert webui.source_live("disk", {}, None, None)["last_activity_at"] is None
+    assert webapp.rescue_view.source_live("unlim", tasks, "listing", None)["listing_found"] == 13602
+    assert webapp.rescue_view.source_live("disk", {}, None, None)["last_activity_at"] is None
 
 
 def test_downloaded_at_is_read_as_utc():
-    assert webui._utc_ts("1970-01-01T00:01:40") == 100.0
-    assert webui._utc_ts("1970-01-01 00:01:40") == 100.0
-    assert webui._utc_ts(None) is None and webui._utc_ts("мусор") is None
+    assert webapp.queue_db.utc_ts("1970-01-01T00:01:40") == 100.0
+    assert webapp.queue_db.utc_ts("1970-01-01 00:01:40") == 100.0
+    assert webapp.queue_db.utc_ts(None) is None and webapp.queue_db.utc_ts("мусор") is None
 
 
 def test_waiting_for_yandex_tells_when_next_try_is():
@@ -201,16 +206,16 @@ def test_stopped():
 
 
 def test_plural_and_bytes_helpers():
-    assert webui._files(1) == "1 файл"
-    assert webui._files(3) == "3 файла"
-    assert webui._files(11) == "11 файлов"
-    assert webui._files(10900) == "10 900 файлов"
-    assert webui._ru_bytes(69 * 1024**3) == "69,0 ГБ"
+    assert utils.files_text(1) == "1 файл"
+    assert utils.files_text(3) == "3 файла"
+    assert utils.files_text(11) == "11 файлов"
+    assert utils.files_text(10900) == "10 900 файлов"
+    assert webapp.texts.ru_bytes(69 * 1024**3) == "69,0 ГБ"
 
 
 def test_status_endpoint_carries_rescue(monkeypatch):
     from fastapi.testclient import TestClient
-    monkeypatch.setattr(webui, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     r = client.get("/api/status").json()["rescue"]
     assert r["schema"] == 1 and set(r["sources"]) == {"disk", "unlim"}
