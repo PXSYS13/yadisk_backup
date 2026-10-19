@@ -743,6 +743,7 @@ const snap = () => ({ main: nodes['det-verify'].innerHTML, actions: nodes['det-v
   d.update(S(verifyTask([inp.summary], false)));
   await App.actions['verify-requeue']({ dataset: { source: 'disk', count: '5', bytes: '10200327', at: String(inp.at) } });
   d.update(S(verifyTask([inp.summary], false))); out.requeued = snap();
+  d.update(S(verifyTask([inp.summary], false), true)); out.requeued_busy = snap();
   out.posted = posted.filter(([url]) => url.startsWith('/api/verify'));
   process.stdout.write(JSON.stringify(out));
 })();
@@ -800,7 +801,25 @@ def test_details_verify_card_states():
     assert "У 1 200 файлов программа старой версии не записала" in out["unchecked"]["main"]
     assert "verify-start" not in out["unchecked"]["actions"]
 
-    # «Скачать заново» → файлы в очереди, дальше — «Продолжить» на Главной
+    # «Скачать заново» → файлы в очереди
     assert out["posted"] == [["/api/verify/requeue", {"source": "disk"}]]
-    assert "5 файлов снова в очереди" in out["requeued"]["main"]
-    assert 'href="#/home"' in out["requeued"]["actions"] and "verify-requeue" not in out["requeued"]["actions"]
+    # «Скачать сейчас» — здесь же: после «Готово» на Главной нет «Продолжить»
+    assert "5 файлов снова в очереди. Нажмите «Скачать сейчас»" in out["requeued"]["main"]
+    assert 'data-action="rescue-start"' in out["requeued"]["actions"] and 'href="#/home"' in out["requeued"]["actions"]
+    assert "verify-requeue" not in out["requeued"]["actions"] and "verify-start" not in out["requeued"]["actions"]
+    assert "Скачивание уже идёт" in out["requeued_busy"]["main"] and "rescue-start" not in out["requeued_busy"]["actions"]
+
+
+def test_help_answers_deleted_files_with_real_buttons():
+    """«Случайно удалил файлы…»: «Помощь» и README называют кнопки так, как они подписаны в программе."""
+    ui = "\n".join(p.read_text(encoding="utf-8") for p in JS_FILES if p.name != "help.js")
+    reasons = (Path(webapp.paths.PROJECT) / "webapp" / "queue_db.py").read_text(encoding="utf-8")
+    help_js = (ASSETS / "static" / "js" / "screens" / "help.js").read_text(encoding="utf-8")
+    readme = (Path(webapp.paths.PROJECT) / "README.md").read_text(encoding="utf-8")
+    for text in (help_js, readme):
+        assert "Случайно удалил файлы, пока шло скачивание" in text
+        assert "30 дней" in text and "Корзин" in text and "«Восстановить»" in text
+        for label in ("Подробнее", "Проверить скачанные файлы", "Скачать заново", "Скачать сейчас",
+                      "Повторить не скачавшиеся"):
+            assert f"«{label}»" in text and label in ui, label
+        assert "«Файла больше нет на Диске»" in text and "Файла больше нет на Диске" in reasons

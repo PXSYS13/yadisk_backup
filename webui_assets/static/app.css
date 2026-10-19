@@ -663,6 +663,7 @@ details[open]>summary::before{transform:rotate(45deg)}
 details>.body{padding:12px 0 2px 23px;color:var(--text-2)}
 .card>details:only-child{padding:0}
 .faq details>.body p{max-width:760px}
+.faq details>.body p+p{margin-top:10px}
 
 /* ── Монитор Яндекса ── */
 .probe{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:16px 0;border-top:1px solid var(--border)}

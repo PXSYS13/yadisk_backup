@@ -253,14 +253,21 @@
       const fixable = (sum.missing || 0) + (sum.size || 0) + (sum.md5 || 0);
       const back = requeued[name] && requeued[name].at === String(task.finished_at) ? requeued[name] : null;
       if (back) {
-        main += `<p class="verify-head ok">${App.icon('check')}<span>${esc(fmt.files(back.count))} снова в очереди. ` +
-          'Нажмите «Продолжить» на Главной — программа скачает их заново.</span></p>';
-        actions = `<a class="btn primary" href="#/home">${App.icon('home')}На главную</a>`;
-      } else if (fixable) {
-        actions = button('verify-requeue', 'primary', 'download', 'Скачать заново',
-          ` data-count="${fixable}" data-bytes="${sum.bad_bytes || 0}" data-at="${task.finished_at}"`);
+        // Кнопка здесь же: после «Готово» на Главной нет «Продолжить», там «Проверить новые файлы»
+        const running = !!(s.pipeline && s.pipeline.running);
+        const them = back.count === 1 ? 'его' : 'их';
+        main += `<p class="verify-head ok">${App.icon('check')}<span>${esc(fmt.files(back.count))} снова в очереди. ${running
+          ? 'Скачивание уже идёт — программа скачает ' + them + ' вместе с остальными.'
+          : 'Нажмите «Скачать сейчас», и программа скачает ' + them + ' заново.'}</span></p>`;
+        actions = (running ? '' : `<button class="primary" data-action="rescue-start">${App.icon('download')}Скачать сейчас</button>`) +
+          `<a class="btn" href="#/home">${App.icon('home')}На главную</a>`;
+      } else {
+        if (fixable) {
+          actions = button('verify-requeue', 'primary', 'download', 'Скачать заново',
+            ` data-count="${fixable}" data-bytes="${sum.bad_bytes || 0}" data-at="${task.finished_at}"`);
+        }
+        if (sum.checked) actions += button('verify-start', '', 'refresh', 'Проверить ещё раз');
       }
-      if (sum.checked) actions += button('verify-start', '', 'refresh', 'Проверить ещё раз');
     } else if (task) {
       const code = typeof task.exit_code === 'number' ? ` (код ${task.exit_code})` : '';
       main = task.was_stopped
@@ -386,8 +393,8 @@
     const count = Number(btn.dataset.count) || 0;
     const bytes = Number(btn.dataset.bytes) || 0;
     const yes = await App.confirm({ title: `Скачать заново ${fmt.files(count)}?`, ok: 'Вернуть в очередь',
-      text: `Они вернутся в очередь${bytes ? ` (${fmt.bytes(bytes)})` : ''} и скачаются, когда вы нажмёте «Продолжить» ` +
-        'на Главной. Испорченные копии заменятся новыми. Если какие-то из этих файлов вы сами перенесли или удалили, ' +
+      text: `Они вернутся в очередь${bytes ? ` (${fmt.bytes(bytes)})` : ''}, и их можно будет сразу скачать. ` +
+        'Испорченные копии заменятся новыми. Если какие-то из этих файлов вы сами перенесли или удалили, ' +
         'они скачаются ещё раз.' });
     if (!yes) return;
     const res = await App.run(btn, () => App.api.post('/api/verify/requeue', { source: name }));

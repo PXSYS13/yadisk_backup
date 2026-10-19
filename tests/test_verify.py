@@ -310,8 +310,7 @@ def test_requeue_endpoint_counts_files(client, tmp_path):
     with State(str(webapp.paths.DB_FILE)) as st:
         st.save_verify_problems([("disk:/b.jpg", "missing")])
     res = client.post("/api/verify/requeue", json={"source": "disk"}).json()
-    assert res == {"ok": True, "count": 1,
-                   "msg": "1 файл снова в очереди. Нажмите «Продолжить» на Главной — программа скачает их заново"}
+    assert res == {"ok": True, "count": 1, "msg": "1 файл снова в очереди — нажмите «Скачать сейчас»"}
     again = client.post("/api/verify/requeue", json={"source": "disk"}).json()
     assert again["ok"] is False and again["count"] == 0
     assert client.post("/api/verify/requeue", json={"source": "unlim"}).json()["count"] == 0
