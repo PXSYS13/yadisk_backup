@@ -240,18 +240,15 @@ def test_sql_ident_whitelist_rejects_injection(disk_db):
         webapp.queue_db.preview_db(disk_db, "files", "1=1; --")
 
 
-def test_donate_redirect(monkeypatch):
-    # Новый интерфейс: экран «Поддержать», а не «Главная» (там ?tab= не понимают)
+def test_donate_redirect():
+    # Экран «Поддержать», а не «Главная»: README даёт людям адрес /donate
     resp = webapp.pages.donate()
     assert resp.status_code == 307
     assert resp.headers["location"] == "/#/support"
-    # Прежний интерфейс по умолчанию — его вкладка доната
-    monkeypatch.setattr(webapp.pages, "UI_DEFAULT", "old")
-    assert webapp.pages.donate().headers["location"] == "/?tab=donate"
 
 
 def test_donation_url_constant():
-    assert utils.DONATION_URL == "https://dalink.to/davronsvv"
+    assert utils.DONATION_URL == "https://www.donationalerts.com/r/davronsvv"
 
 
 def test_api_status_does_not_leak_raw_token(monkeypatch):
@@ -340,40 +337,6 @@ def test_task_was_stopped():
     assert t.was_stopped is False
     t.stop()
     assert t.was_stopped is True
-
-
-def test_api_unlim_retry(tmp_path, monkeypatch):
-    db_file = tmp_path / "test_unlim_api.db"
-    monkeypatch.setattr(webapp.paths, "UNLIM_DB_FILE", db_file)
-    con = sqlite3.connect(db_file)
-    con.executescript(
-        """
-        CREATE TABLE unlim_files (
-            file_id TEXT PRIMARY KEY, status TEXT, attempts INTEGER, error TEXT, worker_id INTEGER
-        );
-        INSERT INTO unlim_files VALUES ('f1', 'failed', 3, 'err', NULL);
-        INSERT INTO unlim_files VALUES ('f2', 'in_progress', 1, 'err', 1);
-        """
-    )
-    con.close()
-
-    # Мокаем запуск воркеров
-    started_slots = []
-    monkeypatch.setattr(webapp.tasks.tm, "start", lambda slot, script, args: (started_slots.append((slot, args)) or True, "ok"))
-
-    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
-    resp = client.post("/api/unlim/retry", json={"workers": 2, "batch": 15})
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    assert len(started_slots) == 2
-    assert "--batch" in started_slots[0][1]
-    assert "15" in started_slots[0][1]
-
-    con = sqlite3.connect(db_file)
-    rows = dict(con.execute("SELECT file_id, status FROM unlim_files").fetchall())
-    con.close()
-    assert rows["f1"] == "pending"
-    assert rows["f2"] == "pending"
 
 
 def test_get_config_safe_max_workers(monkeypatch):
@@ -528,7 +491,6 @@ def test_task_manager_prefix_helpers(monkeypatch):
     class AliveTask:
         def __init__(self):
             self.stopped = False
-            self.log = ["x"]
 
         def alive(self):
             return not self.stopped
@@ -548,8 +510,6 @@ def test_task_manager_prefix_helpers(monkeypatch):
     monkeypatch.setitem(webapp.tasks.tm._tasks, "unlim_collect", collect)
 
     assert webapp.tasks.tm.any_alive("unlim_w") is True
-    assert webapp.tasks.tm.clear_logs("unlim_w*") == 2
-    assert w1.log == [] and collect.log == ["x"]
 
     stopped = webapp.tasks.tm.stop_matching("unlim_w")
     assert {id(t) for t in stopped} == {id(w1), id(w2)}
@@ -711,10 +671,10 @@ def test_pipeline_without_token_downloads_unlim_only(monkeypatch):
     assert pipe.status()["partial"] is True
 
 
-def test_api_start_refuses_when_nothing_configured(monkeypatch):
+def test_rescue_start_refuses_when_nothing_configured(monkeypatch):
     monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
-    resp = client.post("/api/start", json={"do_disk": True, "do_unlim": True})
+    resp = client.post("/api/rescue/start")  # по умолчанию включены оба источника
     body = resp.json()
     assert body["ok"] is False
     assert "ни токена, ни cookies" in body["msg"]
@@ -758,18 +718,6 @@ def test_pipeline_applies_categories_after_scan(tmp_path, monkeypatch):
     con.close()
     # Фото выбраны и скачаны, документ снят выбором категорий и не качался
     assert st == {"disk:/a.jpg": "downloaded", "disk:/b.pdf": "skipped"}
-
-
-def test_api_plan_shape(monkeypatch):
-    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
-    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
-    plan = client.get("/api/plan").json()
-    assert set(plan) >= {"access", "disk", "unlim", "free_space", "rate_bps", "recommended", "diagnostics"}
-    assert plan["recommended"]["workers"] in (2, 4)
-    assert plan["disk"]["preview"]["empty"] is True
-
-    resp = client.post("/api/plan/start", json={"do_disk": False, "do_unlim": False})
-    assert resp.json()["ok"] is False
 
 
 def test_unlim_preview_categorizes_by_name(tmp_path, monkeypatch):
@@ -916,16 +864,19 @@ def test_guide_and_readme_images_exist_and_are_served():
 
 def test_ui_has_no_bare_instruction_filename_links():
     """«INSTRUCTION_GET_TOKEN.md» как текст ссылки: Telegram и браузер считают .md доменом."""
-    html = (webapp.paths.TEMPLATES_DIR / "index.html").read_text(encoding="utf-8")
-    assert ">INSTRUCTION_GET_TOKEN.md<" not in html
-    assert 'href="/guide"' in html
+    assets = webapp.paths.TEMPLATES_DIR
+    text = (assets / "app.html").read_text(encoding="utf-8") + "".join(
+        p.read_text(encoding="utf-8") for p in sorted((assets / "static" / "js").rglob("*.js")))
+    assert ">INSTRUCTION_GET_TOKEN.md<" not in text
+    assert 'href="/guide"' in text
 
 
 def test_unlim_retry_without_db_does_not_create_it(tmp_path, monkeypatch):
     db_file = tmp_path / "unlim_state.db"
     monkeypatch.setattr(webapp.paths, "UNLIM_DB_FILE", db_file)
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
-    resp = client.post("/api/unlim/retry", json={"workers": 1, "batch": 5})
+    resp = client.post("/api/rescue/retry_failed", json={"source": "unlim"})
     assert resp.json()["ok"] is False
     assert not db_file.exists()
 

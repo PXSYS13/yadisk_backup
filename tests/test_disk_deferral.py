@@ -11,7 +11,7 @@ import main
 from state import DEFERRED_MARKER, State
 from utils import EXIT_AUTH, EXIT_DEFERRED, EXIT_DISK_FULL, EXIT_OK, EXIT_PARTIAL
 
-# Регулярка, которой Web UI читает строку прогресса (index.html, parseDownloadProgress)
+# Формат строки прогресса в консоли и в журнале задачи (как в test_public_download)
 PROGRESS_RE = re.compile(r"Прогресс:\s*(\d+)\/(\d+)\s*файлов.*?ошибок\s*(\d+)")
 
 

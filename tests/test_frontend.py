@@ -14,7 +14,6 @@ import utils
 import webapp.access
 import webapp.demo
 import webapp.folders
-import webapp.pages
 import webapp.paths
 import webui
 
@@ -78,19 +77,17 @@ def test_no_markdown_file_names_in_ui_text():
 
 def test_sorting_never_promises_that_nothing_is_deleted():
     # «Разложить файлы» удаляет опустевшие папки и разбирает папки Диска — обещать обратное нельзя
-    text = APP_HTML.read_text(encoding="utf-8") + _all_js() + (ASSETS / "index.html").read_text(encoding="utf-8")
+    text = APP_HTML.read_text(encoding="utf-8") + _all_js()
     assert not re.search(r"ничего не удаля(ется|ет)", text, re.IGNORECASE)
 
 
-def test_index_switches_between_new_and_old_ui(monkeypatch):
+def test_index_serves_the_ui_with_versioned_static():
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
-    new = client.get("/?ui=new").text
-    assert "/static/js/core.js?v=" in new and "__APP_VERSION__" not in new
-    assert utils.APP_VERSION in new
-    old = client.get("/?ui=old").text
-    assert "/static/js/core.js" not in old
-    monkeypatch.setattr(webapp.pages, "UI_DEFAULT", "new")
-    assert "/static/js/core.js" in client.get("/").text
+    page = client.get("/").text
+    assert "/static/js/core.js?v=" in page and "__APP_VERSION__" not in page
+    assert utils.APP_VERSION in page
+    # Закладки на прежний интерфейс (удалён в 2.7.1) открывают этот же
+    assert client.get("/", params={"ui": "old"}).text == page
 
 
 def test_demo_states_are_complete(monkeypatch):
@@ -263,7 +260,7 @@ def test_donate_card_asks_once_per_milestone():
     assert "Программа помогла?" in out["card"] and 'href="https://dalink.to/x"' in out["card"]
     assert 'data-action="donate-open"' in out["card"] and 'data-key="m-10000"' in out["card"]
     assert "Уже 10 000 файлов на вашем компьютере" in out["card_ms"]
-    assert "https://dalink.to/davronsvv" in out["card_ms"]
+    assert "https://www.donationalerts.com/r/davronsvv" in out["card_ms"]
 
 
 # «Папки» в «Подробнее» у Диска: список, сводка и переход внутрь папки — в node, fetch подменён

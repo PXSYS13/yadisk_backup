@@ -49,10 +49,10 @@
           <h1>Поддержать проект</h1>
           <p class="sub">Программа бесплатная и открытая. Её делают в свободное время, чтобы люди не потеряли свои фото и файлы.
             Если она помогла — можно поддержать автора или просто рассказать о ней знакомым.</p>
-          <p class="support-note">Имя и сообщение из доната появятся ниже, в «Нас поддерживают», примерно через полчаса.
+          <p class="support-note">Имя и сообщение из доната появятся ниже, в «Нас поддерживают».
             Не хотите, чтобы имя было видно, — подпишитесь «Аноним».</p>
           <div class="row actions">
-            <a class="btn primary big" id="support-donate" href="https://dalink.to/davronsvv" target="_blank" rel="noopener">${I('heart')}Поддержать на DonationAlerts</a>
+            <a class="btn primary big" id="support-donate" href="https://www.donationalerts.com/r/davronsvv" target="_blank" rel="noopener">${I('heart')}Поддержать на DonationAlerts</a>
             <a class="btn big" id="support-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">${I('send')}Канал в Telegram</a>
             <a class="btn big" href="https://github.com/PXSYS13/yadisk_backup" target="_blank" rel="noopener">${I('code')}Проект на GitHub</a>
           </div>

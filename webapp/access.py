@@ -212,12 +212,6 @@ def api_clear_token():
     return {"ok": True}
 
 
-@router.post("/api/cookies/check")
-def api_check_cookies(payload: CookiesPayload):
-    """Проверка без сохранения."""
-    return cookies_report(payload.cookies)
-
-
 @router.post("/api/cookies")
 def api_set_cookies(payload: CookiesPayload):
     """Сохраняет cookies.json атомарно через tmp+replace с предварительной валидацией."""

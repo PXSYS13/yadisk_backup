@@ -14,17 +14,10 @@ from webapp.ports import APP_ID
 
 router = APIRouter()
 
-# Какой интерфейс открывать по «/»: new — версия 2.0, old — прежний (?ui=old)
-UI_DEFAULT = "new"
-
-
-def _new_ui(ui: str | None = None) -> bool:
-    return (ui or UI_DEFAULT) == "new" and (paths.TEMPLATES_DIR / "app.html").exists()
-
 
 @router.get("/", response_class=HTMLResponse)
-def index(ui: str | None = None):
-    html_path = paths.TEMPLATES_DIR / ("app.html" if _new_ui(ui) else "index.html")
+def index():
+    html_path = paths.TEMPLATES_DIR / "app.html"
     if not html_path.exists():
         return HTMLResponse("<h1>UI не установлен</h1>")
     html = html_path.read_text(encoding="utf-8")
@@ -34,12 +27,8 @@ def index(ui: str | None = None):
 
 @router.get("/donate")
 def donate():
-    """Перенаправляет на экран «Поддержать» (README даёт этот адрес людям).
-
-    Новый интерфейс не знает ?tab= прежнего и открывал «Главную»: ему — #/support,
-    прежнему — его вкладка доната.
-    """
-    return RedirectResponse(url="/#/support" if _new_ui() else "/?tab=donate", status_code=307)
+    """Перенаправляет на экран «Поддержать» (README даёт этот адрес людям)."""
+    return RedirectResponse(url="/#/support", status_code=307)
 
 
 @router.get("/api/hello")

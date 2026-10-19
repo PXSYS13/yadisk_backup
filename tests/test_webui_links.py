@@ -252,13 +252,6 @@ def test_stopping_the_rescue_leaves_link_downloads_alone(monkeypatch):
     assert prefixes and not any(webapp.tasks.SLOT_LINKS.startswith(p) for p in prefixes)
 
 
-def test_old_wizard_is_not_blocked_by_link_downloads(client, monkeypatch):
-    monkeypatch.setattr(webapp.tasks.tm, "any_alive", lambda prefix: prefix == webapp.tasks.SLOT_LINKS)
-    monkeypatch.setattr(webapp.access, "preflight_sources", lambda d, u: {"error": None, "notes": [], "run_disk": d, "run_unlim": u})
-    monkeypatch.setattr(webapp.rescue.rescue, "start", lambda **kw: (True, "ok"))
-    assert client.post("/api/plan/start", json={}).json()["ok"] is True
-
-
 def test_links_tab_screen_and_task_kind_exist():
     html = Path(webapp.paths.TEMPLATES_DIR, "app.html").read_text(encoding="utf-8")
     assert 'data-route="links"' in html and 'id="screen-links"' in html and "screens/links.js" in html

@@ -24,13 +24,13 @@ from fastapi.staticfiles import StaticFiles
 
 from utils import APP_VERSION, TELEGRAM_CHANNEL, YOUTUBE_VIDEO_URL, ensure_utf8_stdio
 from webapp import paths  # первым: читает .env, в нём бывает YADISK_PORT
-from webapp import access, config, control, diagnostics, folders, guide, legacy, links, logs, pages, ports, status
+from webapp import access, config, control, diagnostics, folders, guide, links, logs, pages, ports, status
 
 log = logging.getLogger("webui")
 
 app = FastAPI(title="Yandex.Disk Backup UI")
 app.middleware("http")(ports.csrf_guard)
-for _module in (status, control, access, folders, links, logs, guide, pages, legacy):
+for _module in (status, control, access, folders, links, logs, guide, pages):
     app.include_router(_module.router)
 
 # Windows берёт MIME из реестра, и там .js бывает text/plain — браузер такой скрипт не выполнит

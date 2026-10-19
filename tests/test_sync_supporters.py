@@ -168,3 +168,83 @@ def test_main_exit_codes(monkeypatch):
     assert ss.main([]) == 1
     monkeypatch.setattr(ss, "sync", boom(False))
     assert ss.main([]) == 0
+
+
+# ── Без ключей: страница виджета «Последние оповещения», сохранённая из браузера ──
+
+
+def widget_item(alert_id, name, total, created, message="", alert_type="1", self_closing=False):
+    """Пункт страницы виджета в разметке DonationAlerts (октябрь 2026)."""
+    end = "/>" if self_closing else ">"
+    msg = f'<div class="message-container b-last-events-widget__item--text">{message}</div>' if message else ""
+    return (f'<div class="event b-last-events-widget__item " data-alert_type="{alert_type}" '
+            f'data-alert_id="{alert_id}" data-amount_main="1"><div class="show-progress"></div>'
+            f'<input type="hidden" name="date_created" value="{created}"{end}'
+            f'<div class="b-last-events-widget__item--from _dalink"><svg><path d="M0"/></svg></div>'
+            f'<div class="b-last-events-widget__item--inner"><div class="b-last-events-widget__item--title">'
+            f'<span class="_name">{name}<img class="commission-covered-icon" src="/i.svg"></span> отправил '
+            f'<span class="_sum">{total}</span></div>{msg}<div class="action-buttons-container-footer">'
+            f'<button>Повторить оповещение</button><span class="date-container">1 час назад</span></div></div></div>')
+
+
+def widget_page(*items):
+    # В настоящей странице есть скрипты с ключом виджета — их разбор не читает
+    return ("<html><head><script>var token = 'secret'; var _sum = '999 RUB';</script></head><body>"
+            f'<div class="event-container b-last-events-widget__list">{"".join(items)}</div></body></html>')
+
+
+def test_widget_page_gives_donations_like_the_api():
+    page = widget_page(
+        widget_item(11, "Мария", "1 000 RUB", "2026-10-18 21:16:28", message="Вернула фото &amp; видео"),
+        widget_item(12, "@tg_nick", "0,30 USD", "2026-10-19 01:30:20", self_closing=True),
+        widget_item(13, "Подписчик", "100 RUB", "2026-10-19 02:00:00", alert_type="4"),  # не донат
+    )
+    got = ss.parse_widget_html(page)
+    assert [d["id"] for d in got] == ["11", "12"]
+    entries = [ss.donation_entry(d) for d in got]
+    assert entries[0] == {"id": "da-11", "name": "Мария", "amount": 1000, "currency": "RUB",
+                          "date": "2026-10-18", "message": "Вернула фото & видео"}
+    assert entries[1] == {"id": "da-12", "name": "tg_nick", "amount": 0.3, "currency": "USD",
+                          "date": "2026-10-19", "message": None}
+    assert ss.parse_widget_html("<html><body>Войдите в аккаунт</body></html>") == []
+
+
+def test_widget_import_adds_new_and_keeps_older_donations(tmp_path, capsys):
+    path = tmp_path / "supporters.json"
+    path.write_text(json.dumps({
+        "updated": "2026-10-01", "hidden": ["13"], "no_message": ["10"],
+        "supporters": [
+            {"name": "Друг из чата", "amount": 500, "currency": "RUB", "date": "2026-10-02", "message": None},
+            # Старый донат: на странице виджета (последние 100) его уже нет — он должен остаться
+            {"id": "da-10", "name": "Анна", "amount": 300, "currency": "RUB", "date": "2026-10-05",
+             "message": "грубость"},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    html_file = tmp_path / "lastdonations.html"
+    html_file.write_text(widget_page(
+        widget_item(12, "Сергей", "200 RUB", "2026-10-19 12:19:37"),
+        widget_item(13, "Спамер", "10 RUB", "2026-10-19 12:20:00"),
+        widget_item(11, "Мария", "1 000 RUB", "2026-10-18 21:16:28", message="Спасибо!"),
+    ), encoding="utf-8")
+    assert ss.import_widget(html_file, path=path, today="2026-10-19") is True
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert [x["name"] for x in data["supporters"]] == ["Сергей", "Мария", "Анна", "Друг из чата"]
+    assert data["supporters"][2]["message"] is None  # no_message действует и на старые записи
+    assert data["updated"] == "2026-10-19"
+    assert "новых: 3" in capsys.readouterr().out
+    # Та же страница ещё раз — файл не меняется
+    mtime = path.stat().st_mtime_ns
+    assert ss.import_widget(html_file, path=path, today="2026-10-20") is False
+    assert path.stat().st_mtime_ns == mtime
+    assert len(supporters.normalize(data)["supporters"]) == 4
+
+
+def test_widget_import_refuses_a_page_without_donations(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "supporters.json"
+    path.write_text('{"supporters": []}', encoding="utf-8")
+    monkeypatch.setattr(ss, "SUPPORTERS_FILE", path)
+    page = tmp_path / "login.html"
+    page.write_text("<html><body>Войдите в DonationAlerts</body></html>", encoding="utf-8")
+    assert ss.main(["--from-widget", str(page)]) == 1
+    assert "На странице нет донатов" in capsys.readouterr().out
+    assert path.read_text(encoding="utf-8") == '{"supporters": []}'

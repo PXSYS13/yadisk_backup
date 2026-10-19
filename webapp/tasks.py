@@ -238,9 +238,6 @@ class TaskManager:
             t.wait_or_kill()
         return stopped
 
-    def stop_all(self) -> int:
-        return len(self.stop_matching(""))
-
     def any_alive(self, prefix: str) -> bool:
         with self._lock:
             return any(slot.startswith(prefix) and t.alive() for slot, t in self._tasks.items())
@@ -267,16 +264,6 @@ class TaskManager:
                     tail = list(t.log)[-per_task:]
                     lines.extend([(slot, ln) for ln in tail] if with_slots else tail)
             return lines
-
-    def clear_logs(self, pattern: str) -> int:
-        """Очищает буфер логов слота; 'prefix*' — всех слотов с таким префиксом."""
-        with self._lock:
-            cleared = 0
-            for slot, t in self._tasks.items():
-                if slot == pattern or (pattern.endswith("*") and slot.startswith(pattern[:-1])):
-                    t.log.clear()
-                    cleared += 1
-            return cleared
 
 
 tm = TaskManager()

@@ -345,12 +345,9 @@ def test_every_start_button_passes_the_saved_folders(client, monkeypatch):
     calls = []
     monkeypatch.setattr(webapp.access, "preflight_sources", lambda d, u: {"error": None, "notes": [], "run_disk": d, "run_unlim": u})
     monkeypatch.setattr(webapp.rescue.rescue, "start", lambda **kw: (calls.append(kw), (True, "ok"))[1])
-    monkeypatch.setattr(webapp.tasks.tm, "any_alive", lambda prefix: False)
     client.post("/api/settings", json={"disk_folders": ["/A"]})
     client.post("/api/rescue/start")
-    client.post("/api/start", json={})
-    client.post("/api/plan/start", json={})
-    assert [c["disk_folders"] for c in calls] == [["disk:/A"]] * 3
+    assert [c["disk_folders"] for c in calls] == [["disk:/A"]]
 
 
 def test_folder_tree_needs_a_token(client):

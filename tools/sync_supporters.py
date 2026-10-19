@@ -1,21 +1,30 @@
 """Обновляет supporters.json по донатам из DonationAlerts.
 
-Запускается GitHub Actions по расписанию (.github/workflows/supporters.yml): берёт все
-донаты через API DonationAlerts и переписывает их часть списка. Записи, которые автор
-добавил руками (без "id"), остаются как есть. Программы людей подхватывают свежий
-supporters.json с GitHub сами — так имя поддержавшего появляется в разделе
-«Нас поддерживают».
+Два способа, итог одинаковый (записи с id «da-<номер доната>»):
+
+1. Без ключей, вручную. Откройте в браузере, где вы вошли в DonationAlerts, страницу
+   виджета «Последние оповещения» (WIDGET_URL ниже), сохраните её (Ctrl+S, «только HTML»)
+   и запустите:
+
+       python tools/sync_supporters.py --from-widget "путь/к/сохранённой/странице.html"
+
+   Виджет показывает последние 100 донатов, поэтому записи, которых на странице уже нет,
+   остаются в списке. Ключ виджета в файл списка не попадает: берутся только имя, сумма,
+   дата, сообщение и номер доната. Сохранённую страницу в репозиторий не кладите.
+
+2. Автоматически: GitHub Actions по расписанию (.github/workflows/supporters.yml) берёт
+   все донаты через API DonationAlerts и переписывает их часть списка. Нужен ключ в
+   секрете репозитория DONATIONALERTS_TOKEN; получить его один раз:
+
+       python tools/sync_supporters.py --get-token
+
+   Проверить без записи в файл: DONATIONALERTS_TOKEN=... python tools/sync_supporters.py --dry-run
+
+Записи, которые автор добавил руками (без "id"), остаются как есть. Программы людей
+подхватывают свежий supporters.json с GitHub сами — так имя поддержавшего появляется в
+разделе «Нас поддерживают».
 
 Только стандартная библиотека: в Actions не нужно ставить зависимости проекта.
-
-Ключ DonationAlerts берётся из переменной окружения DONATIONALERTS_TOKEN (секрет
-репозитория). Получить его один раз:
-
-    python tools/sync_supporters.py --get-token
-
-Проверить без записи в файл:
-
-    DONATIONALERTS_TOKEN=... python tools/sync_supporters.py --dry-run
 
 Скрыть донат целиком — добавить его номер в "hidden", скрыть только сообщение — в
 "no_message" (номер — число из "id" записи: "da-123" → 123).
@@ -37,12 +46,15 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import date, datetime
+from html.parser import HTMLParser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SUPPORTERS_FILE = ROOT / "supporters.json"
 
 API_URL = "https://www.donationalerts.com/api/v1/alerts/donations"
+# Виджет «Последние оповещения»: открывается только у того, кто вошёл в DonationAlerts
+WIDGET_URL = "https://www.donationalerts.com/widget/lastdonations?alert_type=1&limit=100"
 AUTHORIZE_URL = "https://www.donationalerts.com/oauth/authorize"
 TOKEN_URL = "https://www.donationalerts.com/oauth/token"
 SCOPE = "oauth-donation-index"
@@ -62,11 +74,13 @@ TIMEOUT_SEC = 20
 USER_AGENT = "yadisk_backup-supporters-sync"
 
 HOWTO = (
-    "Список заполняется сам: донаты DonationAlerts попадают сюда автоматически (записи с id «da-…»). "
+    "Донаты DonationAlerts (записи с id «da-…») добавляет tools/sync_supporters.py: --from-widget "
+    "со страницей виджета «Последние оповещения», сохранённой из браузера, или GitHub Actions по ключу. "
     "Записи без id можно добавлять руками: name — имя, как человек подписался (без имени — «Аноним»), "
     "amount — сумма числом, currency — RUB/USD/EUR, date — ГГГГ-ММ-ДД, message — короткие слова или null. "
     "Скрыть донат целиком — добавьте его номер в hidden (da-123 → 123), скрыть только сообщение — "
-    "в no_message. Программы людей подхватят список с GitHub в течение получаса."
+    "в no_message. Программы людей подхватят список с GitHub в течение получаса после того, как он попадёт "
+    "в main."
 )
 
 # Ссылки и @упоминания вырезаем: список видят все пользователи программы, рекламе там не место
@@ -165,9 +179,12 @@ def _sort_key(entry: dict):
     return (entry.get("date") or "", int(number))
 
 
-def merge(current: dict, donations: list[dict], today: str | None = None) -> dict:
+def merge(current: dict, donations: list[dict], today: str | None = None,
+          keep_existing: bool = False) -> dict:
     """Новый supporters.json: ручные записи + донаты из DonationAlerts без скрытых.
 
+    donations — все донаты (API): прежние записи «da-…» заменяются ими целиком. keep_existing —
+    только последние донаты (страница виджета): прежние записи «da-…» остаются, новые добавляются.
     "updated" меняется, только если изменился сам список, — иначе файл остаётся прежним
     и GitHub Actions ничего не коммитит.
     """
@@ -177,6 +194,11 @@ def merge(current: dict, donations: list[dict], today: str | None = None) -> dic
     old = current.get("supporters") if isinstance(current.get("supporters"), list) else []
     manual = [x for x in old if isinstance(x, dict) and not str(x.get("id", "")).startswith(ID_PREFIX)]
     fresh: dict[str, dict] = {}
+    if keep_existing:
+        for x in old:
+            number = _id_number(x.get("id")) if isinstance(x, dict) and str(x.get("id", "")).startswith(ID_PREFIX) else None
+            if number and number not in hidden:
+                fresh[ID_PREFIX + number] = dict(x, message=None) if number in no_message else x
     for donation in donations:
         entry = donation_entry(donation, no_message)
         if entry and entry["id"].removeprefix(ID_PREFIX) not in hidden:
@@ -191,6 +213,130 @@ def merge(current: dict, donations: list[dict], today: str | None = None) -> dic
         "no_message": sorted(no_message, key=int),
         "supporters": supporters,
     }
+
+
+# ── Страница виджета «Последние оповещения», сохранённая из браузера ─────────
+
+_VOID_TAGS = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+                        "source", "track", "wbr"})
+_WIDGET_FIELDS = {("span", "_name"): "username", ("span", "_sum"): "sum", ("div", "message-container"): "message"}
+_SUM_RE = re.compile(r"^\s*([\d\s  .,]+?)\s*([A-Za-z]{3})\s*$")
+# Тип оповещения «донат»: остальные (подписки и прочее) в список не идут
+DONATION_ALERT_TYPE = "1"
+
+
+class _WidgetParser(HTMLParser):
+    """Донаты со страницы виджета: div.b-last-events-widget__item с data-alert_id, внутри
+    input[name=date_created] (время UTC), span._name, span._sum и div.message-container.
+
+    Скрипты, кнопки и адреса страницы (в них ключ виджета) не читаются вовсе.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.items: list[dict] = []
+        self._field: str | None = None
+        self._depth = 0
+        self._buf: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if self._field:
+            if tag not in _VOID_TAGS:
+                self._depth += 1
+            return
+        a = dict(attrs)
+        classes = (a.get("class") or "").split()
+        if "b-last-events-widget__item" in classes and a.get("data-alert_id"):
+            self.items.append({"id": a["data-alert_id"], "alert_type": a.get("data-alert_type"),
+                               "message_type": "text"})
+            return
+        if not self.items:
+            return
+        if tag == "input" and a.get("name") == "date_created":
+            self.items[-1]["created_at"] = a.get("value")
+            return
+        for (want_tag, cls), field in _WIDGET_FIELDS.items():
+            if tag == want_tag and cls in classes:
+                self._field, self._depth, self._buf = field, 1, []
+                return
+
+    def handle_startendtag(self, tag, attrs):
+        # <input …/> и <img …/>: только начало, конца у пустых тегов нет; <div/> внутри поля — пустота
+        if tag in _VOID_TAGS:
+            self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if not self._field or tag in _VOID_TAGS:
+            return
+        self._depth -= 1
+        if self._depth <= 0:
+            self.items[-1][self._field] = " ".join("".join(self._buf).split())
+            self._field = None
+
+    def handle_data(self, data):
+        if self._field:
+            self._buf.append(data)
+
+
+def _widget_sum(text) -> tuple[float | None, str | None]:
+    """«1 000 RUB» → (1000.0, "RUB"), «0,30 USD» → (0.3, "USD")."""
+    m = _SUM_RE.match(text or "")
+    if not m:
+        return None, None
+    digits = re.sub(r"[\s  ]", "", m.group(1)).replace(",", ".")
+    try:
+        return float(digits), m.group(2).upper()
+    except ValueError:
+        return None, None
+
+
+def parse_widget_html(text: str) -> list[dict]:
+    """Донаты со страницы виджета в том же виде, что отдаёт API (id, username, amount …)."""
+    parser = _WidgetParser()
+    parser.feed(text)
+    parser.close()
+    out = []
+    for item in parser.items:
+        if item.get("alert_type") not in (None, DONATION_ALERT_TYPE):
+            continue
+        amount, currency = _widget_sum(item.get("sum"))
+        out.append({"id": item["id"], "username": item.get("username"), "amount": amount,
+                    "currency": currency, "created_at": item.get("created_at"),
+                    "message": item.get("message") or None, "message_type": "text"})
+    return out
+
+
+def import_widget(html_path: Path, path: Path = SUPPORTERS_FILE, dry_run: bool = False,
+                  today: str | None = None) -> bool:
+    """Добавляет в список донаты со страницы виджета. True — список изменился."""
+    try:
+        text = Path(html_path).read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        raise SyncError(f"Не открыть {html_path}: {e}", fatal=True) from e
+    donations = parse_widget_html(text)
+    if not donations:
+        raise SyncError("На странице нет донатов. Откройте страницу виджета в браузере, где вы вошли в "
+                        f"DonationAlerts ({WIDGET_URL}), дождитесь списка и сохраните её ещё раз.", fatal=True)
+    try:
+        current = load_current(path)
+    except ValueError as e:
+        raise SyncError(f"{path.name} — не JSON ({e}): исправьте файл руками", fatal=True) from e
+    known = {_id_number(x.get("id")) for x in current.get("supporters") or [] if isinstance(x, dict)}
+    new = merge(current, donations, today=today, keep_existing=True)
+    text_out = dump(new)
+    try:
+        old_text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        old_text = ""
+    changed = text_out != old_text
+    added = sum(1 for d in donations if _id_number(d.get("id")) not in known)
+    shown = sum(1 for x in new["supporters"] if str(x.get("id", "")).startswith(ID_PREFIX))
+    print(f"Донатов на странице: {len(donations)}, новых: {added}, в списке: {shown}, "
+          f"скрыто: {len(new['hidden'])}, записей вручную: {len(new['supporters']) - shown}")
+    if changed and not dry_run:
+        path.write_text(text_out, encoding="utf-8", newline="\n")
+    print("Список изменился" if changed else "Без изменений", "(пробный запуск, файл не тронут)" if dry_run else "")
+    return changed
 
 
 def _request(url: str, token: str):
@@ -349,10 +495,19 @@ def get_token() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Список «Нас поддерживают» из DonationAlerts")
     parser.add_argument("--get-token", action="store_true", help="получить ключ DonationAlerts (один раз)")
+    parser.add_argument("--from-widget", metavar="FILE",
+                        help=f"без ключей: страница {WIDGET_URL}, сохранённая из браузера")
     parser.add_argument("--dry-run", action="store_true", help="показать итог, не меняя supporters.json")
     args = parser.parse_args(argv)
     if args.get_token:
         return get_token()
+    if args.from_widget:
+        try:
+            import_widget(Path(args.from_widget), path=SUPPORTERS_FILE, dry_run=args.dry_run)
+        except SyncError as e:
+            print(e)
+            return 1
+        return 0
     token = os.environ.get(TOKEN_ENV, "").strip()
     if not token:
         print(f"Нет ключа {TOKEN_ENV} — список не обновляю. Как получить: --get-token")

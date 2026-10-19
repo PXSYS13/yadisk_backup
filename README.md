@@ -8,7 +8,7 @@
 
 [![Скачать программу](https://img.shields.io/badge/Скачать_программу-бесплатно,_ZIP-2ea44f?style=for-the-badge)](https://github.com/PXSYS13/yadisk_backup/archive/refs/heads/main.zip)
 [![Инструкция](https://img.shields.io/badge/Инструкция-для_новичков-5b5bd6?style=for-the-badge)](https://github.com/PXSYS13/yadisk_backup/blob/main/INSTRUCTION_GET_TOKEN.md)
-[![Поддержать](https://img.shields.io/badge/Поддержать-DonationAlerts-ff375f?style=for-the-badge)](https://dalink.to/davronsvv)
+[![Поддержать](https://img.shields.io/badge/Поддержать-DonationAlerts-ff375f?style=for-the-badge)](https://www.donationalerts.com/r/davronsvv)
 
 [![Версия](https://img.shields.io/github/v/release/PXSYS13/yadisk_backup?label=версия)](https://github.com/PXSYS13/yadisk_backup/releases/latest)
 ![Windows · macOS · Linux](https://img.shields.io/badge/Windows_·_macOS_·_Linux-555)
@@ -219,10 +219,10 @@ YADISK_PORT=8001 bash webui.sh
 Программу делает один человек в свободное время, чтобы люди не потеряли свои фото и документы. Она бесплатная и такой останется. Если она помогла вам — поддержите её развитие любой суммой:
 
 <p align="center">
-  <a href="https://dalink.to/davronsvv"><img src="https://img.shields.io/badge/Поддержать_на_DonationAlerts-карта,_СБП,_кошельки-ff375f?style=for-the-badge" alt="Поддержать на DonationAlerts"></a>
+  <a href="https://www.donationalerts.com/r/davronsvv"><img src="https://img.shields.io/badge/Поддержать_на_DonationAlerts-карта,_СБП,_кошельки-ff375f?style=for-the-badge" alt="Поддержать на DonationAlerts"></a>
 </p>
 
-**Ваше имя появится в программе.** Имя и сообщение из доната автоматически попадают в раздел «Нас поддерживают» у всех пользователей — обычно в течение получаса. Не хотите, чтобы имя было видно, — подпишитесь «Аноним». Ссылки и упоминания из сообщений программа не показывает.
+**Ваше имя появится в программе.** Имя и сообщение из доната попадают в раздел «Нас поддерживают» у всех пользователей программы. Не хотите, чтобы имя было видно, — подпишитесь «Аноним». Ссылки и упоминания из сообщений программа не показывает.
 
 Помочь можно и без денег: поставьте звезду этому репозиторию, расскажите о программе тем, кто хранит фото на Яндекс.Диске, или сообщите об ошибке.
 

@@ -1,6 +1,6 @@
 [project]
 name = "yadisk-backup"
-version = "2.7.0"
+version = "2.7.1"
 description = "Бесплатная программа, которая сохраняет на компьютер весь Яндекс.Диск и безлимит фото"
 readme = "README.md"
 requires-python = ">=3.10"

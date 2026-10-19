@@ -18,6 +18,5 @@ control     кнопки интерфейса: запуск, повторы, н�
 logs        журналы и отчёт для поддержки
 guide       инструкция /guide
 pages       страницы и мелкие адреса: /, /donate, /api/hello, /api/supporters
-legacy      адреса прежнего интерфейса (/?ui=old)
 ports       на каком порту работать и кого пускать (Host, Origin)
 """

@@ -416,7 +416,7 @@
         <p>Программа бесплатная, её делает один человек в свободное время. Любая сумма помогает её развивать,
           а ваше имя появится в «Нас поддерживают».</p>
         <div class="row actions">
-          <a class="btn primary" href="${esc(url || 'https://dalink.to/davronsvv')}" target="_blank" rel="noopener"
+          <a class="btn primary" href="${esc(url || 'https://www.donationalerts.com/r/davronsvv')}" target="_blank" rel="noopener"
             data-action="donate-open" data-key="${esc(m.key)}">${icon('heart')}Поддержать проект</a>
           <button data-action="donate-later" data-key="${esc(m.key)}">Не сейчас</button>
           <button class="link" data-action="donate-done">Уже поддерживаю</button>

@@ -34,7 +34,6 @@ webapp/               сервер интерфейса по разделам:
 webui_assets/
   app.html            каркас интерфейса
   static/             app.css и js/: core.js, components.js, screens/*.js (без сборки)
-  index.html          прежний интерфейс (/?ui=old)
 
 main.py               CLI обычного Диска: check / scan / download / verify / stats
 downloader.py         обход Диска и скачивание через REST API
