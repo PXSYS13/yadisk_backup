@@ -42,6 +42,9 @@ RESCUE_ACTIONS = {
                 "уже скачанное не пропадёт.",
                 "Выбрать папки"),
 }
+# Ключ к Диску отклонён, а Безлимит не подключён или уже не качается — не обещаем, что он продолжает
+TOKEN_ALONE_TEXT = "Получите новый ключ — это минута. Скачанное не пропадёт."
+BUSY_STATES = ("checking", "listing", "downloading", "waiting")
 
 # Спокойные пояснения: ничего делать не нужно
 RESCUE_NOTICES = {
@@ -121,6 +124,11 @@ def source_live(name: str, tasks: dict, branch_state: str | None, rate: dict | N
         "listing_found": listing_found(listing) if branch_state == "listing" else None,
         "recent": rate,
     }
+
+
+def waits_for_person(branch: dict | None) -> bool:
+    """Запуск остановился на этой части и ждёт человека: новый ключ, место, папки или отчёт."""
+    return bool(branch) and branch.get("state") in ("needs_action", "error")
 
 
 def db_checked_done(db: dict) -> tuple[int, int]:
@@ -231,12 +239,18 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
     started = rescue_st.get("started_at")
     window = (now - started) if (running and started) else None
     download_dir = cfg.get("download_dir", "")
-    token_ok = bool(token.get("ok") or token.get("unreachable"))
+    disk_branch = branches.get("disk") if started else None
+    unlim_branch = branches.get("unlim") if started else None
+    # Часть подключена, если доступ к ней работает — или если запуск остановился на ней и ждёт
+    # человека. Яндекс перестал принимать ключ: проверка ключа больше не проходит, но скачанное
+    # Диском никуда не делось, а кнопку «Получить новый ключ» даёт действие этой части
+    disk_on = bool(token.get("ok") or token.get("unreachable")) or waits_for_person(disk_branch)
+    unlim_on = bool(cookies.get("ok")) or waits_for_person(unlim_branch)
     sources = {
-        "disk": source_block("disk", disk_db, branches.get("disk") if started else None, token_ok,
-                             download_dir, disk_local, window, live.get("disk"), now),
-        "unlim": source_block("unlim", unlim_db, branches.get("unlim") if started else None,
-                              bool(cookies.get("ok")), os.path.join(download_dir, "_unlim") if download_dir else "",
+        "disk": source_block("disk", disk_db, disk_branch, disk_on, download_dir, disk_local, window,
+                             live.get("disk"), now),
+        "unlim": source_block("unlim", unlim_db, unlim_branch, unlim_on,
+                              os.path.join(download_dir, "_unlim") if download_dir else "",
                               unlim_local, window, live.get("unlim"), now),
     }
     sources["disk"]["folders"] = ({"total": int(disk_folders.get("total") or 0),
@@ -266,12 +280,16 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
             break
     if action_id is None and state == "needs_action":
         action_id, action_source = "send_logs", "all"
-    if not running and not (token_ok or cookies.get("ok")):
+    # Первая настройка — только когда не подключено ничего: часть, на которой запуск
+    # остановился, считается подключённой, и её действие не заменяется рассказом о настройке
+    if not running and not (disk_on or unlim_on):
         action_id, action_source = "setup", "all"
     action = None
     if action_id in RESCUE_ACTIONS:
         title, text, button = RESCUE_ACTIONS[action_id]
         variant = None
+        if action_id == "token" and not (running and sources["unlim"]["state"] in BUSY_STATES):
+            text = TOKEN_ALONE_TEXT
         if action_id == "free_space":
             free = (free_space or {}).get("free")
             if free is not None and free < LOW_FREE_BYTES:

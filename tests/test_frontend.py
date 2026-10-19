@@ -15,6 +15,8 @@ import webapp.access
 import webapp.demo
 import webapp.folders
 import webapp.paths
+import webapp.queue_db
+import webapp.rescue_view
 import webui
 
 ASSETS = Path(webapp.paths.TEMPLATES_DIR)
@@ -183,6 +185,43 @@ def test_home_offers_setup_even_after_a_previous_run(monkeypatch):
         st["rescue"]["state"] = state
         actions = _render_home(st)["actions"]
         assert 'data-action="go-setup"' in actions and "rescue-start" not in actions, state
+
+
+# Та же Главная, но на выходе — все блоки: заголовок, плашка состояния, кнопки
+_HOME_NODES_HARNESS = _HOME_HARNESS.split("process.stdout.write")[0] + r"""
+process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(nodes).map(([k, v]) => [k, v.innerHTML || v.textContent]))));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_home_asks_for_a_new_key_when_only_the_disk_was_downloading(monkeypatch):
+    # Качали только Диск, Яндекс перестал принимать ключ: на Главной кнопка «Получить новый ключ»,
+    # а не рассказ о первой настройке без единой кнопки
+    monkeypatch.setenv("YADISK_DEMO", "1")
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    st = client.get("/api/status?demo=token").json()
+    no = {"ok": False}
+    run = {"running": False, "started_at": 100.0, "finished_at": 200.0, "state": "failed", "next_retry_at": None,
+           "branches": {"disk": {"state": "needs_action", "action": "token",
+                                 "reason": "Яндекс перестал принимать ключ доступа к Диску"},
+                        "unlim": {"state": "off"}}}
+    st["rescue"] = webapp.rescue_view.build_rescue_status(run, st["disk"]["db"], webapp.queue_db.empty_db_stats(),
+                                                          no, no, st["config"])
+    st["token"], st["cookies"] = no, no
+    res = subprocess.run(["node", "-e", _HOME_NODES_HARNESS], input=json.dumps(st), capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    home = json.loads(res.stdout)
+    assert 'data-action="go-access" data-field="token"' in home["home-actions"]
+    assert "Получить новый ключ" in home["home-actions"]
+    assert home["home-headline"] == "Яндекс перестал принимать ключ доступа к Диску"
+    assert "Нужно ваше действие" in home["home-pill"]
+    assert "Начать настройку" not in res.stdout and 'class="how"' not in home["home-stats"]
+    # Скачанное Диском видно, карточка Диска ждёт действия, а не «не подключён»
+    assert "Скачано" in home["home-stats"] and ">800<" in home["home-stats"]
+    disk_card = home["home-sources"].split('class="card source"')[1]
+    assert "нужно действие" in disk_card and "Подключить Диск" not in disk_card
 
 
 # «Нас поддерживают»: строка внизу главной и суммы — в node, без браузера

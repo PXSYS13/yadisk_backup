@@ -160,7 +160,44 @@ def test_expired_token_becomes_one_action():
     assert r["state"] == "needs_action"
     assert r["action"]["id"] == "token" and r["action"]["source"] == "disk"
     assert r["action"]["button"] == "Получить новый ключ"
+    assert "Безлимит продолжает качаться" in r["action"]["text"]
     assert r["notice"] is None  # пока ждём человека, спокойные плашки не показываем
+
+
+def test_rejected_key_without_unlim_asks_for_a_new_key_not_for_setup():
+    # Качали только Диск, Яндекс перестал принимать ключ: запуск закончился, проверка ключа
+    # не проходит, Безлимит не подключён. Это не первая настройка — нужен новый ключ
+    disk = db(total=6000, downloaded=3000, pending=3000)
+    r = build(rescue_st(state="failed", disk={"state": "needs_action", "action": "token"}),
+              disk_db=disk, token=NO, cookies=NO)
+    assert r["state"] == "needs_action"
+    assert r["action"]["id"] == "token" and r["action"]["source"] == "disk"
+    assert r["headline"] == webapp.rescue_view.RESCUE_ACTIONS["token"][0]
+    assert r["action"]["button"] == "Получить новый ключ"
+    assert "Безлимит" not in r["subline"]  # он не подключён — не обещаем, что он качается
+    # Скачанное Диском не пропадает из счётчиков, и карточка Диска не «не подключён»
+    assert r["sources"]["disk"]["configured"] is True
+    assert r["summary"]["downloaded_files"] == 3000 and r["summary"]["selected_files"] == 6000
+    assert r["summary"]["skipped_sources"] == ["unlim"]
+
+
+def test_rejected_key_while_unlim_still_downloads_needs_the_person():
+    # Проверка ключа уже не проходит, а Безлимит качается: это «нужно ваше действие», не «всё идёт»
+    r = build(rescue_st(running=True, disk={"state": "needs_action", "action": "token"},
+                        unlim={"state": "downloading"}), token=NO)
+    assert r["state"] == "needs_action" and r["action"]["id"] == "token"
+    assert "Безлимит продолжает качаться" in r["action"]["text"]
+    # Безлимит закончил, а Диск ждёт ключ: запуск окончен, Безлимит больше не качается
+    r = build(rescue_st(state="failed", disk={"state": "needs_action", "action": "token"},
+                        unlim={"state": "done"}), token=NO)
+    assert r["action"]["id"] == "token" and "Безлимит" not in r["action"]["text"]
+
+
+def test_run_with_nothing_to_download_still_asks_for_setup():
+    # Запуск не нашёл, что качать: ни одна часть не начинала — это по-прежнему первая настройка
+    r = build(rescue_st(state="failed"), token=NO, cookies=NO)
+    assert r["state"] == "needs_action" and r["action"]["id"] == "setup"
+    assert r["headline"].startswith("Сохраните свои файлы")
 
 
 def test_disk_full_mentions_free_space():
