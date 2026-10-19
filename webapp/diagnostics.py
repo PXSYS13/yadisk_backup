@@ -17,7 +17,7 @@ from utils import (
     TELEGRAM_CHANNEL,
 )
 from webapp import paths
-from webapp.tasks import SLOT_LINKS, SLOT_ORGANIZE, tm
+from webapp.tasks import SLOT_LINKS, SLOT_ORGANIZE, VERIFY_KINDS, tm
 from yandex_health import HealthMonitor
 
 # Ссылки для объяснений в UI: что происходит с Яндексом и где следить за новостями
@@ -183,10 +183,11 @@ def diagnose_tasks() -> dict:
     kind, title, explain, affects, counts, links.
     """
     # Строки скачивания по ссылкам объясняет свой экран: здесь они дали бы баннер «Диска».
-    # Сортировка печатает имена файлов («timeout_2024.docx») — это не про Яндекс
+    # Сортировка и проверка скачанного печатают имена файлов («timeout_2024.docx») — это не про Яндекс
     # Превью — бонус: «превью …: HTTP 434» или таймаут превью не объясняют, почему не качаются файлы
     tagged = [(slot, _marker_text(ln.lower())) for slot, ln in
-              tm.recent_log_lines(40, exclude=(SLOT_LINKS, SLOT_ORGANIZE), with_slots=True)
+              tm.recent_log_lines(40, exclude=(SLOT_LINKS, SLOT_ORGANIZE), with_slots=True,
+                                  exclude_kinds=VERIFY_KINDS)
               if "превью" not in ln.lower()]
 
     def rule_lines(rule: dict) -> list[str]:

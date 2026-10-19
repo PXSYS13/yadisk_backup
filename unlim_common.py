@@ -66,6 +66,12 @@ CREATE TABLE IF NOT EXISTS unlim_meta (
     value TEXT
 );
 """
+# Что последняя проверка скачанного (unlim_download.py --verify) не нашла в папке или
+# нашла испорченным: kind — missing / size / md5. «Скачать заново» возвращает их в очередь
+VERIFY_PROBLEMS_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS unlim_verify_problems (file_id TEXT PRIMARY KEY, kind TEXT NOT NULL)"
+)
+UNLIM_SCHEMA += VERIFY_PROBLEMS_SCHEMA + ";\n"
 
 
 class UnlimError(Exception):
@@ -297,6 +303,7 @@ def ensure_unlim_schema(db_path: str | None = None) -> None:
             c.execute("CREATE INDEX IF NOT EXISTS idx_unlim_pending ON unlim_files(status, attempts, assigned_at)")
         # Общие для всех воркеров значения: пауза по 429, молчащие серверы хранения
         c.execute("CREATE TABLE IF NOT EXISTS unlim_meta (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute(VERIFY_PROBLEMS_SCHEMA)
         c.commit()
     finally:
         c.close()
@@ -343,3 +350,34 @@ def count_failed(db_path: str | None = None) -> int:
         return c.execute("SELECT COUNT(*) FROM unlim_files WHERE status='failed'").fetchone()[0]
     finally:
         c.close()
+
+
+def save_verify_problems(problems: list[tuple[str, str]], db_path: str | None = None) -> None:
+    """Запоминает итог проверки скачанного: пары (file_id, вид). Прошлый итог стирается."""
+    db_path = db_path or UNLIM_DB_FILE
+    ensure_unlim_schema(db_path)
+    with unlim_tx(db_path) as c:
+        c.execute("DELETE FROM unlim_verify_problems")
+        c.executemany("INSERT OR REPLACE INTO unlim_verify_problems (file_id, kind) VALUES (?, ?)", problems)
+
+
+def requeue_verify_problems(db_path: str | None = None) -> int:
+    """«Скачать заново»: файлы, которых проверка не нашла или нашла испорченными, — снова в очередь.
+
+    local_path остаётся: воркер положит новую копию на место испорченной, а не рядом
+    с ней под именем «_1». Попытки обнуляются. Возвращает, сколько файлов вернулось в очередь.
+    """
+    db_path = db_path or UNLIM_DB_FILE
+    if not os.path.exists(db_path):
+        return 0
+    ensure_unlim_schema(db_path)
+    with unlim_tx(db_path) as c:
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='unlim_files'").fetchone():
+            return 0
+        n = c.execute(
+            "UPDATE unlim_files SET status='pending', attempts=0, error=NULL, worker_id=NULL, "
+            "storage_host=NULL, downloaded_at=NULL WHERE status='downloaded' "
+            "AND file_id IN (SELECT file_id FROM unlim_verify_problems)"
+        ).rowcount
+        c.execute("DELETE FROM unlim_verify_problems")
+        return n

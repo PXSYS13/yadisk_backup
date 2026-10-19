@@ -694,3 +694,113 @@ def test_core_repaints_only_changes_and_keeps_fresh_status():
     assert out["filesOf"] == ["1 файла", "2 файлов", "5 файлов", "11 файлов", "21 файла", "0 файлов"]
     assert out["demo"] == {"ok": False, "sent": 0}
     assert out["shown"] == [2] and out["asked"] == 2
+
+
+# «Проверка скачанных файлов» в «Подробнее»: карточка читает строки verify_* из журнала задачи
+_VERIFY_HARNESS = r"""
+const path = require('path');
+global.window = globalThis;
+global.addEventListener = () => {};
+global.location = { search: '', hash: '', pathname: '/' };
+const nodes = {};
+const el = () => ({ innerHTML: '', textContent: '', className: '', dataset: {}, style: {},
+  addEventListener() {}, setAttribute() {}, classList: { add() {}, remove() {}, toggle() {} } });
+global.document = Object.assign(el(), { documentElement: el(), body: el(), createElement: el,
+  querySelectorAll: () => [], querySelector: () => null, getElementById: (id) => (nodes[id] = nodes[id] || el()) });
+global.localStorage = { getItem: () => null, setItem() {} };
+global.matchMedia = () => ({ matches: false, addEventListener() {} });
+const inp = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const posted = [];
+global.fetch = async (url, opts) => {
+  if (opts && opts.method === 'POST') posted.push([url, JSON.parse(opts.body)]);
+  const data = url.startsWith('/api/verify/requeue') ? { ok: true, count: 5, msg: 'ok' }
+    : url.startsWith('/api/status') ? null : { items: [], reasons: {}, total: 0 };
+  return { ok: true, status: 200, json: async () => data };
+};
+for (const f of ['core.js', 'components.js', 'screens/details.js']) require(path.join(process.env.JS_DIR, f));
+const App = window.App;
+App.toast = () => {};
+const d = App.screens.details;
+const S = (tasks, running = false) => Object.assign({}, inp.base, { tasks, pipeline: { running } });
+const verifyTask = (lines, running, extra = {}) => ({ disk: Object.assign({ kind: 'disk_verify', running,
+  finished_at: running ? null : inp.at, exit_code: running ? null : 1, was_stopped: false, log_tail: lines }, extra) });
+const snap = () => ({ main: nodes['det-verify'].innerHTML, actions: nodes['det-verify-actions'].innerHTML,
+  list: nodes['det-verify-list'].innerHTML });
+(async () => {
+  d.mount(el());
+  d.show({ source: 'disk' });
+  const out = {};
+  d.update(S({})); out.idle = snap();
+  d.update(S({}, true)); out.idle_busy = snap();
+  d.update(S(verifyTask(['21:23:03  ' + inp.progress], true))); out.running = snap();
+  d.update(S(verifyTask(['21:23:03  ' + inp.progress, '21:23:09  ' + inp.summary], false))); out.result = snap();
+  d.update(S(verifyTask([inp.summary], false), true)); out.result_busy = snap();
+  d.update(S(verifyTask([inp.ok], false))); out.ok = snap();
+  d.update(S(verifyTask([], false, { was_stopped: true, exit_code: null }))); out.stopped = snap();
+  d.update(S({ disk: { kind: 'disk_scan', running: true, log_tail: [] } })); out.listing = snap();
+  d.update(S(verifyTask([inp.unchecked], false))); out.unchecked = snap();
+  App.confirm = async () => true;
+  d.update(S(verifyTask([inp.summary], false)));
+  await App.actions['verify-requeue']({ dataset: { source: 'disk', count: '5', bytes: '10200327', at: String(inp.at) } });
+  d.update(S(verifyTask([inp.summary], false))); out.requeued = snap();
+  out.posted = posted.filter(([url]) => url.startsWith('/api/verify'));
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_details_verify_card_states():
+    import verify
+
+    summary = {"checked": 32, "ok": 27, "missing": 3, "size": 1, "md5": 1, "unreadable": 0, "no_md5": 1,
+               "unchecked": 0, "bytes": 32_101_855, "bad_bytes": 10_200_327, "all_missing": False, "seconds": 3,
+               "examples": {"missing": [{"path": "disk:/Фото/нет.jpg", "size": 700}],
+                            "size": [{"path": "disk:/Видео/Свадьба.mp4", "size": 8_000_000, "local_size": 3_100_000}],
+                            "md5": [{"path": "disk:/Фото/IMG_1102.JPG", "size": 640_000}]}}
+    ok = dict(summary, checked=28, ok=28, missing=0, size=0, md5=0, bad_bytes=0, examples={})
+    progress = {"stage": "md5", "done": 3, "total": 27, "bytes_done": 1_610_612_736,
+                "bytes_total": 4_316_856_824, "eta_sec": 125, "found": 0}
+    inp = {"base": {"rescue": {"sources": {"disk": {"files": {"done": 32, "selected": 37}}}},
+                    "disk": {"db": {"recent": []}}},
+           "at": 1760891234.5, "summary": verify.summary_line(summary), "ok": verify.summary_line(ok),
+           "progress": verify.progress_line(progress),
+           "unchecked": verify.summary_line(dict(ok, checked=0, ok=0, unchecked=1200))}
+    res = subprocess.run(["node", "-e", _VERIFY_HARNESS], input=json.dumps(inp), capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.replace("\xa0", " "))
+
+    idle = out["idle"]
+    assert "читает каждый файл целиком" in idle["main"]
+    assert 'data-action="verify-start"' in idle["actions"] and "disabled" not in idle["actions"]
+    # Пока качается — кнопка неактивна и сказано почему
+    assert " disabled>" in out["idle_busy"]["actions"]
+    assert "Можно, когда скачивание остановлено или закончено" in out["idle_busy"]["actions"]
+
+    running = out["running"]
+    assert "Сверяю содержимое с Яндексом (MD5): 1,5 ГБ из 4,0 ГБ" in running["main"]
+    assert "37% · осталось ≈ 2 мин · пока всё в порядке" in running["main"]
+    assert 'data-action="verify-stop"' in running["actions"]
+
+    result = out["result"]
+    assert "Проверено 32 файла. Не хватает 3 файлов, повреждено 2" in result["main"]
+    assert "У 1 файла Яндекс не сообщил контрольную сумму" in result["main"]
+    assert 'data-action="verify-requeue"' in result["actions"] and 'data-count="5"' in result["actions"]
+    assert "Проверить ещё раз" in result["actions"]
+    assert "/Фото/нет.jpg" in result["list"] and "disk:/" not in result["list"]
+    assert "на диске 3,0 МБ, у Яндекса 7,6 МБ" in result["list"]
+    assert result["actions"].count(" disabled>") == 0 and out["result_busy"]["actions"].count(" disabled>") == 2
+
+    assert "Проверено 28 файлов — всё в порядке" in out["ok"]["main"] and out["ok"]["list"] == ""
+    assert "verify-requeue" not in out["ok"]["actions"]
+    assert "Проверка остановлена" in out["stopped"]["main"]
+    assert "Сейчас собирается список файлов" in out["listing"]["actions"]
+    # Безлимит старых версий: файлы скачаны, но где лежат — не записано
+    assert "У 1 200 файлов программа старой версии не записала" in out["unchecked"]["main"]
+    assert "verify-start" not in out["unchecked"]["actions"]
+
+    # «Скачать заново» → файлы в очереди, дальше — «Продолжить» на Главной
+    assert out["posted"] == [["/api/verify/requeue", {"source": "disk"}]]
+    assert "5 файлов снова в очереди" in out["requeued"]["main"]
+    assert 'href="#/home"' in out["requeued"]["actions"] and "verify-requeue" not in out["requeued"]["actions"]

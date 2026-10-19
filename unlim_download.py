@@ -12,6 +12,7 @@ CLI:
   python unlim_download.py --collect       # собрать список безлимита
   python unlim_download.py --status        # показать статус БД
   python unlim_download.py --retry-failed  # вернуть упавшие и зависшие в очередь
+  python unlim_download.py --verify        # все ли скачанные файлы на месте, размер и MD5
 """
 
 from __future__ import annotations
@@ -36,11 +37,13 @@ from unlim_common import (
     UnlimError,
     YandexUnavailableError,
     api_call,
+    connect_unlim_db,
     ensure_attempts_column,
     get_sk_uid,
     load_cookies,
     make_session,
     reset_failed_files,
+    save_verify_problems,
 )
 from utils import (
     EXIT_AUTH,
@@ -54,6 +57,7 @@ from utils import (
     remove_preview,
     sqlite_tx,
 )
+from verify import Item as VerifyItem, run_check
 
 LOG_FILE = os.path.join(LOG_DIR, "unlim.log")
 # Сколько кластеров (дней) запрашиваем одним вызовом API
@@ -531,6 +535,31 @@ def cmd_retry_failed():
     print(f"Возвращено в очередь: {n}")
 
 
+def cmd_verify() -> int:
+    """Проверяет скачанное из безлимита: файлы на месте, размер и MD5 совпадают с Яндексом.
+
+    Что не нашлось или испорчено, запоминается в unlim_state.db (unlim_verify_problems):
+    в Web UI кнопка «Скачать заново» вернёт эти файлы в очередь. Код 0 — всё в порядке.
+    """
+    items: list[VerifyItem] = []
+    if os.path.exists(DB_FILE):
+        c = connect_unlim_db(DB_FILE)
+        try:
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='unlim_files'").fetchone():
+                # Размер 0 у безлимита — «Яндекс не сообщил», а не пустой файл
+                items = [VerifyItem(r["file_id"], r["local_path"], r["size"] or None, r["md5"])
+                         for r in c.execute("SELECT file_id, local_path, size, md5 FROM unlim_files "
+                                            "WHERE status='downloaded' ORDER BY local_path")]
+        finally:
+            c.close()
+
+    def save(problems: list[tuple[str, str]]) -> None:
+        if os.path.exists(DB_FILE):
+            save_verify_problems(problems, DB_FILE)
+
+    return run_check(items, save)
+
+
 def main():
     ensure_utf8_stdio()
 
@@ -541,6 +570,8 @@ def main():
                     help="Показать статус БД")
     ap.add_argument("--retry-failed", action="store_true",
                     help="Вернуть упавшие и зависшие файлы в очередь")
+    ap.add_argument("--verify", action="store_true",
+                    help="Проверить, что скачанные файлы на месте: размер и MD5")
     args = ap.parse_args()
     _setup_logging()
     if args.collect:
@@ -549,6 +580,8 @@ def main():
         cmd_status()
     elif args.retry_failed:
         cmd_retry_failed()
+    elif args.verify:
+        return cmd_verify()
     else:
         ap.print_help()
 

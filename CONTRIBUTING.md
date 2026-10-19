@@ -39,6 +39,7 @@ main.py               CLI обычного Диска: check / scan / download /
 downloader.py         обход Диска и скачивание через REST API
 state.py              SQLite-состояние Диска (state.db)
 storage_fetch.py      скачивание одного файла с серверов хранения, молчащие серверы
+verify.py             проверка скачанного для Диска и безлимита: на месте ли файлы, размер, MD5
 
 unlim_download.py     список безлимита (mpfs/list) по данным входа из браузера
 unlim_worker.py       параллельное скачивание безлимита (unlim_state.db)

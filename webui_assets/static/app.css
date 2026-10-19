@@ -642,6 +642,18 @@ span.fp-name .i{color:var(--text-3)}
 ul.reasons{list-style:none;display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
 ul.reasons li{display:flex;align-items:center;gap:10px;font-size:15px}
 ul.reasons li::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--text-3);flex:none}
+/* «Проверка скачанных файлов» в «Подробнее» */
+.verify-head{display:flex;align-items:flex-start;gap:8px;font-size:16px;font-weight:600;line-height:1.4;margin-bottom:12px}
+.verify-head .i{width:20px;height:20px;flex:none;margin-top:1px}
+.verify-head.ok{color:var(--ok)}
+.verify-head.err .i{color:var(--err)}
+.verify-bar{margin:12px 0 8px}
+#det-verify .safety-note{margin-top:10px}
+#det-verify .tiny{margin-top:6px}
+.verify-actions{margin-top:16px}
+.verify-actions:empty{display:none}
+.verify-list{margin-top:8px}
+.verify-list td .tiny{margin-top:4px}
 details{border-top:1px solid var(--border);padding:16px 0}
 details:first-of-type{border-top:none}
 details>summary{cursor:pointer;font-weight:600;list-style:none;display:flex;align-items:center;gap:12px;min-height:28px}

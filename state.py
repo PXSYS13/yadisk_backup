@@ -66,6 +66,12 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+-- Что последняя проверка скачанного (main.py verify) не нашла в папке или нашла
+-- испорченным: kind — missing / size / md5. «Скачать заново» возвращает их в очередь
+CREATE TABLE IF NOT EXISTS verify_problems (
+    remote_path TEXT PRIMARY KEY,
+    kind TEXT NOT NULL
+);
 """
 
 # Маркер отложенного файла в колонке error (его же считает db_stats в webui.py)
@@ -427,16 +433,41 @@ class State:
         )
 
     def get_all_downloaded(self) -> Iterable[sqlite3.Row]:
-        """Файлы, которые лежат в папке: скачанные и найденные при докачке (skipped без ошибки).
+        """Файлы, которые лежат в папке: скачанные и найденные при докачке (skipped без маркера).
 
-        Снятые выбором и дубликаты сюда не входят: их local_path мог остаться от прошлых
-        назначений, а самих файлов в папке нет и быть не должно.
+        Снятые выбором и дубликаты (skipped с пометкой в error) не скачивались — у них
+        бывает назначенный local_path, но файла там нет и быть не должно. Порядок — по
+        локальному пути: проверка читает файлы одной папки подряд.
         """
         return self._conn().execute(
             "SELECT remote_path, local_path, md5, size FROM files "
             "WHERE (status = 'downloaded' OR (status = 'skipped' AND error IS NULL)) "
-            "AND local_path IS NOT NULL"
+            "AND local_path IS NOT NULL AND local_path != '' ORDER BY local_path"
         )
+
+    def save_verify_problems(self, problems: Iterable[tuple[str, str]]) -> None:
+        """Запоминает итог проверки скачанного: пары (remote_path, вид). Прошлый итог стирается."""
+        with self._tx() as conn:
+            conn.execute("DELETE FROM verify_problems")
+            conn.executemany(
+                "INSERT OR REPLACE INTO verify_problems (remote_path, kind) VALUES (?, ?)", problems
+            )
+
+    def requeue_verify_problems(self) -> int:
+        """«Скачать заново»: файлы, которых проверка не нашла или нашла испорченными, — снова в очередь.
+
+        local_path остаётся: скачивание сверит лежащий там файл и заменит испорченный новой
+        копией. Возвращает, сколько файлов вернулось в очередь; список проблем после этого пуст.
+        """
+        with self._tx() as conn:
+            n = conn.execute(
+                "UPDATE files SET status = 'pending', error = NULL, storage_host = NULL, "
+                "downloaded_at = NULL "
+                "WHERE remote_path IN (SELECT remote_path FROM verify_problems) "
+                "AND (status = 'downloaded' OR (status = 'skipped' AND error IS NULL))"
+            ).rowcount
+            conn.execute("DELETE FROM verify_problems")
+        return n
 
     def get_stats(self) -> dict[str, int]:
         rows = self._conn().execute(

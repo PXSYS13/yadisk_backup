@@ -1,4 +1,5 @@
-"""Кнопки интерфейса: запуск и остановка, повторы, настройки, папки, «Забыть список», сортировка."""
+"""Кнопки интерфейса: запуск и остановка, повторы, настройки, папки, проверка скачанного,
+«Забыть список», сортировка."""
 
 from __future__ import annotations
 
@@ -13,7 +14,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from unlim_common import reset_failed_files
+from state import State
+from unlim_common import requeue_verify_problems, reset_failed_files
 from utils import (
     CATEGORY_LABELS,
     DEFAULT_UNLIM_BATCH,
@@ -21,6 +23,7 @@ from utils import (
     LINKS_DIRNAME,
     PREVIEW_DIRNAME,
     encode_disk_folders,
+    files_text,
     is_safe_dir,
     is_safe_download_dir,
     normalize_disk_folders,
@@ -37,6 +40,7 @@ from webapp.tasks import (
     SLOT_DISK,
     SLOT_LINKS,
     SLOT_ORGANIZE,
+    SLOT_UNLIM_COLLECT,
     UNLIM_SLOT_PREFIX,
     organize_moving,
     stop_and_wait,
@@ -182,6 +186,8 @@ def api_rescue_start():
         return _resp(rescue.start())  # идёт — значит «попробовать отложенные сейчас»
     if organize_moving():
         return {"ok": False, "msg": ORGANIZE_BUSY}
+    if verify_running():
+        return {"ok": False, "msg": VERIFY_BUSY}
     src = access.preflight_sources(do_disk, do_unlim)
     if src["error"]:
         return {"ok": False, "msg": src["error"]}
@@ -220,6 +226,8 @@ class RetryFailedPayload(BaseModel):
 @router.post("/api/rescue/retry_failed")
 def api_rescue_retry_failed(p: RetryFailedPayload):
     """«Повторить для N файлов»: упавшие — снова в очередь, и сразу качать."""
+    if verify_running():
+        return {"ok": False, "msg": VERIFY_BUSY}
     n = 0
     if p.source in ("disk", "all"):
         try:
@@ -262,6 +270,8 @@ def api_rescue_relist(p: RelistPayload):
     sources = [s for s in ("disk", "unlim") if s in enabled] if p.source == "all" else [p.source]
     if not sources or not set(sources) <= set(enabled):
         return {"ok": False, "msg": "Этот источник выключен в «Настройках» → «Что скачивать»"}
+    if verify_running():
+        return {"ok": False, "msg": VERIFY_BUSY}
     results = [rescue.relist(s) for s in sources]
     if any(ok is None for ok, _ in results):
         return api_rescue_start()
@@ -370,6 +380,89 @@ def api_open_folder(p: OpenFolderPayload):
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "msg": f"Не получилось открыть папку: {e}. Путь: {path}"}
     return {"ok": True, "msg": "Открыл папку", "path": str(path)}
+
+
+# ── Проверка скачанного: все ли файлы на месте и совпадают ли они с Яндексом ──
+
+# Источник → (слот, скрипт, аргументы, вид задачи). Слот общий со скачиванием этого
+# источника: пока проверка читает файлы, скачивание туда не запускается
+VERIFY_TASKS = {
+    "disk": (SLOT_DISK, "main.py", ["verify"], "disk_verify"),
+    "unlim": (SLOT_UNLIM_COLLECT, "unlim_download.py", ["--verify"], "unlim_verify"),
+}
+VERIFY_BUSY = ("Сейчас идёт проверка скачанных файлов. Дождитесь её конца или остановите её "
+               "в «Подробнее» — потом нажмите «Продолжить».")
+
+
+class VerifyPayload(BaseModel):
+    source: str = Field(default="disk", pattern="^(disk|unlim)$")
+
+
+def verify_running(source: str | None = None) -> bool:
+    """Идёт проверка скачанного: у источника или, без source, у любого."""
+    for name, (slot, _script, _args, kind) in VERIFY_TASKS.items():
+        t = tm.get(slot)
+        if source in (None, name) and t is not None and t.alive() and getattr(t, "kind", None) == kind:
+            return True
+    return False
+
+
+@router.post("/api/verify/start")
+def api_verify_start(p: VerifyPayload):
+    """«Проверить скачанные файлы»: на месте ли они, совпадают ли размер и MD5 с Яндексом.
+
+    Только когда спасение не идёт: оно само пишет в эту папку, и проверка нашла бы
+    «испорченными» файлы, которые как раз докачиваются.
+    """
+    if rescue.is_running():
+        raise HTTPException(409, "Проверить файлы можно, когда скачивание остановлено или закончено: "
+                                 "сейчас программа сама записывает файлы в папку")
+    if verify_running(p.source):
+        return {"ok": False, "msg": "Проверка уже идёт"}
+    slot, script, args, _kind = VERIFY_TASKS[p.source]
+    if tm.any_alive(SLOT_DISK if p.source == "disk" else UNLIM_SLOT_PREFIX):
+        return {"ok": False, "msg": "Сейчас собирается список файлов — проверьте файлы, когда он соберётся"}
+    if not (paths.DB_FILE if p.source == "disk" else paths.UNLIM_DB_FILE).exists():
+        return {"ok": False, "msg": "Проверять пока нечего: программа ещё ничего не скачала"}
+    ok, msg = tm.start(slot, script, args)
+    return {"ok": ok, "msg": "Проверяю скачанные файлы" if ok else msg}
+
+
+@router.post("/api/verify/stop")
+def api_verify_stop(p: VerifyPayload):
+    """«Остановить проверку». Итог не сохраняется — проверку можно запустить заново."""
+    if not verify_running(p.source):
+        return {"ok": False, "msg": "Проверка сейчас не идёт"}
+    ok, _msg = tm.stop(VERIFY_TASKS[p.source][0])
+    return {"ok": ok, "msg": "Проверка остановлена" if ok else "Проверка уже закончилась"}
+
+
+@router.post("/api/verify/requeue")
+def api_verify_requeue(p: VerifyPayload):
+    """«Скачать заново»: что проверка не нашла в папке или нашла испорченным — снова в очередь.
+
+    Качать не начинает: эти файлы скачает следующее «Продолжить» на Главной.
+    """
+    if rescue.is_running():
+        raise HTTPException(409, "Сначала остановите скачивание — потом можно вернуть файлы в очередь")
+    if verify_running(p.source):
+        return {"ok": False, "msg": "Дождитесь конца проверки"}
+    try:
+        if p.source == "unlim":
+            n = requeue_verify_problems(str(paths.UNLIM_DB_FILE))
+        elif paths.DB_FILE.exists():
+            with State(str(paths.DB_FILE)) as st:
+                n = st.requeue_verify_problems()
+        else:
+            n = 0
+    except sqlite3.Error as e:
+        return {"ok": False, "msg": f"База занята ({e}) — попробуйте ещё раз через минуту"}
+    if not n:
+        return {"ok": False, "count": 0,
+                "msg": "Возвращать нечего: эти файлы уже в очереди. Если сомневаетесь, проверьте файлы ещё раз"}
+    log.info("проверка скачанного (%s): вернул в очередь %d файлов", p.source, n)
+    return {"ok": True, "count": n,
+            "msg": f"{files_text(n)} снова в очереди. Нажмите «Продолжить» на Главной — программа скачает их заново"}
 
 
 # ── Список файлов: забыть (собрать заново — /api/rescue/relist) ──

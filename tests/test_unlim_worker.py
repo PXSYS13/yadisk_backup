@@ -1,6 +1,7 @@
 """Тесты воркера безлимита: распаковка ZIP и учёт того, что реально приехало."""
 
 import errno
+import hashlib
 import io
 import os
 import sqlite3
@@ -1221,6 +1222,27 @@ def test_direct_reuses_file_already_on_disk(db, quiet_worker, dirs):
     w._process(uw.take_batch(1, size=10))
     assert status_of(db, "1") == ("downloaded", 0)
     assert w.session.asked == ["2"]  # за уже скачанным к Яндексу не ходили
+
+
+def _requeued(db, local_path, md5):
+    """Файл 1 скачивали в local_path, а «Проверка скачанных файлов» вернула его в очередь."""
+    con = sqlite3.connect(db)
+    con.execute("UPDATE unlim_files SET md5=?, local_path=? WHERE file_id='1'", (md5, str(local_path)))
+    con.execute("DELETE FROM unlim_files WHERE file_id='2'")
+    con.commit()
+    con.close()
+
+
+def test_direct_requeued_file_already_fixed_is_not_downloaded(db, quiet_worker, dirs):
+    good = b"a" * 10
+    dirs.mkdir()
+    (dirs / "a.jpg").write_bytes(good)  # человек сам вернул файл, пока он ждал в очереди
+    _requeued(db, dirs / "a.jpg", hashlib.md5(good).hexdigest())
+    w = quiet_worker
+    w.session = _DirectSession({})
+    w._process(uw.take_batch(1, size=10))
+    assert w.session.asked == []
+    assert status_of(db, "1") == ("downloaded", 0)
 
 
 def test_direct_forbidden_with_live_cookies_does_not_exit(db, quiet_worker, dirs):

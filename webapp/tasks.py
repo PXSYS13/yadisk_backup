@@ -28,6 +28,9 @@ SLOT_ORGANIZE = "organize"
 UNLIM_WORKER_SLOT_PREFIX = "unlim_w"  # unlim_w1, unlim_w2, ...
 UNLIM_SLOT_PREFIX = "unlim"  # collect + все воркеры
 SLOT_LINKS = "links"  # скачивание по публичным ссылкам — живёт отдельно от спасения
+# Проверка скачанного идёт в слоте своего источника: пока она читает файлы, скачивание
+# туда же не запускается (main.py verify — в disk, unlim_download.py --verify — в unlim_collect)
+VERIFY_KINDS = ("disk_verify", "unlim_verify")
 
 # Диагностика смотрит только задачи, которые идут или закончились за последние 10 минут
 DIAG_RECENT_SEC = 600
@@ -36,12 +39,14 @@ TASK_LOG_MAX_BYTES = 10 * 1024 * 1024
 
 
 def task_kind(cmd: list[str]) -> str:
-    """Что делает задача — по её команде (слот disk делят scan и download)."""
+    """Что делает задача — по её команде (слот disk делят scan, download и verify)."""
     script = os.path.basename(cmd[0]) if cmd else ""
     first = cmd[1] if len(cmd) > 1 else ""
     if script == "main.py":
         return "disk_scan" if first == "scan" else "disk_download" if first in (
             "download", "retry-failed") else f"disk_{first or 'other'}"
+    if script == "unlim_download.py" and "--verify" in cmd:
+        return "unlim_verify"
     return {
         "unlim_download.py": "unlim_collect",
         "unlim_worker.py": "unlim_worker",
@@ -247,18 +252,20 @@ class TaskManager:
             return {slot: t.snapshot() for slot, t in self._tasks.items()}
 
     def recent_log_lines(self, per_task: int = 40, recent_sec: float = DIAG_RECENT_SEC,
-                         exclude: tuple[str, ...] = (), with_slots: bool = False) -> list:
+                         exclude: tuple[str, ...] = (), with_slots: bool = False,
+                         exclude_kinds: tuple[str, ...] = ()) -> list:
         """Хвосты логов живых задач и задач, закончившихся не раньше recent_sec назад.
 
         Старые задачи не учитываем: исправленная проблема не должна висеть баннером.
-        exclude — слоты, чьи строки к этим объяснениям не относятся.
+        exclude — слоты, чьи строки к этим объяснениям не относятся; exclude_kinds — то же
+        по виду задачи (проверка скачанного делит слот со скачиванием).
         with_slots — пары (слот, строка): часть правил диагностики касается одного источника.
         """
         now = time.time()
         with self._lock:
             lines: list = []
             for slot, t in self._tasks.items():
-                if slot in exclude:
+                if slot in exclude or getattr(t, "kind", None) in exclude_kinds:
                     continue
                 if t.alive() or (t.finished_at is not None and now - t.finished_at <= recent_sec):
                     tail = list(t.log)[-per_task:]

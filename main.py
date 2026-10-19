@@ -8,7 +8,7 @@
     python main.py download --wait      # не выходить: отложенные повторять каждые 30 минут
     python main.py retry-failed         # сбросить failed → pending и скачать
     python main.py stats                # статистика по БД
-    python main.py verify               # проверить md5 локальных файлов
+    python main.py verify               # все ли скачанные файлы на месте, размер и MD5
     python main.py check                # проверить токен и доступ к диску
 """
 
@@ -52,11 +52,9 @@ from utils import (
     MAX_DISK_WORKERS,
     TELEGRAM_CHANNEL,
     YOUTUBE_VIDEO_URL,
-    compute_md5,
     deferred_round_text,
     ensure_dir,
     ensure_utf8_stdio,
-    file_size_safe,
     files_text,
     hhmm,
     human_bytes,
@@ -69,6 +67,7 @@ from utils import (
     under_webui,
     utc_ts,
 )
+from verify import Item as VerifyItem, run_check
 
 # Где лежит проект — все относительные пути считаем отсюда
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -552,62 +551,20 @@ def cmd_stats(cfg: dict, args: argparse.Namespace) -> int:
 
 
 def cmd_verify(cfg: dict, args: argparse.Namespace) -> int:
-    """Проверяет MD5 локальных файлов против того что хранит API."""
+    """Проверяет, что скачанные файлы на месте и совпадают с Диском: размер, затем MD5.
+
+    Что не нашлось или испорчено, запоминается в state.db (verify_problems): в Web UI
+    кнопка «Скачать заново» вернёт эти файлы в очередь. Код 0 — всё в порядке, 1 — нет.
+    """
     with State(str(DB_FILE)) as state:
-        rows = list(state.get_all_downloaded())
-    if not rows:
-        print("Нет скачанных файлов в БД для проверки.")
-        return 0
+        items = [VerifyItem(r["remote_path"], r["local_path"], r["size"], r["md5"])
+                 for r in state.get_all_downloaded()]
 
-    bad: list[tuple[str, str]] = []
-    missing: list[str] = []
-    size_mismatch: list[str] = []
+    def save(problems: list[tuple[str, str]]) -> None:
+        with State(str(DB_FILE)) as state:
+            state.save_verify_problems(problems)
 
-    bar = tqdm(rows, desc="Проверка MD5", unit="file", disable=not sys.stderr.isatty())
-    for row in bar:
-        remote = row["remote_path"]
-        local = row["local_path"]
-        expected_md5 = row["md5"]
-        expected_size = row["size"]
-
-        size = file_size_safe(local)
-        if size is None:
-            missing.append(remote)
-            continue
-        if expected_size is not None and expected_size != size:
-            size_mismatch.append(f"{remote} (local={size}, remote={expected_size})")
-            continue
-        if not expected_md5:
-            continue  # API не вернул MD5 — проверить нечем
-        try:
-            actual = compute_md5(local)
-        except OSError as e:
-            bad.append((remote, f"read error: {e}"))
-            continue
-        if actual.lower() != expected_md5.lower():
-            bad.append((remote, f"md5 mismatch: local={actual}, remote={expected_md5}"))
-
-    bar.close()
-
-    print(f"\nПроверено: {len(rows)}")
-    print(f"  Отсутствует локально:    {len(missing)}")
-    print(f"  Размер не совпал:        {len(size_mismatch)}")
-    print(f"  MD5 не совпал:           {len(bad)}")
-
-    if missing:
-        print("\nОтсутствующие файлы (первые 20):")
-        for p in missing[:20]:
-            print(f"  {p}")
-    if size_mismatch:
-        print("\nРасхождение по размеру (первые 20):")
-        for p in size_mismatch[:20]:
-            print(f"  {p}")
-    if bad:
-        print("\nРасхождение по MD5 (первые 20):")
-        for p, msg in bad[:20]:
-            print(f"  {p}: {msg}")
-
-    return 0 if not (missing or size_mismatch or bad) else 1
+    return run_check(items, save)
 
 
 # ── argparse ────────────────────────────────────────────────────────────────
@@ -663,7 +620,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_stats = sub.add_parser("stats", help="Показать статистику по БД")
     p_stats.set_defaults(func=cmd_stats)
 
-    p_verify = sub.add_parser("verify", help="Проверить MD5 скачанных файлов")
+    p_verify = sub.add_parser("verify", help="Проверить, что скачанные файлы на месте: размер и MD5")
     p_verify.set_defaults(func=cmd_verify)
 
     return p

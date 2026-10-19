@@ -125,6 +125,163 @@
     App.html(box, `${head}${sum}<ul class="fp-list">${rows}</ul>${more}`);
   }
 
+  // ── «Проверка скачанных файлов»: на месте ли они и совпадают ли с Яндексом ──
+  // Проверка — задача в слоте своего источника (main.py verify, unlim_download.py --verify);
+  // ход и итог — строки «verify_progress | {json}» и «verify_summary | {json}» в её журнале
+  const VERIFY = { disk: { slot: 'disk', kind: 'disk_verify' }, unlim: { slot: 'unlim_collect', kind: 'unlim_verify' } };
+  const VERIFY_KINDS = [
+    ['missing', 'Нет в папке', 'нет в папке'],
+    ['size', 'Размер не совпадает с Яндексом', 'другой размер'],
+    ['md5', 'Содержимое не совпадает с Яндексом (MD5)', 'другое содержимое'],
+    ['unreadable', 'Не удалось прочитать', 'не прочитать'],
+  ];
+  // Источник → конец проверки, после которой её файлы уже вернули в очередь
+  const requeued = {};
+  const filesGen = (n) => `${fmt.num(n)} ${fmt.plural(n, 'файла', 'файлов', 'файлов')}`;
+  const shownPath = (p) => String(p || '').replace(/^disk:/, '').replace(/^\/?photounlim[:/]\/?/, '');
+
+  function lastJson(lines, marker) {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const at = lines[i].indexOf(marker);
+      if (at < 0) continue;
+      try { return JSON.parse(lines[i].slice(at + marker.length)); } catch (e) { return null; }
+    }
+    return null;
+  }
+
+  // App.html сравнивает разметку с innerHTML, а разметка с SVG-иконками обратно не совпадает:
+  // кнопки перерисовывались бы на каждом опросе, и нажатие могло потеряться
+  function paintOnce(el, markup) {
+    if (el && el._markup !== markup) {
+      el._markup = markup;
+      el.innerHTML = markup;
+    }
+  }
+
+  function verifyRunning(p) {
+    let text = 'Готовлюсь к проверке…';
+    let pct = 0;
+    const tail = [];
+    if (p && p.stage === 'size') {
+      text = `Смотрю, все ли файлы на месте: ${fmt.num(p.done)} из ${fmt.files(p.total)}`;
+      pct = fmt.pct(p.done, p.total);
+    } else if (p && p.stage === 'md5') {
+      text = `Сверяю содержимое с Яндексом (MD5): ${fmt.bytes(p.bytes_done)} из ${fmt.bytes(p.bytes_total)}`;
+      pct = fmt.pct(p.bytes_done, p.bytes_total);
+      tail.push(fmt.pctText(p.bytes_done, p.bytes_total));
+      if (p.eta_sec) tail.push(`осталось ≈ ${fmt.duration(p.eta_sec)}`);
+    }
+    if (p) tail.push(p.found ? `уже нашлось проблем: ${fmt.num(p.found)}` : 'пока всё в порядке');
+    return `<div class="activity live">${App.icon('activity')}<span>${esc(text)}</span></div>
+      <div class="bar verify-bar" role="img" aria-label="${esc(text)}"><span class="done" style="width:${pct.toFixed(2)}%"></span></div>
+      ${tail.length ? `<p class="tiny">${esc(tail.join(' · '))}</p>` : ''}
+      <p class="tiny">На большой папке это долго: программа читает каждый файл целиком. Скачивание в это время не идёт.</p>`;
+  }
+
+  function verifyResult(sum, task) {
+    const when = task.finished_at ? `Проверка закончилась в ${fmt.hhmm(task.finished_at)}, заняла ${fmt.duration(sum.seconds)}.` : '';
+    // Старые версии в режиме ZIP не записывали, куда сохранили файл, — такие проверить нечем
+    const unchecked = sum.unchecked ? ` У ${filesGen(sum.unchecked)} программа старой версии не записала, куда их сохранила, — их проверить нельзя.` : '';
+    if (!sum.checked) {
+      return `<div class="empty">${App.icon('hourglass')}${esc(unchecked.trim() || 'Скачанных файлов пока нет — проверять нечего.')}</div>`;
+    }
+    const bad = (sum.size || 0) + (sum.md5 || 0);
+    const noMd5 = sum.no_md5 ? ` У ${filesGen(sum.no_md5)} Яндекс не сообщил контрольную сумму — у них проверены только наличие и размер.` : '';
+    if (!sum.missing && !bad && !sum.unreadable) {
+      return `<p class="verify-head ok">${App.icon('check')}<span>Проверено ${fmt.files(sum.checked)} — всё в порядке</span></p>
+        <p class="small muted">Все файлы на месте, размер и содержимое совпадают с Яндексом.${esc(noMd5 + unchecked)}</p>
+        ${when ? `<p class="tiny verify-when">${esc(when)}</p>` : ''}`;
+    }
+    const parts = [sum.missing ? `не хватает ${filesGen(sum.missing)}` : '', bad ? `повреждено ${fmt.num(bad)}` : '',
+      sum.unreadable ? `не удалось прочитать ${fmt.num(sum.unreadable)}` : ''].filter(Boolean).join(', ');
+    const items = VERIFY_KINDS.filter(([k]) => sum[k]).map(([k, title]) => `<li>${esc(title)} — <b>${fmt.files(sum[k])}</b></li>`).join('');
+    const notes = [];
+    if (sum.all_missing) {
+      notes.push('Программа не нашла на месте ни одного скачанного файла. Скорее всего, диск с папкой отключён или папку перенесли: подключите диск и проверьте ещё раз. Если вы перенесли файлы сами, качать их заново не нужно.');
+    } else if (sum.missing) {
+      notes.push('Файлов нет там, куда программа их скачала. Если вы сами перенесли или удалили их — всё в порядке, качать их заново не нужно.');
+    }
+    if (bad) notes.push('Повреждённые файлы отличаются от тех, что на Диске. Их лучше скачать заново: новая копия заменит испорченную.');
+    if (sum.unreadable) notes.push('Файлы, которые не удалось прочитать, могут быть открыты в другой программе. Закройте её и проверьте ещё раз.');
+    return `<p class="verify-head err">${App.icon('alert')}<span>Проверено ${fmt.files(sum.checked)}. ${esc(parts.charAt(0).toUpperCase() + parts.slice(1))}</span></p>
+      <ul class="reasons">${items}</ul>
+      <p class="safety-note">${App.icon('alert')}<span>${esc(notes.join(' '))}</span></p>
+      ${noMd5 || unchecked ? `<p class="tiny">${esc((noMd5 + unchecked).trim())}</p>` : ''}
+      ${when ? `<p class="tiny verify-when">${esc(when)}</p>` : ''}`;
+  }
+
+  function verifyList(sum) {
+    const ex = sum.examples || {};
+    const rows = VERIFY_KINDS.flatMap(([k, , short]) => (ex[k] || []).map((x) => {
+      const detail = k === 'size' ? `на диске ${fmt.bytes(x.local_size)}, у Яндекса ${fmt.bytes(x.size)}`
+        : k === 'unreadable' ? (x.error || '') : '';
+      return `<tr><td class="name">${esc(shownPath(x.path))}</td>
+        <td><span class="badge ${k === 'unreadable' ? 'wait' : 'err'}">${esc(short)}</span>${
+          detail ? `<div class="tiny">${esc(detail)}</div>` : ''}</td></tr>`;
+    }));
+    if (!rows.length) return '';
+    const cut = VERIFY_KINDS.some(([k]) => (sum[k] || 0) > (ex[k] || []).length);
+    return `<details class="verify-list"><summary>Какие это файлы${cut ? ' — первые 50 каждого вида' : ''}</summary><div class="body">
+      <div class="scroll"><table class="list"><thead><tr><th>Файл</th><th>Что не так</th></tr></thead>
+      <tbody>${rows.join('')}</tbody></table></div></div></details>`;
+  }
+
+  function paintVerify(s) {
+    const box = byId('det-verify');
+    if (!box) return;
+    const name = source;
+    const t = (s.tasks || {})[VERIFY[name].slot];
+    const task = t && t.kind === VERIFY[name].kind ? t : null;
+    const lines = (task && task.log_tail) || [];
+    // Проверять и возвращать в очередь можно, только пока программа не качает этот источник
+    const why = s.pipeline && s.pipeline.running ? 'Можно, когда скачивание остановлено или закончено'
+      : t && !task && t.running ? 'Сейчас собирается список файлов — проверить можно после' : '';
+    const off = why ? ' disabled' : '';
+    const button = (action, cls, icon, label, extra = '') =>
+      `<button${cls ? ` class="${cls}"` : ''} data-action="${action}" data-source="${name}"${extra}${off}>${App.icon(icon)}${label}</button>`;
+    const done = (((((s.rescue || {}).sources || {})[name] || {}).files) || {}).done || 0;
+    const sum = task && !task.running ? lastJson(lines, 'verify_summary | ') : null;
+    let main;
+    let actions = '';
+    let list = '';
+    if (task && task.running) {
+      main = verifyRunning(lastJson(lines, 'verify_progress | '));
+      actions = `<button data-action="verify-stop" data-source="${name}">${App.icon('stop')}Остановить проверку</button>`;
+    } else if (sum) {
+      main = verifyResult(sum, task);
+      list = verifyList(sum);
+      const fixable = (sum.missing || 0) + (sum.size || 0) + (sum.md5 || 0);
+      const back = requeued[name] && requeued[name].at === String(task.finished_at) ? requeued[name] : null;
+      if (back) {
+        main += `<p class="verify-head ok">${App.icon('check')}<span>${esc(fmt.files(back.count))} снова в очереди. ` +
+          'Нажмите «Продолжить» на Главной — программа скачает их заново.</span></p>';
+        actions = `<a class="btn primary" href="#/home">${App.icon('home')}На главную</a>`;
+      } else if (fixable) {
+        actions = button('verify-requeue', 'primary', 'download', 'Скачать заново',
+          ` data-count="${fixable}" data-bytes="${sum.bad_bytes || 0}" data-at="${task.finished_at}"`);
+      }
+      if (sum.checked) actions += button('verify-start', '', 'refresh', 'Проверить ещё раз');
+    } else if (task) {
+      const code = typeof task.exit_code === 'number' ? ` (код ${task.exit_code})` : '';
+      main = task.was_stopped
+        ? `<div class="empty">${App.icon('stop')}Проверка остановлена, итог не сохранён. Её можно запустить заново, когда будет время.</div>`
+        : `<p class="safety-note">${App.icon('alert')}<span>Проверка прервалась${code}. Запустите её снова; если это повторится, ` +
+          'скачайте отчёт для поддержки ниже.</span></p>';
+      actions = button('verify-start', 'primary', 'shield-check', 'Проверить скачанные файлы');
+    } else if (!done) {
+      main = `<div class="empty">${App.icon('hourglass')}Пока проверять нечего: скачанных файлов нет.</div>`;
+    } else {
+      main = `<p class="small muted">Программа сверит каждый скачанный файл с Яндексом: на месте ли он, совпадают ли
+        размер и контрольная сумма (MD5). На большой папке это долго — программа читает каждый файл целиком,
+        и сотни гигабайт проверяются час и больше.</p>`;
+      actions = button('verify-start', 'primary', 'shield-check', 'Проверить скачанные файлы');
+    }
+    if (why && actions.includes(' disabled>')) actions += `<span class="tiny">${esc(why)}</span>`;
+    paintOnce(box, main);
+    paintOnce(byId('det-verify-actions'), actions);
+    paintOnce(byId('det-verify-list'), list);
+  }
+
   function taskLog(s) {
     const tasks = s.tasks || {};
     const keys = source === 'disk' ? ['disk'] : Object.keys(tasks).filter((k) => k.startsWith('unlim')).sort();
@@ -150,6 +307,9 @@
             <div id="det-folders"></div></div>
           <div class="card">${head('alert', 'wait', 'Что не скачалось и почему', 'Файлы, которые ждут Яндекса, программа повторяет сама')}<div id="det-problems"></div></div>
           <div class="card">${head('check', 'ok', 'Последние скачанные', 'Эти файлы уже лежат в вашей папке')}<div id="det-recent"></div></div>
+          <div class="card" id="det-verify-card">${head('shield-check', 'info', 'Проверка скачанных файлов',
+            'Все ли файлы на месте и совпадают ли они с теми, что на Яндексе')}
+            <div id="det-verify"></div><div class="row verify-actions" id="det-verify-actions"></div><div id="det-verify-list"></div></div>
           <div class="card"><details><summary>Для опытных: журнал и пересбор списка</summary><div class="body">
             <div class="row" style="margin-bottom:12px">
               <button data-action="details-relist" id="det-relist">${App.icon('refresh')}Собрать список файлов заново</button>
@@ -194,6 +354,9 @@
         ? `<table class="list"><tbody>${recent.map((x) => `<tr><td class="name">${esc(String(x.path).split('/').pop())}</td>
             <td>${fmt.bytes(x.size)}</td><td class="tiny">${x.at ? fmt.hhmm(x.at) : ''}</td></tr>`).join('')}</tbody></table>`
         : `<div class="empty">${App.icon('hourglass')}Пока ничего.</div>`);
+      const slot = (s.tasks || {})[VERIFY[source].slot];
+      byId('det-relist').disabled = !!(slot && slot.running && slot.kind === VERIFY[source].kind);
+      paintVerify(s);
       App.text(byId('det-log'), taskLog(s));
       if (Date.now() - problemsAt > 20000) loadProblems();
       if (source === 'disk' && Date.now() - foldersAt > 30000) loadFolders();
@@ -208,6 +371,31 @@
   });
   App.action('open-disk-folder', (btn) => App.run(btn, () =>
     App.api.post('/api/open_folder', { which: 'disk_folder', path: btn.dataset.path })));
+
+  App.action('verify-start', (btn) => App.run(btn, () =>
+    App.api.post('/api/verify/start', { source: btn.dataset.source })));
+
+  App.action('verify-stop', async (btn) => {
+    const yes = await App.confirm({ title: 'Остановить проверку?', ok: 'Остановить',
+      text: 'Итог проверки не сохранится — её можно будет запустить заново. Скачанные файлы это не затронет.' });
+    if (yes) App.run(btn, () => App.api.post('/api/verify/stop', { source: btn.dataset.source }));
+  });
+
+  App.action('verify-requeue', async (btn) => {
+    const { source: name, at } = btn.dataset;
+    const count = Number(btn.dataset.count) || 0;
+    const bytes = Number(btn.dataset.bytes) || 0;
+    const yes = await App.confirm({ title: `Скачать заново ${fmt.files(count)}?`, ok: 'Вернуть в очередь',
+      text: `Они вернутся в очередь${bytes ? ` (${fmt.bytes(bytes)})` : ''} и скачаются, когда вы нажмёте «Продолжить» ` +
+        'на Главной. Испорченные копии заменятся новыми. Если какие-то из этих файлов вы сами перенесли или удалили, ' +
+        'они скачаются ещё раз.' });
+    if (!yes) return;
+    const res = await App.run(btn, () => App.api.post('/api/verify/requeue', { source: name }));
+    if (res && res.ok) {
+      requeued[name] = { at, count: (res.data || {}).count || count };
+      App.render();
+    }
+  });
 
   // Тот же путь, что «Обновить список» на Главной: с выбранными папками, и ход сбора виден на Главной
   App.action('details-relist', async (btn) => {
