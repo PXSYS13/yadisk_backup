@@ -1,7 +1,208 @@
 {
-  "_как_заполнять": "Список заполняется сам: донаты DonationAlerts попадают сюда автоматически (записи с id «da-…»). Записи без id можно добавлять руками: name — имя, как человек подписался (без имени — «Аноним»), amount — сумма числом, currency — RUB/USD/EUR, date — ГГГГ-ММ-ДД, message — короткие слова или null. Скрыть донат целиком — добавьте его номер в hidden (da-123 → 123), скрыть только сообщение — в no_message. Программы людей подхватят список с GitHub в течение получаса.",
-  "updated": "2026-10-15",
+  "_как_заполнять": "Донаты DonationAlerts (записи с id «da-…») добавляет tools/sync_supporters.py: --from-widget со страницей виджета «Последние оповещения», сохранённой из браузера, или GitHub Actions по ключу. Записи без id можно добавлять руками: name — имя, как человек подписался (без имени — «Аноним»), amount — сумма числом, currency — RUB/USD/EUR, date — ГГГГ-ММ-ДД, message — короткие слова или null. Скрыть донат целиком — добавьте его номер в hidden (da-123 → 123), скрыть только сообщение — в no_message. Программы людей подхватят список с GitHub в течение получаса после того, как он попадёт в main.",
+  "updated": "2026-10-19",
   "hidden": [],
   "no_message": [],
-  "supporters": []
+  "supporters": [
+    {
+      "id": "da-192743055",
+      "name": "dibr51",
+      "amount": 300,
+      "currency": "RUB",
+      "date": "2026-10-19",
+      "message": null
+    },
+    {
+      "id": "da-192732293",
+      "name": "ByMDMA",
+      "amount": 0.3,
+      "currency": "USD",
+      "date": "2026-10-19",
+      "message": null
+    },
+    {
+      "id": "da-192726393",
+      "name": "Алексей",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-18",
+      "message": null
+    },
+    {
+      "id": "da-192720570",
+      "name": "Аноним",
+      "amount": 200,
+      "currency": "RUB",
+      "date": "2026-10-18",
+      "message": null
+    },
+    {
+      "id": "da-192718586",
+      "name": "mors_gang",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-18",
+      "message": null
+    },
+    {
+      "id": "da-192710545",
+      "name": "Аноним",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-18",
+      "message": null
+    },
+    {
+      "id": "da-192709449",
+      "name": "Аноним",
+      "amount": 1.5,
+      "currency": "EUR",
+      "date": "2026-10-18",
+      "message": null
+    },
+    {
+      "id": "da-192706300",
+      "name": "Аноним",
+      "amount": 1000,
+      "currency": "RUB",
+      "date": "2026-10-18",
+      "message": null
+    },
+    {
+      "id": "da-192692449",
+      "name": "dimakibarov",
+      "amount": 200,
+      "currency": "RUB",
+      "date": "2026-10-18",
+      "message": null
+    },
+    {
+      "id": "da-192665539",
+      "name": "Аноним",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-17",
+      "message": null
+    },
+    {
+      "id": "da-192606064",
+      "name": "Аноним",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-16",
+      "message": null
+    },
+    {
+      "id": "da-192601290",
+      "name": "Аноним",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-16",
+      "message": null
+    },
+    {
+      "id": "da-192535854",
+      "name": "Changer",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-15",
+      "message": null
+    },
+    {
+      "id": "da-192533049",
+      "name": "Adeptgt",
+      "amount": 500,
+      "currency": "RUB",
+      "date": "2026-10-15",
+      "message": null
+    },
+    {
+      "id": "da-192532682",
+      "name": "Власенко Денис",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-15",
+      "message": null
+    },
+    {
+      "id": "da-192526959",
+      "name": "DUO1510",
+      "amount": 300,
+      "currency": "RUB",
+      "date": "2026-10-15",
+      "message": null
+    },
+    {
+      "id": "da-192506711",
+      "name": "Аноним",
+      "amount": 300,
+      "currency": "RUB",
+      "date": "2026-10-15",
+      "message": null
+    },
+    {
+      "id": "da-192497527",
+      "name": "спасибо за поддержку программы",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-14",
+      "message": null
+    },
+    {
+      "id": "da-192492399",
+      "name": "Batl",
+      "amount": 1000,
+      "currency": "RUB",
+      "date": "2026-10-14",
+      "message": null
+    },
+    {
+      "id": "da-192466395",
+      "name": "GhostVento",
+      "amount": 1000,
+      "currency": "RUB",
+      "date": "2026-10-14",
+      "message": "Спасибо за крутое творение и рад, что смог помочь сделать его лучше) Успехов в развитии этого и других проектов"
+    },
+    {
+      "id": "da-192415072",
+      "name": "Аноним",
+      "amount": 400,
+      "currency": "RUB",
+      "date": "2026-10-13",
+      "message": "Давайте, ребят, мы в вас верим"
+    },
+    {
+      "id": "da-192412915",
+      "name": "Аноним",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-13",
+      "message": null
+    },
+    {
+      "id": "da-192399848",
+      "name": "Аноним",
+      "amount": 10,
+      "currency": "RUB",
+      "date": "2026-10-12",
+      "message": null
+    },
+    {
+      "id": "da-192398408",
+      "name": "Аноним",
+      "amount": 500,
+      "currency": "RUB",
+      "date": "2026-10-12",
+      "message": null
+    },
+    {
+      "id": "da-192367680",
+      "name": "Аноним",
+      "amount": 1000,
+      "currency": "RUB",
+      "date": "2026-10-12",
+      "message": null
+    }
+  ]
 }
