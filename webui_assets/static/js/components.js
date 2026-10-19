@@ -462,6 +462,140 @@
         </div></div></section>`;
   };
 
+  // ── Уведомления браузера: «Готово», «Нужно ваше действие», «Всё доступное скачано» ──
+  // Большой Диск качается сутками, его оставляют на ночь. Включает человек сам — переключателем
+  // в «Настройках»; выбор помнит этот браузер, а разрешение хранит сам браузер
+  const NOTIFY_KEY = 'yadisk-notify';
+  let notifyMemory = { on: false, fired: [] };
+  App.notifyPrefs = {
+    get() {
+      try {
+        const v = JSON.parse(localStorage.getItem(NOTIFY_KEY) || 'null');
+        if (v && Array.isArray(v.fired)) notifyMemory = { on: !!v.on, fired: v.fired.slice(-20) };
+      } catch (e) { /* без хранилища помним до перезагрузки страницы */ }
+      return notifyMemory;
+    },
+    save(next) {
+      notifyMemory = next;
+      try { localStorage.setItem(NOTIFY_KEY, JSON.stringify(next)); } catch (e) { /* то же */ }
+    },
+  };
+
+  // О чём стоит сообщить в этом состоянии. «Нужно действие» — каждый раз, когда программа снова
+  // ждёт человека; «Готово» и «Всё доступное скачано» — один раз за запуск (started_at):
+  // отложенные файлы повторяются каждые 30 минут, и сообщение приходило бы всю ночь
+  function attention(r) {
+    if (!r) return null;
+    const run = r.started_at || 0;
+    if (r.state === 'needs_action') {
+      // Вместо действия «настройка» бывает, когда ключ перестал работать, а Безлимит не подключён
+      const a = r.action && r.action.id !== 'setup' ? r.action : null;
+      return { key: 'action', kind: 'action', sticky: true, title: (a && a.title) || 'Нужно ваше действие',
+        body: (a && a.text) || 'Откройте программу: на Главной написано, что сделать.' };
+    }
+    if (r.state === 'done') {
+      const complete = !!(r.summary || {}).complete;
+      return { key: `done:${run}`, kind: 'done', once: true, sticky: true,
+        title: complete ? 'Готово: все файлы сохранены' : r.headline || 'Скачано почти всё', body: r.subline || '' };
+    }
+    if (r.state === 'waiting') {
+      // Перезапуск после сбоя и «Яндекс не отвечает» — не повод звать человека: программа повторит сама
+      const act = Object.values(r.sources || {}).filter((x) => x.enabled);
+      const kinds = act.filter((x) => x.state === 'waiting').map((x) => x.wait_kind);
+      if (act.some((x) => x.wait_kind === 'crash') || (kinds.length && kinds.every((k) => k === 'outage'))) return null;
+      return { key: `wait:${run}`, kind: 'wait', once: true,
+        title: 'Всё доступное скачано, ждём Яндекса', body: r.subline || '' };
+    }
+    return null;
+  }
+
+  // prev и cur — /api/status.rescue прошлого и этого опроса. prev = null — первый опрос после
+  // загрузки страницы: молчим, человек и так смотрит на экран. fired — уже показанные разовые ключи.
+  // То же состояние узнаём по виду, а не по ключу: в демо started_at меняется на каждом опросе
+  App.notifyMoment = (prev, cur, fired = []) => {
+    const now = attention(cur);
+    if (!prev || !now) return null;
+    const before = attention(prev);
+    if (before && before.kind === now.kind) return null;
+    if (now.once && fired.includes(now.key)) return null;
+    return now;
+  };
+
+  // Метка в названии вкладки: среди десятка вкладок видно и без уведомлений
+  App.titleMark = (r, offline) => {
+    if (offline) return '● Программа не отвечает';
+    if (r && r.state === 'needs_action') return '● Нужно действие';
+    if (r && r.state === 'done') return '✓ Готово';
+    return '';
+  };
+
+  const BASE_TITLE = document.title || 'Бэкап Яндекс.Диска';
+  App.notify = {
+    // unsupported — браузер не умеет, insecure — страница открыта не по 127.0.0.1 или localhost,
+    // иначе ответ браузера: default (ещё не спрашивали), granted или denied
+    status() {
+      const N = window.Notification;
+      if (typeof N === 'undefined') return 'unsupported';
+      if (window.isSecureContext === false) return 'insecure';
+      return N.permission || 'default';
+    },
+    enabled: () => App.notifyPrefs.get().on && App.notify.status() === 'granted',
+    // Разрешение спрашиваем только по нажатию переключателя: без нажатия браузер вопрос и не покажет
+    async enable() {
+      let st = App.notify.status();
+      if (st === 'default') {
+        st = await new Promise((resolve) => {
+          try {
+            // Старый Safari отвечает через функцию, а не через обещание
+            const p = window.Notification.requestPermission(resolve);
+            if (p && p.then) p.then(resolve, () => resolve(App.notify.status()));
+          } catch (e) {
+            resolve(App.notify.status());
+          }
+        });
+      }
+      App.notifyPrefs.save({ ...App.notifyPrefs.get(), on: st === 'granted' });
+      if (st === 'granted') {
+        App.notify.show({ kind: 'test', title: 'Уведомления включены',
+          body: 'Так браузер сообщит, когда всё скачается или программе понадобится ваше действие.' }, true);
+      }
+      return st;
+    },
+    disable() { App.notifyPrefs.save({ ...App.notifyPrefs.get(), on: false }); },
+    show(m, force = false) {
+      // Человек смотрит на вкладку — он и так всё видит на экране
+      if (!force && document.visibilityState === 'visible' && document.hasFocus && document.hasFocus()) return null;
+      try {
+        const n = new window.Notification(m.title, { body: m.body || '', tag: `yadisk-${m.kind}`,
+          requireInteraction: !!m.sticky, lang: 'ru' });
+        n.onclick = () => {
+          try { window.focus(); } catch (e) { /* окно уже на виду */ }
+          n.close();
+          App.go('#/home');
+        };
+        return n;
+      } catch (e) {
+        return null;  // Chrome на Android требует service worker — там обходимся без уведомлений
+      }
+    },
+  };
+
+  // На каждом опросе статуса: метка в названии вкладки и уведомление, если состояние сменилось.
+  // prev = null — первый удачный опрос после загрузки страницы, cur = null — программа не ответила
+  App.watchStatus = (prev, cur, offline) => {
+    const r = cur ? cur.rescue : (App.state.status || {}).rescue;
+    const mark = App.titleMark(r, offline);
+    const title = mark ? `${mark} — ${BASE_TITLE}` : BASE_TITLE;
+    if (document.title !== title) document.title = title;
+    if (!prev || !cur) return;
+    const prefs = App.notifyPrefs.get();
+    const m = App.notifyMoment(prev.rescue, cur.rescue, prefs.fired);
+    if (!m) return;
+    // Разовое запоминаем, даже когда уведомления выключены: включат позже — старое не придёт
+    if (m.once) App.notifyPrefs.save({ ...prefs, fired: [...prefs.fired, m.key].slice(-20) });
+    if (App.notify.enabled()) App.notify.show(m);
+  };
+
   // ── «Доступ»: ключ Диска, папка, доступ к Безлимиту (общий для настройки и «Настроек») ──
   const POLYGON_URL = 'https://yandex.ru/dev/disk/poligon/';
   const FORMS = {

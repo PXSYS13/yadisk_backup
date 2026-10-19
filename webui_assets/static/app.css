@@ -559,6 +559,11 @@ fieldset.bare:disabled .tree,fieldset.bare:disabled .folders-summary{opacity:.6}
 .switch input::after{content:"";position:absolute;top:4px;left:4px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .2s cubic-bezier(.23,1,.32,1)}
 .switch input:checked{background:var(--accent)}
 .switch input:checked::after{transform:translateX(20px)}
+.switch input:disabled{opacity:.45;cursor:not-allowed}
+/* Спокойная подсказка под переключателем: например, браузер запретил уведомления */
+.switch:has(.switch-hint:not(.hidden)){align-items:flex-start}
+.switch .switch-hint{display:flex;align-items:flex-start;gap:10px;max-width:68ch;margin-top:10px;padding:10px 14px;border-radius:var(--radius-sm);background:var(--surface-2);color:var(--text-2);font-size:14px}
+.switch .switch-hint .i{width:16px;height:16px;margin-top:3px;color:var(--info)}
 
 /* Строки «Доступа» */
 .access-row{display:flex;align-items:center;gap:12px 16px;padding:20px 0;border-top:1px solid var(--border);flex-wrap:wrap}

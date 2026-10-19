@@ -1,5 +1,6 @@
 """Проверки интерфейса 2.0 без браузера: синтаксис, id, действия, статика, тексты."""
 
+import copy
 import json
 import os
 import re
@@ -326,6 +327,180 @@ def test_donate_card_asks_once_per_milestone():
     assert 'data-action="donate-open"' in out["card"] and 'data-key="m-10000"' in out["card"]
     assert "Уже 10 000 файлов на вашем компьютере" in out["card_ms"]
     assert "https://www.donationalerts.com/r/davronsvv" in out["card_ms"]
+
+
+def _demo_statuses(monkeypatch) -> dict:
+    monkeypatch.setenv("YADISK_DEMO", "1")
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    return {state: client.get(f"/api/status?demo={state}").json() for state in webapp.demo.DEMO_STATES}
+
+
+# Уведомления браузера: о чём сообщить, когда состояние сменилось, — в node, без браузера
+_NOTIFY_HARNESS = _THANKS_HARNESS.split("App.supporters = JSON.parse")[0] + r"""
+const R = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const m = (a, b, fired) => {
+  const v = App.notifyMoment(a ? R[a] : null, R[b], fired || []);
+  return v && { key: v.key, title: v.title, body: v.body, sticky: !!v.sticky };
+};
+const waitKey = m('downloading', 'waiting').key;
+const res = {
+  first: m(null, 'done'), done: m('downloading', 'done'), done_again: m('done', 'done'),
+  done_next_poll: m('done', 'done_next_poll'), wait_next_poll: m('waiting', 'waiting_next_poll'),
+  partial: m('waiting', 'done_partial'), token: m('downloading', 'token'), cookies: m('downloading', 'cookies'),
+  full: m('downloading', 'disk_full'), lost_key: m('downloading', 'lost_key'), still: m('token', 'cookies'),
+  wait: m('downloading', 'waiting'), wait_next_round: m('downloading', 'waiting', [waitKey]),
+  wait_still: m('waiting', 'waiting'), crash: m('downloading', 'crash'), outage: m('downloading', 'outage'),
+  quiet: ['ready', 'setup', 'listing', 'low_space', 'stopped'].map((x) => m('downloading', x)),
+  marks: Object.fromEntries(['token', 'done', 'downloading', 'waiting', 'setup'].map((x) => [x, App.titleMark(R[x], false)])),
+  offline: App.titleMark(R.downloading, true),
+};
+process.stdout.write(JSON.stringify(res));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_notification_once_per_transition(monkeypatch):
+    r = {state: st["rescue"] for state, st in _demo_statuses(monkeypatch).items()}
+    # Перезапуск после сбоя и «Яндекс не отвечает» программа повторит сама — звать человека незачем
+    r["crash"] = copy.deepcopy(r["waiting"])
+    r["crash"]["sources"]["disk"]["wait_kind"] = "crash"
+    r["outage"] = copy.deepcopy(r["waiting"])
+    for src in r["outage"]["sources"].values():
+        src["wait_kind"] = "outage"
+    # Ключ перестал работать, а Безлимит не подключён: вместо действия сервер присылает «настройку»
+    r["lost_key"] = copy.deepcopy(r["token"])
+    r["lost_key"]["action"] = r["setup"]["action"]
+    # Следующий опрос демо: время начала пересчитано, состояние то же
+    for state in ("done", "waiting"):
+        r[f"{state}_next_poll"] = dict(r[state], started_at=r[state]["started_at"] + 1.5)
+    res = subprocess.run(["node", "-e", _NOTIFY_HARNESS], input=json.dumps(r), capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    # Первый опрос после загрузки страницы — тишина: человек и так смотрит на экран
+    assert out["first"] is None
+    assert out["done"]["title"] == "Готово: все файлы сохранены" and out["done"]["sticky"]
+    assert out["done"]["body"] == r["done"]["subline"] and "в папке" in out["done"]["body"]
+    assert out["done_again"] is None and out["done_next_poll"] is None and out["wait_next_poll"] is None
+    assert out["partial"]["title"] == "Скачано почти всё" and "Не скачались" in out["partial"]["body"]
+    # Нужно действие — заголовок и текст те же, что на Главной
+    for state in ("token", "cookies", "disk_full"):
+        key = "full" if state == "disk_full" else state
+        action = r[state]["action"]
+        assert out[key] == {"key": "action", "title": action["title"], "body": action["text"], "sticky": True}, state
+    assert out["token"]["title"] == "Яндекс перестал принимать ключ доступа к Диску"
+    assert out["full"]["title"] == "На диске закончилось место" and "Свободно" in out["full"]["body"]
+    assert out["lost_key"]["title"] == "Нужно ваше действие"
+    assert out["still"] is None  # одно действие сменилось другим — человек уже у компьютера
+    # «Всё доступное скачано» — один раз за запуск, хотя повторы идут каждые 30 минут
+    assert out["wait"]["title"] == "Всё доступное скачано, ждём Яндекса" and not out["wait"]["sticky"]
+    assert out["wait"]["body"] == r["waiting"]["subline"] and "Ждут Яндекса" in out["wait"]["body"]
+    for key in ("wait_next_round", "wait_still", "crash", "outage"):
+        assert out[key] is None, key
+    assert out["quiet"] == [None] * 5  # готов, настройка, сбор списка, скачивание, пауза
+    assert out["marks"] == {"token": "● Нужно действие", "done": "✓ Готово", "downloading": "", "waiting": "",
+                            "setup": ""}
+    assert out["offline"] == "● Программа не отвечает"
+
+
+# Опрос статуса → уведомление и метка во вкладке: Notification, разрешение, хранилище и фокус подменены
+_WATCH_HARNESS = r"""
+const path = require('path');
+global.window = globalThis;
+global.addEventListener = () => {};
+global.location = { search: '', hash: '#/settings', pathname: '/' };
+const el = () => ({ innerHTML: '', textContent: '', className: '', dataset: {}, style: {},
+  addEventListener() {}, setAttribute() {}, classList: { add() {}, remove() {}, toggle() {} } });
+global.document = Object.assign(el(), { documentElement: el(), body: el(), createElement: el,
+  querySelectorAll: () => [], querySelector: () => null, getElementById: () => el(),
+  title: 'Бэкап Яндекс.Диска', visibilityState: 'hidden', hasFocus: () => false });
+const store = {};
+global.localStorage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } };
+global.matchMedia = () => ({ matches: false, addEventListener() {} });
+global.isSecureContext = true;
+let focused = 0;
+global.focus = () => { focused += 1; };
+const shown = [];
+global.Notification = class {
+  constructor(title, opts) { Object.assign(this, { title, opts, closed: false }); shown.push(this); }
+  close() { this.closed = true; }
+};
+Notification.permission = 'default';
+let asked = 0;
+Notification.requestPermission = () => { asked += 1; Notification.permission = 'granted'; return Promise.resolve('granted'); };
+for (const f of ['core.js', 'components.js']) require(path.join(process.env.JS_DIR, f));
+const App = window.App;
+const S = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const steps = {};
+const step = (name, prev, cur, offline) => {
+  const before = shown.length;
+  App.watchStatus(prev && S[prev], cur && S[cur], !!offline);
+  steps[name] = { notified: shown.slice(before).map((n) => n.title), title: document.title };
+};
+(async () => {
+  step('first', null, 'token');
+  const before = App.notify.enabled();
+  const answer = await App.notify.enable();
+  step('token_again', 'token', 'token');
+  step('back', 'token', 'downloading');
+  step('token', 'downloading', 'token');
+  step('offline', null, null, true);
+  step('waiting', 'downloading', 'waiting');
+  step('waiting_next_round', 'downloading', 'waiting');
+  Object.assign(document, { visibilityState: 'visible', hasFocus: () => true });
+  step('done_on_screen', 'waiting', 'done');
+  Object.assign(document, { visibilityState: 'hidden', hasFocus: () => false });
+  step('done_again', 'waiting', 'done');
+  step('done_next_poll', 'done', 'done_next_poll');
+  const action = shown.find((n) => n.opts.tag === 'yadisk-action');
+  action.onclick();
+  App.notify.disable();
+  step('disabled', 'downloading', 'cookies');
+  const saved = JSON.parse(store['yadisk-notify']);
+  global.localStorage = { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } };
+  App.notifyPrefs.save({ on: true, fired: [] });
+  process.stdout.write(JSON.stringify({ before, answer, asked, steps, focused, hash: location.hash,
+    closed: action.closed, shown: shown.map((n) => [n.title, n.opts.tag, n.opts.requireInteraction]),
+    saved, blocked: App.notifyPrefs.get() }));
+})();
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_status_watch_notifies_once_and_marks_the_tab(monkeypatch):
+    st = _demo_statuses(monkeypatch)
+    st["done_next_poll"] = copy.deepcopy(st["done"])
+    st["done_next_poll"]["rescue"]["started_at"] += 1.5  # демо пересчитывает время начала на каждом опросе
+    res = subprocess.run(["node", "-e", _WATCH_HARNESS], input=json.dumps(st), capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    steps = out["steps"]
+    base = "Бэкап Яндекс.Диска"
+    # Разрешение спрашивают только по нажатию переключателя, сразу приходит пробное уведомление
+    assert out["before"] is False and out["answer"] == "granted" and out["asked"] == 1
+    # Первый опрос: метка во вкладке есть, уведомления нет
+    assert steps["first"] == {"notified": [], "title": f"● Нужно действие — {base}"}
+    assert steps["token_again"]["notified"] == [] and steps["back"] == {"notified": [], "title": base}
+    assert steps["token"]["notified"] == ["Яндекс перестал принимать ключ доступа к Диску"]
+    assert steps["offline"] == {"notified": [], "title": f"● Программа не отвечает — {base}"}
+    assert steps["waiting"]["notified"] == ["Всё доступное скачано, ждём Яндекса"]
+    assert steps["waiting_next_round"]["notified"] == []
+    # Человек смотрит на вкладку — не мешаем, но «Готово» этого запуска уже не повторится
+    assert steps["done_on_screen"] == {"notified": [], "title": f"✓ Готово — {base}"}
+    assert steps["done_again"]["notified"] == [] and steps["done_next_poll"]["notified"] == []
+    assert steps["disabled"] == {"notified": [], "title": f"● Нужно действие — {base}"}
+    assert out["shown"] == [
+        ["Уведомления включены", "yadisk-test", False],
+        ["Яндекс перестал принимать ключ доступа к Диску", "yadisk-action", True],
+        ["Всё доступное скачано, ждём Яндекса", "yadisk-wait", False],
+    ]
+    # Нажатие на уведомление: вкладка на виду, открыта Главная
+    assert out["focused"] == 1 and out["closed"] is True and out["hash"] == "#/home"
+    assert out["saved"]["on"] is False and [k.split(":")[0] for k in out["saved"]["fired"]] == ["wait", "done"]
+    # Хранилище недоступно — выбор живёт до перезагрузки страницы, без ошибок
+    assert out["blocked"] == {"on": True, "fired": []}
 
 
 # «Папки» в «Подробнее» у Диска: список, сводка и переход внутрь папки — в node, fetch подменён

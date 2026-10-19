@@ -336,14 +336,23 @@
     inFlight = true;
     try {
       const url = '/api/status' + (App.demo ? `?demo=${encodeURIComponent(App.demo)}` : '');
+      const prev = App.state.status;
+      let res;
       do {
         again = false;
-        const res = await App.api.get(url);
+        res = await App.api.get(url);
         if (again) continue;
         App.state.offline = !res.ok;
         if (res.ok) App.state.status = res.data;
         App.render();
       } while (again);
+      // Метка в названии вкладки и уведомление о смене состояния (components.js);
+      // сбой здесь не должен остановить опрос
+      try {
+        if (App.watchStatus) App.watchStatus(res.ok ? prev : null, res.ok ? res.data : null, App.state.offline);
+      } catch (e) {
+        console.warn('уведомления', e);
+      }
     } finally {
       inFlight = false;
     }

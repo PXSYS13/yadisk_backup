@@ -238,6 +238,29 @@
     }
   }
 
+  // Уведомления: переключатель включён, только если и человек включил, и браузер разрешил
+  const TAB_HINT = 'Без уведомлений подскажет название вкладки: «● Нужно действие» или «✓ Готово».';
+  const NOTIFY_HINTS = {
+    denied: 'Браузер запретил этой странице уведомления. Чтобы разрешить, нажмите на значок слева от адреса ' +
+      `страницы, включите там «Уведомления» и нажмите на переключатель ещё раз. ${TAB_HINT}`,
+    unsupported: `Этот браузер не показывает уведомления — подойдут Chrome, Edge, Яндекс Браузер или Firefox. ${TAB_HINT}`,
+    insecure: 'Уведомления работают, когда программа открыта по адресу 127.0.0.1 или localhost.',
+  };
+  let notifyAsking = false;  // браузер показывает вопрос — флажок не трогаем
+  function paintNotify() {
+    const input = byId('set-root').querySelector('[data-field="opt-notify"]');
+    const st = App.notify.status();
+    if (!notifyAsking && document.activeElement !== input) input.checked = App.notify.enabled();
+    input.disabled = st === 'unsupported' || st === 'insecure';
+    // Перерисовываем, только когда ответ браузера сменился: опрос идёт каждые 1,5 с
+    const hint = byId('set-notify-hint');
+    if (hint.dataset.state === st) return;
+    hint.dataset.state = st;
+    const text = NOTIFY_HINTS[st];
+    hint.innerHTML = text ? `${App.icon('info')}<span>${esc(text)}</span>` : '';
+    hint.classList.toggle('hidden', !text);
+  }
+
   const SECTIONS = [['set-sec-access', 'Доступ'], ['set-sec-what', 'Что скачивать'],
     ['set-sec-extra', 'Дополнительно'], ['set-sec-danger', 'Если что-то не так']];
   let observer = null;
@@ -307,6 +330,12 @@
             </section>
             <section id="set-sec-extra">${head('Дополнительно', 'Обычно менять ничего не нужно. Переключатели сохраняются сразу.')}
               <div class="card">
+                <div class="switch"><div><b>Сообщать, когда всё скачается или понадобится ваше действие</b>
+                    <p>Браузер покажет уведомление, даже если вкладка свёрнута: что всё скачано или что программе
+                    нужен новый ключ, доступ к Безлимиту или место на диске. Работает, пока вкладка с программой открыта.</p>
+                    <p class="switch-hint hidden" id="set-notify-hint"></p></div>
+                  <input type="checkbox" data-field="opt-notify" data-action="notify-toggle"
+                    aria-label="Сообщать, когда всё скачается или понадобится ваше действие"></div>
                 <div class="switch"><div><b>Бережный режим</b>
                     <p>Вдвое меньше одновременных скачиваний: остальным в доме достанется больше интернета, но
                     скачивание пойдёт дольше. Включите, если Яндекс часто отвечает «слишком много запросов» или из-за
@@ -346,6 +375,7 @@
       picker.synced = false;
       picker.errors.clear();
       paintSavebar();
+      paintNotify();
       loadCounts();
       setTimeout(watchSections, 0);
       reveal();
@@ -355,6 +385,7 @@
       App.Access.update(byId('set-access'), s);
       paintWhat(s);
       paintExtra(s);
+      paintNotify();
       const st = s.settings || {};
       syncFolders(st);
       const running = !!(s.pipeline && s.pipeline.running);
@@ -445,6 +476,29 @@
   App.action('settings-toggle', (input) => {
     // Флажок: событие click приходит до смены состояния — читаем после
     setTimeout(() => App.run(null, () => App.api.post('/api/settings', { [input.dataset.option]: input.checked })), 0);
+  });
+
+  // Флажок уже переключился: checked — то, чего хочет человек. Разрешение спрашиваем сразу,
+  // в обработчике нажатия: после паузы Firefox и Safari вопрос не покажут
+  App.action('notify-toggle', async (input) => {
+    if (!input.checked) {
+      App.notify.disable();
+      paintNotify();
+      App.toast('Уведомления выключены');
+      return;
+    }
+    notifyAsking = true;
+    let st;
+    try {
+      st = await App.notify.enable();
+    } finally {
+      notifyAsking = false;
+    }
+    input.checked = st === 'granted';
+    paintNotify();
+    if (st === 'granted') App.toast('Уведомления включены — сейчас браузер покажет пробное', 'ok');
+    else if (st === 'denied') App.toast('Браузер не разрешил уведомления — как это исправить, написано под переключателем');
+    else App.toast('Уведомления не включены: браузер не получил разрешения');
   });
 
   App.action('forget-list', async (btn) => {
