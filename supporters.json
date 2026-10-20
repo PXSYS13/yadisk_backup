@@ -1,9 +1,41 @@
 {
   "_как_заполнять": "Донаты DonationAlerts (записи с id «da-…») добавляет tools/sync_supporters.py: --from-widget со страницей виджета «Последние оповещения», сохранённой из браузера, или GitHub Actions по ключу. Записи без id можно добавлять руками: name — имя, как человек подписался (без имени — «Аноним»), amount — сумма числом, currency — RUB/USD/EUR, date — ГГГГ-ММ-ДД, message — короткие слова или null. Скрыть донат целиком — добавьте его номер в hidden (da-123 → 123), скрыть только сообщение — в no_message. Программы людей подхватят список с GitHub в течение получаса после того, как он попадёт в main.",
-  "updated": "2026-10-19",
+  "updated": "2026-10-20",
   "hidden": [],
   "no_message": [],
   "supporters": [
+    {
+      "id": "da-192776142",
+      "name": "Блинчик",
+      "amount": 500,
+      "currency": "RUB",
+      "date": "2026-10-19",
+      "message": null
+    },
+    {
+      "id": "da-192774691",
+      "name": "3==э",
+      "amount": 20,
+      "currency": "RUB",
+      "date": "2026-10-19",
+      "message": null
+    },
+    {
+      "id": "da-192768493",
+      "name": "Аноним",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-19",
+      "message": null
+    },
+    {
+      "id": "da-192746676",
+      "name": "Аноним",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-19",
+      "message": null
+    },
     {
       "id": "da-192743055",
       "name": "dibr51",
