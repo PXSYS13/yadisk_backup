@@ -4,6 +4,7 @@ import json
 import sqlite3
 import pytest
 import unlim_common as uc
+from utils import EXIT_OUTAGE
 
 
 def test_make_cid():
@@ -170,6 +171,87 @@ def test_collect_via_list_pages_through_photounlim(unlim_db, monkeypatch, capsys
         ("/photounlim/c.jpg", "c.jpg", 30, "a" * 32, "pending"),
     ]
     assert "Найдено: 3 файлов" in capsys.readouterr().out  # строку читает Web UI
+
+
+def test_collect_via_list_stops_when_yandex_repeats_pages(unlim_db, monkeypatch, capsys):
+    """Яндекс отдаёт ту же страницу снова и снова: сбор не крутится бесконечно, «Найдено» не растёт."""
+    ud = unlim_db
+    monkeypatch.setattr(ud, "LIST_PAGE", 2)
+    root = {"type": "dir", "path": "/photounlim"}
+    calls = []
+
+    def same_page(s, sk, uid, method, params=None, retries=3):
+        calls.append(params["offset"])
+        return [root, _unlim_item("a.jpg", 10), _unlim_item("b.jpg", 20)]
+
+    monkeypatch.setattr(ud, "api_call", same_page)
+    with pytest.raises(ud.ListBroken) as e:
+        ud.collect_via_list(None, "sk", "uid")
+    assert e.value.seen == 2 and "повторяет" in str(e.value)
+    assert calls == [0, 2]
+    assert ud.db().execute("SELECT COUNT(*) FROM unlim_files").fetchone()[0] == 2
+    assert "Найдено: 4" not in capsys.readouterr().out
+
+
+def test_collect_via_list_retries_a_page_in_the_middle(unlim_db, monkeypatch):
+    """Сбой Яндекса на середине большого списка — повтор той же страницы, а не сбор с начала."""
+    ud = unlim_db
+    monkeypatch.setattr(ud, "LIST_PAGE", 2)
+    monkeypatch.setattr(ud, "LIST_PAGE_PAUSES", (0, 0))
+    root = {"type": "dir", "path": "/photounlim"}
+    pages = {0: [root, _unlim_item("a.jpg", 10), _unlim_item("b.jpg", 20)], 2: [root, _unlim_item("c.jpg", 30)]}
+    fails = {2: 2}
+    calls = []
+
+    def flaky(s, sk, uid, method, params=None, retries=3):
+        off = params["offset"]
+        calls.append(off)
+        if fails.get(off):
+            fails[off] -= 1
+            raise RuntimeError("mpfs/list: HTTP 500")
+        return pages[off]
+
+    monkeypatch.setattr(ud, "api_call", flaky)
+    assert ud.collect_via_list(None, "sk", "uid") == 3
+    assert calls == [0, 2, 2, 2]
+
+
+def test_collect_keeps_a_broken_list_and_does_not_mix_in_photoslice(unlim_db, monkeypatch, capsys):
+    """Список оборвался посреди: найденное в базе, код 3 (не запоминать как полный), фотосрез не зовём."""
+    ud = unlim_db
+    monkeypatch.setattr(ud, "LIST_PAGE", 2)
+    monkeypatch.setattr(ud, "LIST_PAGE_PAUSES", ())
+    monkeypatch.setattr(ud, "load_cookies", lambda: {})
+    monkeypatch.setattr(ud, "get_sk_uid", lambda s: ("sk", "uid"))
+    photoslice = []
+    monkeypatch.setattr(ud, "collect_via_photoslice", lambda *a: photoslice.append(1))
+    root = {"type": "dir", "path": "/photounlim"}
+
+    def broken_after_first(s, sk, uid, method, params=None, retries=3):
+        if params["offset"]:
+            raise RuntimeError("mpfs/list: HTTP 504")
+        return [root, _unlim_item("a.jpg", 10), _unlim_item("b.jpg", 20)]
+
+    monkeypatch.setattr(ud, "api_call", broken_after_first)
+    assert ud.cmd_collect() == EXIT_OUTAGE
+    assert not photoslice
+    assert ud.db().execute("SELECT COUNT(*) FROM unlim_files").fetchone()[0] == 2
+    out = capsys.readouterr().out
+    assert "Уже найденное сохранено: 2 файла" in out
+    assert "получен не полностью" in out
+
+
+def test_photoslice_takes_only_unlim_files_and_no_second_copies(unlim_db, monkeypatch):
+    """Фотосрез отдаёт все фото аккаунта: фото Диска и корзины не берём, найденное mpfs/list — не дублируем."""
+    ud = unlim_db
+    ud.db().execute("INSERT INTO unlim_files (file_id, name, size, status) "
+                    "VALUES ('/photounlim/a.jpg', 'a.jpg', 10, 'downloaded')")
+    items = [{"id": i, "name": i.rsplit("/", 1)[-1], "size": 1} for i in (
+        "photounlim:/a.jpg", "photounlim:/b.jpg", "/disk/Фотокамера/c.jpg", "disk:/d.jpg", "/trash/e.jpg")]
+    monkeypatch.setattr(ud, "api_call", lambda *a, **k: {"clusters": {"fetched": [{"id": "c1", "items": items}]}})
+    assert ud.fetch_cluster_resources(None, "sk", "uid", "psid", [{"cluster_id": "c1", "size": 5}]) == 1
+    ids = {r[0] for r in ud.db().execute("SELECT file_id FROM unlim_files")}
+    assert ids == {"/photounlim/a.jpg", "photounlim:/b.jpg"}
 
 
 def test_save_listed_files_does_not_duplicate_photoslice_rows(unlim_db):

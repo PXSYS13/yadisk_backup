@@ -632,7 +632,7 @@ def test_pipeline_unlim_only_skips_token_check(monkeypatch):
     pipe._run()
     assert calls == []
     assert pipe.state == "failed"
-    assert any("нужны cookies" in line for line in pipe.log)
+    assert any("Для Безлимита нужен доступ" in line for line in pipe.log)
 
 
 def test_plan_sources_matrix():
@@ -646,12 +646,12 @@ def test_plan_sources_matrix():
 
     no_cookies = ps(True, True, True, False)
     assert (no_cookies["run_disk"], no_cookies["run_unlim"]) == (True, False)
-    assert "безлимит пропускаю" in no_cookies["notes"][0]
+    assert "Безлимит пропускаю" in no_cookies["notes"][0]
 
     nothing = ps(True, True, False, False)
-    assert nothing["error"] and "ни токена, ни cookies" in nothing["error"]
-    assert "токен" in ps(True, False, False, True)["error"]
-    assert "cookies" in ps(False, True, True, False)["error"]
+    assert nothing["error"] and "ни ключа доступа к Диску, ни доступа к Безлимиту" in nothing["error"]
+    assert "ключ доступа" in ps(True, False, False, True)["error"]
+    assert "Доступ к Безлимиту" in ps(False, True, True, False)["error"]
     assert ps(False, False, True, True)["error"]
 
 
@@ -667,7 +667,7 @@ def test_pipeline_without_token_downloads_unlim_only(monkeypatch):
     assert pipe.state == "done"
     assert pipe.partial is True
     assert "disk" not in started and "unlim_collect" in started
-    assert any("обычный диск пропускаю" in line for line in pipe.log)
+    assert any("обычный Диск пропускаю" in line for line in pipe.log)
     assert pipe.status()["partial"] is True
 
 
@@ -677,7 +677,7 @@ def test_rescue_start_refuses_when_nothing_configured(monkeypatch):
     resp = client.post("/api/rescue/start")  # по умолчанию включены оба источника
     body = resp.json()
     assert body["ok"] is False
-    assert "ни токена, ни cookies" in body["msg"]
+    assert "ни ключа доступа к Диску, ни доступа к Безлимиту" in body["msg"]
     assert webapp.rescue.rescue.is_running() is False
 
 

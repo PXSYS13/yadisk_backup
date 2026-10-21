@@ -184,8 +184,6 @@
         ? `<table class="list"><tbody>${recent.map((x) => `<tr><td class="name">${esc(String(x.path).split('/').pop())}</td>
             <td>${fmt.bytes(x.size)}</td><td class="tiny">${x.at ? fmt.hhmm(x.at) : ''}</td></tr>`).join('')}</tbody></table>`
         : `<div class="empty">${App.icon('hourglass')}Пока ничего.</div>`);
-      const running = !!(s.pipeline && s.pipeline.running);
-      byId('det-relist').disabled = running;
       App.text(byId('det-log'), taskLog(s));
       if (Date.now() - problemsAt > 20000) loadProblems();
       if (source === 'disk' && Date.now() - foldersAt > 30000) loadFolders();
@@ -201,9 +199,10 @@
   App.action('open-disk-folder', (btn) => App.run(btn, () =>
     App.api.post('/api/open_folder', { which: 'disk_folder', path: btn.dataset.path })));
 
+  // Тот же путь, что «Обновить список» на Главной: с выбранными папками, и ход сбора виден на Главной
   App.action('details-relist', async (btn) => {
     const yes = await App.confirm({ title: 'Собрать список файлов заново?', ok: 'Собрать',
-      text: 'Программа заново спросит у Яндекса, какие файлы есть. Скачанное не пропадёт и второй раз качаться не будет.' });
-    if (yes) App.run(btn, () => App.api.post(source === 'disk' ? '/api/disk/scan' : '/api/unlim/collect'));
+      text: 'Программа заново спросит у Яндекса, какие файлы есть, и скачает новые. Скачанное не пропадёт и второй раз качаться не будет.' });
+    if (yes) App.run(btn, () => App.api.post('/api/rescue/relist', { source }));
   });
 })();

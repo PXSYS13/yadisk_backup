@@ -194,6 +194,21 @@ def db_has_rows(db_file: Path, table: str) -> bool:
         return False
 
 
+def db_has_pending(db_file: Path, table: str) -> bool:
+    """В очереди есть файлы, которые ещё не скачаны (в том числе ждущие Яндекса)."""
+    table = validate_sql_ident(table, ALLOWED_TABLES, "table")
+    if not db_file.exists():
+        return False
+    try:
+        c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
+        try:
+            return c.execute(f"SELECT 1 FROM {table} WHERE status = 'pending' LIMIT 1").fetchone() is not None
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return False
+
+
 def reset_transient_disk_failures() -> int:
     """Явный старт: файлы, упавшие из-за сбоев (а не из-за самих файлов), — снова в очередь."""
     if not paths.DB_FILE.exists():

@@ -7,6 +7,7 @@ import time
 import pytest
 
 import state
+import unlim_common
 import webapp.access
 import webapp.listing
 import webapp.paths
@@ -99,6 +100,137 @@ def test_lists_are_remembered_across_restarts(rescue, monkeypatch):
     assert unlim["listed_at"] == webapp.listing.read_listing("unlim")["at"]
     block = webapp.rescue_view.source_block("unlim", unlim, None, True, "", None, None)
     assert block["listed_at"] == unlim["listed_at"]
+
+
+def _disk_rows(*names):
+    st = state.State(str(webapp.paths.DB_FILE))
+    st.mark_pending_batch([(f"disk:/{n}", 1, None) for n in names])
+    st.close()
+
+
+def _unlim_rows(*names):
+    con = sqlite3.connect(webapp.paths.UNLIM_DB_FILE)
+    con.executescript(unlim_common.UNLIM_SCHEMA)
+    con.executemany("INSERT INTO unlim_files (file_id, name, size) VALUES (?, ?, 1)",
+                    [(f"/photounlim/{n}", n) for n in names])
+    con.commit()
+    con.close()
+
+
+def _download_everything(db, table):
+    con = sqlite3.connect(db)
+    con.execute(f"UPDATE {table} SET status='downloaded' WHERE status='pending'")
+    con.commit()
+    con.close()
+
+
+def _old_listing(source, hours=7):
+    at = time.time() - hours * 3600
+    webapp.listing.write_listing(source, {"at": at, "whole": True, "folders": []})
+    return at
+
+
+class DiskSteps(Script):
+    """Скачивание выкачивает очередь, сбор списка добавляет в неё new_files."""
+
+    def __init__(self, monkeypatch, rescue, new_files=()):
+        super().__init__(monkeypatch, rescue, {"disk": [0]})
+        self.new_files = list(new_files)
+
+    def _wait(self, slot, on_finish_msg=""):
+        step = self.started[-1][2][0]
+        if step == "download":
+            _download_everything(webapp.paths.DB_FILE, "files")
+        elif step == "scan" and self.new_files:
+            _disk_rows(*self.new_files)
+            self.new_files.clear()
+        return 0
+
+
+def test_an_old_list_is_downloaded_first_and_refreshed_after(rescue, monkeypatch):
+    """Список старше 6 часов, а по нему есть что качать: качаем сразу, список обновляем после шага.
+    Раньше большой Диск часами перечислялся заново, и всё это время скачивание стояло."""
+    rescue.skip_unlim = True
+    _disk_rows("a.jpg", "b.jpg")
+    old = _old_listing("disk")
+    sc = DiskSteps(monkeypatch, rescue)
+    rescue._run()
+    assert sc.steps("disk") == [("disk", "download"), ("disk", "scan")]
+    assert rescue.state == "done"
+    assert webapp.listing.read_listing("disk")["at"] > old
+    texts = [e["text"] for e in rescue.events]
+    assert any("сначала качаю по нему, потом обновлю его" in t for t in texts)
+
+
+def test_new_files_from_the_refreshed_list_are_downloaded_at_once(rescue, monkeypatch):
+    rescue.skip_unlim = True
+    rescue.retry_every = 3600  # новые файлы не должны ждать раунда
+    _disk_rows("a.jpg")
+    _old_listing("disk")
+    sc = DiskSteps(monkeypatch, rescue, new_files=["new.jpg"])
+    rescue._run()
+    assert sc.steps("disk") == [("disk", "download"), ("disk", "scan"), ("disk", "download")]
+    assert rescue.state == "done"
+    assert "В обновлённом списке есть новые файлы — качаю их" in [e["text"] for e in rescue.events]
+
+
+def test_a_list_without_a_record_is_downloaded_first(rescue, monkeypatch):
+    """Прежний интерфейс собирал список без записи о сборе: после перехода на Главную спасение
+    часами перечисляло большой Диск заново, прежде чем качать."""
+    rescue.skip_unlim = True
+    _disk_rows("a.jpg")
+    sc = DiskSteps(monkeypatch, rescue)
+    rescue._run()
+    assert sc.steps("disk") == [("disk", "download"), ("disk", "scan")]
+    assert "Сначала качаю по уже собранному списку файлов, потом обновлю его" in [e["text"] for e in rescue.events]
+    assert webapp.listing.read_listing("disk") is not None
+
+
+def test_relist_lists_first(rescue, monkeypatch):
+    """«Обновить список» — список собирается до скачивания, как просили."""
+    rescue.skip_unlim = True
+    _disk_rows("a.jpg")
+    _old_listing("disk")
+    assert rescue.relist("disk") == (None, "")  # спасение не идёт — его запустит вызывающий
+    sc = DiskSteps(monkeypatch, rescue)
+    rescue._run()
+    assert sc.steps("disk") == [("disk", "scan"), ("disk", "download")]
+    assert not rescue._relist_asked
+
+
+def test_relist_while_checking_access_lists_first(rescue, monkeypatch):
+    """«Обновить список» нажали, пока ветка проверяет доступ: ответ «список и так собирается» — правда."""
+    rescue.skip_unlim = True
+    _disk_rows("a.jpg")
+    _old_listing("disk")
+    sc = DiskSteps(monkeypatch, rescue)
+    check = webapp.access.check_token
+
+    def relist_during_check(tok):
+        assert rescue.relist("disk") == (True, "Список и так собирается прямо сейчас")
+        return check(tok)
+
+    monkeypatch.setattr(webapp.access, "check_token", relist_during_check)
+    monkeypatch.setattr(rescue, "is_running", lambda: True)
+    rescue._run()
+    assert sc.steps("disk") == [("disk", "scan"), ("disk", "download")]
+
+
+def test_an_old_unlim_list_is_downloaded_first_too(rescue, monkeypatch):
+    rescue.skip_disk = True
+    _unlim_rows("a.jpg")
+    _old_listing("unlim")
+    sc = Script(monkeypatch, rescue, {"unlim_collect": [0]})
+
+    def workers(ids):
+        _download_everything(webapp.paths.UNLIM_DB_FILE, "unlim_files")
+        return [0 for _ in ids]
+
+    monkeypatch.setattr(rescue, "_wait_workers", workers)
+    rescue._run()
+    slots = [s for s, _ in sc.steps()]
+    assert slots == ["unlim_w1", "unlim_collect"]
+    assert rescue.state == "done"
 
 
 def test_rescue_waits_for_a_branch_restarted_by_relist(rescue, monkeypatch):
@@ -257,6 +389,8 @@ def test_choosing_everything_brings_back_deselected_categories(rescue, monkeypat
     con = sqlite3.connect(db)
     assert con.execute("SELECT status FROM files").fetchone()[0] == "pending"
     con.close()
+    # Прежний интерфейс снимал типы файлов сам: скачок числа файлов объясняется в ленте
+    assert any(e["text"].startswith("Снова в очереди: 1 файл, который раньше не выбирали") for e in rescue.events)
 
 
 def test_a_crashed_download_is_not_reported_as_done(rescue, monkeypatch, tmp_path):

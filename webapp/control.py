@@ -37,7 +37,6 @@ from webapp.tasks import (
     SLOT_DISK,
     SLOT_LINKS,
     SLOT_ORGANIZE,
-    SLOT_UNLIM_COLLECT,
     UNLIM_SLOT_PREFIX,
     stop_and_wait,
     tm,
@@ -324,17 +323,7 @@ def api_open_folder(p: OpenFolderPayload):
     return {"ok": True, "msg": "Открыл папку", "path": str(path)}
 
 
-# ── Список файлов: собрать заново, забыть ──
-
-
-@router.post("/api/disk/scan")
-def disk_scan():
-    return _resp(tm.start(SLOT_DISK, "main.py", ["scan"]))
-
-
-@router.post("/api/unlim/collect")
-def unlim_collect():
-    return _resp(tm.start(SLOT_UNLIM_COLLECT, "unlim_download.py", ["--collect"]))
+# ── Список файлов: забыть (собрать заново — /api/rescue/relist) ──
 
 
 def safe_remove_db_files(base_file: Path) -> tuple[bool, str]:

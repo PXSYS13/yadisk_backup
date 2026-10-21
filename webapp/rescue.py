@@ -44,6 +44,7 @@ from webapp.folders import FOLDERS_SUMMARY_SEC, disk_folders_summary
 from webapp.listing import disk_listing_plan, listing_stale, read_listing, write_listing
 from webapp.local_disk import LOW_FREE_BYTES, free_space
 from webapp.queue_db import (
+    db_has_pending,
     db_has_rows,
     db_stats,
     filter_to_categories,
@@ -140,6 +141,8 @@ class Branch:
         self.odd_rounds = 0
         self.reset_done = False
         self.relist = False  # «Обновить список»: перед следующим скачиванием собрать список заново
+        # Список устарел, но по нему ещё есть что качать: сначала качаем, после шага собираем заново
+        self.list_after = False
         self.requeued = False  # «Повторить ошибки» во время шага: после него сразу новый раунд
         self.wake.clear()
 
@@ -198,6 +201,9 @@ class Rescue:
         # (None — ещё не считали) и когда считали последний раз
         self._folders_done: set[str] | None = None
         self._folders_at = 0.0
+        # Источники, где человек нажал «Обновить список»: их список собирается до скачивания,
+        # а не после первого шага (см. Branch.list_after)
+        self._relist_asked: set[str] = set()
 
     # ── управление ──
 
@@ -253,6 +259,7 @@ class Rescue:
         """
         self._forget_listing(source)
         with self._lock:
+            self._relist_asked.add(source)
             if not self.is_running() or self._closing:
                 return None, ""
             b = self.branches[source]
@@ -316,6 +323,24 @@ class Rescue:
         target = self._run_disk if b.name == "disk" else self._run_unlim
         b.thread = threading.Thread(target=self._branch_main, args=(b, target), daemon=True)
         b.thread.start()
+
+    def _take_relist(self, source: str) -> bool:
+        """Человек просил «Обновить список» этого источника (и просьба теперь исполняется)."""
+        with self._lock:
+            asked = source in self._relist_asked
+            self._relist_asked.discard(source)
+            return asked
+
+    def _list_after(self, b: Branch, rec: dict | None) -> None:
+        """Список устарел (или собран без записи о сборе — прежним интерфейсом), а по нему ещё
+        есть что качать: сначала качаем, после шага собираем заново. Большой Диск Яндекс
+        перечисляет часами, и всё это время скачивание стояло бы."""
+        b.list_after = True
+        what = "Список фото и видео" if b.name == "unlim" else "Список файлов"
+        text = (f"{what} собран {when_text(rec['at'])} — сначала качаю по нему, потом обновлю его" if rec
+                else "Сначала качаю по уже собранному списку файлов, потом обновлю его")
+        self._log(f"📋 {b.label}: {text}")
+        self._event(b.name, "info", text)
 
     def _forget_listing(self, source: str) -> None:
         try:
@@ -490,6 +515,7 @@ class Rescue:
         if not folders and cats is None:
             if returned:
                 self._log(f"↩️ Диск: вернул в очередь {returned} файлов, снятых прошлым выбором")
+                self._event("disk", "info", self._returned_text(returned))
             return
         skipped = 0
         if folders:
@@ -508,6 +534,14 @@ class Rescue:
         if folders:
             self._event("disk", "info", f"Качаю только выбранные папки: {folders_text(folders)}")
 
+    @staticmethod
+    def _returned_text(n: int) -> str:
+        """Лента: в очередь вернулись файлы, снятые прежним выбором. Прежний интерфейс выбирал
+        типы файлов сам, а Главная качает по «Настройкам», — люди видели скачок числа файлов."""
+        return (f"Снова в очереди: {files_text(n)}, {plural(n, 'который', 'которые', 'которые')} раньше "
+                f"не выбирали. Скачиваю всё, как отмечено в «Настройках»; если часть файлов не нужна, "
+                f"выберите типы файлов там")
+
     def _apply_categories(self, db_file: Path, table: str, id_col: str,
                           categories: list[str], label: str) -> None:
         unskip_category_marker(db_file, table)
@@ -522,6 +556,7 @@ class Rescue:
             n = unskip_category_marker(db_file, table)
             if n:
                 self._log(f"↩️ {label}: вернул в очередь {n} файлов, снятых прошлым выбором категорий")
+                self._event("unlim" if table == "unlim_files" else "disk", "info", self._returned_text(n))
         else:
             self._apply_categories(db_file, table, id_col, categories, label)
 
@@ -637,13 +672,18 @@ class Rescue:
             self._event(b.name, "err", "Ошибка программы — скачайте отчёт для поддержки во вкладке «Помощь»")
 
     def _drive(self, b: Branch, prepare: Callable[[Branch], int], download: Callable[[Branch], int],
-               db: tuple[Path, str, str]) -> None:
-        """Общий цикл ветки: подготовить список → качать → ждать раунд, пока есть что качать."""
+               db: tuple[Path, str, str], list_late: Callable[[Branch], int]) -> None:
+        """Общий цикл ветки: подготовить список → качать → ждать раунд, пока есть что качать.
+
+        list_late — сбор списка, который prepare отложил (b.list_after) до конца первого шага
+        скачивания: большой Диск Яндекс перечисляет часами, и всё это время скачивание стояло бы.
+        """
         ready = False
         while not self._stopped():
             b.round += 1
             if b.relist:  # «Обновить список» во время ожидания
                 b.relist = False
+                b.list_after = False
                 ready = False
             if not ready:
                 code = prepare(b)
@@ -663,9 +703,30 @@ class Rescue:
             if b.relist and code not in (EXIT_AUTH, EXIT_DISK_FULL):
                 # «Обновить список» нажали во время скачивания — собираем список сразу, без паузы
                 continue
+            if b.list_after and code not in (EXIT_AUTH, EXIT_DISK_FULL):
+                b.list_after = False
+                untried = self._untried(db)
+                code_list = list_late(b)
+                if code_list == -1:
+                    return self._branch_stopped(b)
+                if code_list == PREPARE_NEEDS_ACTION:
+                    return
+                if code_list in (EXIT_AUTH, EXIT_DISK_FULL):
+                    self._after_exit(b, code_list, db, step="prepare")
+                    return
+                if self._untried(db) > untried:
+                    # В обновлённом списке есть новые файлы — их качаем сразу, а не через раунд
+                    self._event(b.name, "run", "В обновлённом списке есть новые файлы — качаю их")
+                    continue
             if not self._after_exit(b, code, db, before=before):
                 return
         self._branch_stopped(b)
+
+    @staticmethod
+    def _untried(db: tuple[Path, str, str]) -> int:
+        """Сколько файлов в очереди ещё ни разу не пробовали (без ждущих Яндекса)."""
+        stats = db_stats(*db)
+        return max(0, int(stats.get("pending") or 0) - int(stats.get("deferred") or 0))
 
     def _report_retry(self, b: Branch, before: dict, after: dict) -> None:
         """Лента: сколько из отложенных файлов отдал Яндекс за эту попытку.
@@ -849,7 +910,8 @@ class Rescue:
     # ── Диск ──
 
     def _run_disk(self, b: Branch) -> None:
-        self._drive(b, self._disk_prepare, self._disk_download, (paths.DB_FILE, "files", "remote_path"))
+        self._drive(b, self._disk_prepare, self._disk_download, (paths.DB_FILE, "files", "remote_path"),
+                    self._disk_list_late)
 
     def _disk_prepare(self, b: Branch) -> int:
         if not b.reset_done:
@@ -858,57 +920,82 @@ class Rescue:
             if n:
                 self._log(f"↩️ Диск: {n} файлов с временными ошибками снова в очереди")
                 self._event("disk", "info", f"Снова в очереди: {files_text(n)}, которые раньше не скачались")
+        explicit = self._take_relist("disk")
         folders = self.disk_folders
         rec = read_listing("disk")
         mode, roots = disk_listing_plan(folders, rec, time.time())
         if mode == "none":
             self._log(f"📋 Диск: список файлов собран {when_text(rec['at'])} — заново не собираю")
             self._event("disk", "info", f"Список файлов собран {when_text(rec['at'])} — заново не собираю")
+        elif (not explicit and db_has_pending(paths.DB_FILE, "files")
+              # Новые отмеченные папки собираем сразу: их файлов в очереди ещё нет
+              and (rec is None or disk_listing_plan(folders, rec, rec["at"])[0] == "none")):
+            self._list_after(b, rec)
         else:
-            b.state = "listing"
-            if mode == "new":
-                self._event("disk", "run", f"Получаю у Яндекса список файлов в новых папках: {folders_text(roots)}")
-            elif roots:
-                self._event("disk", "run", f"Получаю у Яндекса список файлов в папках {folders_text(roots)}")
-            else:
-                self._event("disk", "run", "Получаю у Яндекса список файлов")
-            args = ["scan", *[f"--root={p}" for p in roots]] if roots else ["scan"]
-            code = self._run_step(b, SLOT_DISK, "main.py", args, "получаю список файлов")
-            if code == -1:
-                return -1
-            missing, shared = self._scan_findings() if code == 0 else ([], [])
-            if folders and missing and set(folders) <= set(missing):
-                b.state = "needs_action"
-                b.action = "folders"
-                b.reason = "Выбранных папок больше нет на Диске"
-                b.activity = ""
-                self._log("📁 Диск: выбранных папок больше нет на Диске — выберите их заново в Настройках")
-                self._event("disk", "err", "Выбранных папок больше нет на Диске — выберите папки заново в «Настройках»")
-                return PREPARE_NEEDS_ACTION
-            for path in missing:
-                self._log(f"⚠️ Диск: папки «{folder_label(path)}» больше нет на Диске")
-                self._event("disk", "warn", f"Папки «{folder_label(path)}» больше нет на Диске — "
-                                            f"уберите её из выбора в «Настройках»")
-            if shared:
-                names = ", ".join(f"«{n}»" for n in shared)
-                self._log(f"🤝 Диск: нашёл общие папки, к которым вам дали доступ: {names}")
-                self._event("disk", "info", f"Нашёл общие папки, к которым вам дали доступ: {names} — скачаю и их")
-            if code == 0:
-                # Пропавшие папки не запоминаем: следующий запуск проверит их снова
-                found = [p for p in roots or [] if p not in missing]
-                if mode == "new" and rec:
-                    rec = dict(rec, folders=rec["folders"] + found)
-                else:
-                    rec = {"at": time.time(), "whole": not roots, "folders": found}
-                self._remember_listing("disk", rec)
-                total = int(db_stats(paths.DB_FILE, "files", "remote_path").get("total") or 0)
-                self._event("disk", "ok", f"Список получен: {files_text(total)}")
-            elif db_has_rows(paths.DB_FILE, "files"):
-                self._log(f"⚠️ Диск: список не обновился (код {code}) — качаю по уже собранному")
-                self._event("disk", "warn", "Список не обновился — качаю по уже собранному")
-            else:
+            code = self._disk_list(b, mode, roots, rec)
+            if code:
                 return code
         self._apply_disk_selection()
+        return 0
+
+    def _disk_list_late(self, b: Branch) -> int:
+        """Сбор списка, отложенный до конца первого шага скачивания (Branch.list_after)."""
+        rec = read_listing("disk")
+        mode, roots = disk_listing_plan(self.disk_folders, rec, time.time())
+        if mode == "none":
+            return 0
+        code = self._disk_list(b, mode, roots, rec)
+        if code == 0:
+            self._apply_disk_selection()
+        return code
+
+    def _disk_list(self, b: Branch, mode: str, roots: list[str] | None, rec: dict | None) -> int:
+        """Сбор списка Диска (main.py scan). 0 — можно качать: список получен или есть прежний."""
+        folders = self.disk_folders
+        b.state = "listing"
+        if mode == "new":
+            self._event("disk", "run", f"Получаю у Яндекса список файлов в новых папках: {folders_text(roots)}")
+        elif roots:
+            self._event("disk", "run", f"Получаю у Яндекса список файлов в папках {folders_text(roots)}")
+        else:
+            self._event("disk", "run", "Получаю у Яндекса список файлов")
+        args = ["scan", *[f"--root={p}" for p in roots]] if roots else ["scan"]
+        code = self._run_step(b, SLOT_DISK, "main.py", args, "получаю список файлов")
+        if code == -1:
+            return -1
+        missing, shared = self._scan_findings() if code == 0 else ([], [])
+        if folders and missing and set(folders) <= set(missing):
+            b.state = "needs_action"
+            b.action = "folders"
+            b.reason = "Выбранных папок больше нет на Диске"
+            b.activity = ""
+            self._log("📁 Диск: выбранных папок больше нет на Диске — выберите их заново в Настройках")
+            self._event("disk", "err", "Выбранных папок больше нет на Диске — выберите папки заново в «Настройках»")
+            return PREPARE_NEEDS_ACTION
+        for path in missing:
+            self._log(f"⚠️ Диск: папки «{folder_label(path)}» больше нет на Диске")
+            self._event("disk", "warn", f"Папки «{folder_label(path)}» больше нет на Диске — "
+                                        f"уберите её из выбора в «Настройках»")
+        if shared:
+            names = ", ".join(f"«{n}»" for n in shared)
+            self._log(f"🤝 Диск: нашёл общие папки, к которым вам дали доступ: {names}")
+            self._event("disk", "info", f"Нашёл общие папки, к которым вам дали доступ: {names} — скачаю и их")
+        if code == 0:
+            # Пропавшие папки не запоминаем: следующий запуск проверит их снова
+            found = [p for p in roots or [] if p not in missing]
+            if mode == "new" and rec:
+                rec = dict(rec, folders=rec["folders"] + found)
+            else:
+                rec = {"at": time.time(), "whole": not roots, "folders": found}
+            self._remember_listing("disk", rec)
+            self._take_relist("disk")  # «Обновить список», нажатое во время этого сбора, исполнено
+            total = int(db_stats(paths.DB_FILE, "files", "remote_path").get("total") or 0)
+            self._event("disk", "ok", f"Список получен: {files_text(total)}")
+        elif db_has_rows(paths.DB_FILE, "files"):
+            self._log(f"⚠️ Диск: список не обновился (код {code}) — качаю по уже собранному")
+            self._event("disk", "warn", "Список не обновился — качаю по уже собранному")
+        else:
+            return code
         return 0
 
     def _disk_download(self, b: Branch) -> int:
@@ -956,7 +1043,7 @@ class Rescue:
 
     def _run_unlim(self, b: Branch) -> None:
         self._drive(b, self._unlim_prepare, self._unlim_download,
-                    (paths.UNLIM_DB_FILE, "unlim_files", "file_id"))
+                    (paths.UNLIM_DB_FILE, "unlim_files", "file_id"), self._unlim_list_late)
 
     def _unlim_prepare(self, b: Branch) -> int:
         if not b.reset_done:
@@ -965,28 +1052,49 @@ class Rescue:
             if n:
                 self._log(f"↩️ Безлимит: {n} файлов с ошибками снова в очереди")
                 self._event("unlim", "info", f"Снова в очереди: {files_text(n)}, которые раньше не скачались")
+        explicit = self._take_relist("unlim")
         rec = read_listing("unlim")
         if not listing_stale(rec, time.time()):
             self._log(f"📋 Безлимит: список фото и видео собран {when_text(rec['at'])} — заново не собираю")
             self._event("unlim", "info", f"Список фото и видео собран {when_text(rec['at'])} — заново не собираю")
+        elif not explicit and db_has_pending(paths.UNLIM_DB_FILE, "unlim_files"):
+            self._list_after(b, rec)
         else:
-            b.state = "listing"
-            self._event("unlim", "run", "Получаю у Яндекса список фото и видео")
-            code = self._run_step(b, SLOT_UNLIM_COLLECT, "unlim_download.py", ["--collect"],
-                                  "получаю список файлов")
-            if code == -1:
-                return -1
-            if code == 0:
-                self._remember_listing("unlim", {"at": time.time(), "whole": True, "folders": []})
-                total = int(db_stats(paths.UNLIM_DB_FILE, "unlim_files", "file_id").get("total") or 0)
-                self._event("unlim", "ok", f"Список получен: {files_text(total)}")
-            elif db_has_rows(paths.UNLIM_DB_FILE, "unlim_files"):
-                self._log(f"⚠️ Безлимит: список не обновился (код {code}) — качаю по уже собранному")
-                self._event("unlim", "warn", "Список не обновился — качаю по уже собранному")
-            else:
+            code = self._unlim_list(b)
+            if code:
                 return code
         self._apply_category_choice(paths.UNLIM_DB_FILE, "unlim_files", "file_id", self.unlim_categories,
                                     "Безлимит")
+        return 0
+
+    def _unlim_list_late(self, b: Branch) -> int:
+        """Сбор списка, отложенный до конца первого шага скачивания (Branch.list_after)."""
+        if not listing_stale(read_listing("unlim"), time.time()):
+            return 0
+        code = self._unlim_list(b)
+        if code == 0:
+            self._apply_category_choice(paths.UNLIM_DB_FILE, "unlim_files", "file_id", self.unlim_categories,
+                                        "Безлимит")
+        return code
+
+    def _unlim_list(self, b: Branch) -> int:
+        """Сбор списка безлимита (unlim_download.py --collect). 0 — можно качать: список получен или есть прежний."""
+        b.state = "listing"
+        self._event("unlim", "run", "Получаю у Яндекса список фото и видео")
+        code = self._run_step(b, SLOT_UNLIM_COLLECT, "unlim_download.py", ["--collect"],
+                              "получаю список файлов")
+        if code == -1:
+            return -1
+        if code == 0:
+            self._remember_listing("unlim", {"at": time.time(), "whole": True, "folders": []})
+            self._take_relist("unlim")  # «Обновить список», нажатое во время этого сбора, исполнено
+            total = int(db_stats(paths.UNLIM_DB_FILE, "unlim_files", "file_id").get("total") or 0)
+            self._event("unlim", "ok", f"Список получен: {files_text(total)}")
+        elif db_has_rows(paths.UNLIM_DB_FILE, "unlim_files"):
+            self._log(f"⚠️ Безлимит: список не обновился (код {code}) — качаю по уже собранному")
+            self._event("unlim", "warn", "Список не обновился — качаю по уже собранному")
+        else:
+            return code
         return 0
 
     def _unlim_download(self, b: Branch) -> int:

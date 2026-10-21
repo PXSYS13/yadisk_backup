@@ -203,6 +203,22 @@ def test_whole_disk_walks_shared_folders_missing_from_the_flat_list():
     assert not {"disk:/Моя общая", "disk:/Чужая видна", "disk:/Непонятная"} & set(disk.listed)
 
 
+def test_flat_list_that_repeats_pages_falls_back_to_walking_folders():
+    """Плоский список дальше второй страницы отдаёт её же: сбор не крутится бесконечно, а обходит папки."""
+    files = [_file(f"disk:/A/{i}.jpg") for i in range(450)]
+
+    class Repeating(FakeDisk):
+        def get_files(self, offset=0, limit=200, max_items=None, **kw):
+            offset = min(offset, limit)
+            return iter(self.flat[offset:offset + limit])
+
+    disk = Repeating({"disk:/": [_dir("disk:/A")], "disk:/A": files}, flat=files)
+    st = FakeState()
+    assert downloader.scan_tree(disk, st, root="disk:/") == (450, 450)
+    assert len(set(st.rows)) == 450
+    assert "disk:/A" in disk.listed
+
+
 def test_shared_folder_check_failure_does_not_break_the_scan():
     disk = FakeDisk(tree={}, flat=[_file("disk:/A/x.jpg")])  # корень не читается
     st = FakeState()

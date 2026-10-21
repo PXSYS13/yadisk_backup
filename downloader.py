@@ -224,6 +224,14 @@ _normalize_remote = to_disk_path  # прежнее имя: 'disk:/foo/bar', ка
 _is_skipped = in_trash  # прежнее имя: путь в корзине
 
 
+class RepeatedPages(Exception):
+    """Плоский список Диска прислал уже присланную страницу снова — дальше по нему не дойти."""
+
+    def __init__(self, offset: int):
+        super().__init__(f"Яндекс повторяет страницы плоского списка файлов (с {offset}-го файла)")
+        self.offset = offset
+
+
 class RootNotFound(Exception):
     """Выбранной папки больше нет на Диске: её переименовали, перенесли или удалили."""
 
@@ -289,7 +297,7 @@ def scan_exit_code(e: BaseException) -> int | None:
     if isinstance(e, yadisk.exceptions.UnauthorizedError):
         return EXIT_AUTH
     if isinstance(e, (yadisk.exceptions.RequestError, yadisk.exceptions.TooManyRequestsError,
-                      requests.RequestException, *SERVER_ERRORS, *TIMEOUT_ERRORS)):
+                      requests.RequestException, RepeatedPages, *SERVER_ERRORS, *TIMEOUT_ERRORS)):
         return EXIT_OUTAGE
     if is_sqlite_disk_error(e):
         return EXIT_DISK_FULL
@@ -479,15 +487,25 @@ def _iter_files(client: yadisk.Client, media_type: str | None = None, page_size:
 
     Сами пагинируем — yadisk.get_files() умеет итератор, но мы хотим
     обернуть КАЖДУЮ страницу в retry, а не одну общую попытку.
+
+    Полная страница, которая повторяет первую или предыдущую, — RepeatedPages: без этой
+    проверки сбор шёл бы бесконечно, а scan_tree тогда обходит Диск по папкам.
     """
     offset = 0
+    first: set[str] = set()
+    prev: set[str] = set()
     while True:
         page = _get_files_page(client, media_type, offset, page_size)
         if not page:
             return
+        paths = {entry.path for entry in page}
+        if offset and len(page) >= page_size and (paths <= prev or paths <= first):
+            raise RepeatedPages(offset)
         yield from page
         if len(page) < page_size:
             return
+        first = first or paths
+        prev = paths
         offset += page_size
 
 

@@ -5,7 +5,8 @@
 в unlim_worker.py (можно запускать несколько параллельно).
 
 Список берётся постранично из папки /photounlim (mpfs/list) — с размерами и MD5.
-Фотосрез (photoslice) — запасной путь: с октября 2026 Яндекс отдаёт его пустым.
+Фотосрез (photoslice) — запасной путь, когда mpfs/list не нашёл ни одного файла: с октября
+2026 Яндекс отдаёт его пустым, а из того, что он отдаёт, берутся только файлы безлимита.
 
 CLI:
   python unlim_download.py --collect       # собрать список безлимита
@@ -46,6 +47,7 @@ from utils import (
     EXIT_DISK_FULL,
     EXIT_OUTAGE,
     ensure_utf8_stdio,
+    files_text,
     human_bytes,
     is_sqlite_disk_error,
     remove_preview,
@@ -59,8 +61,32 @@ CLUSTER_BATCH = 15
 UNLIM_ROOT = "/photounlim"
 LIST_PAGE = 1000
 LIST_META = "size,md5,mimetype,mediatype"
+# Страница списка не пришла и после повторов api_call: ещё попытки через столько секунд.
+# Иначе один сбой Яндекса посреди большого безлимита начинал весь сбор заново
+LIST_PAGE_PAUSES = (30, 60)
 
 log = logging.getLogger("unlim")
+
+
+class ListBroken(UnlimError):
+    """mpfs/list оборвался посреди списка. Прочитанные страницы уже в базе, seen — сколько в них файлов."""
+
+    def __init__(self, seen: int, cause: BaseException):
+        super().__init__(str(cause))
+        self.seen = seen
+        self.cause = cause
+
+
+def is_unlim_id(file_id: str) -> bool:
+    """Файл безлимита: путь mpfs «/photounlim/…» или имя фотосреза «photounlim:/…»."""
+    return file_id.startswith(UNLIM_ROOT + "/") or file_id.startswith("photounlim:")
+
+
+def unlim_twin(file_id: str) -> str:
+    """Тот же файл под другим именем: mpfs «/photounlim/имя» ↔ фотосрез «photounlim:/имя»."""
+    if file_id.startswith("photounlim:"):
+        return UNLIM_ROOT + file_id[len("photounlim:"):]
+    return "photounlim:" + file_id[len(UNLIM_ROOT):]
 
 
 def _setup_logging() -> None:
@@ -126,7 +152,7 @@ def save_listed_files(items: list[dict]) -> int:
             size = int(meta.get("size") or 0)
             md5 = meta.get("md5") or None
             mime = meta.get("mimetype") or meta.get("mediatype")
-            alt = "photounlim:" + path[len(UNLIM_ROOT):]
+            alt = unlim_twin(path)
             known = c.execute(
                 "UPDATE unlim_files SET size = COALESCE(NULLIF(?, 0), size), md5 = COALESCE(?, md5), "
                 "mime = COALESCE(mime, ?) WHERE file_id IN (?, ?)",
@@ -169,18 +195,53 @@ def drop_rows_outside_unlim() -> int:
     return len(rows)
 
 
+def _list_page_patiently(s, sk, uid, offset: int) -> list[dict]:
+    """Страница списка; не пришла — ещё попытки с паузами LIST_PAGE_PAUSES. Отказ во входе — сразу наружу."""
+    for pause in LIST_PAGE_PAUSES:
+        try:
+            return list_unlim_page(s, sk, uid, offset)
+        except AuthExpiredError:
+            raise
+        except Exception as e:
+            log.warning("mpfs/list offset=%d: %s — повтор через %d с", offset, e, pause)
+            print(f"  Яндекс не отдал часть списка — пробую ещё раз через {pause} с", flush=True)
+            time.sleep(pause)
+    return list_unlim_page(s, sk, uid, offset)
+
+
 def collect_via_list(s, sk, uid) -> int:
-    """Весь безлимит постранично. Возвращает, сколько файлов увидели."""
+    """Весь безлимит постранично. Возвращает, сколько файлов увидели.
+
+    Первая страница не пришла — её исключение наружу: mpfs/list недоступен. Оборвался дальше —
+    ListBroken: прочитанные страницы уже в базе.
+    """
     print("\nЧитаю список безлимита (mpfs/list)...", flush=True)
     seen = added = 0
     total_bytes = 0
     dirs = 0
     offset = 0
+    # Пути, уже присланные в этом сборе. Полная страница без единого нового значит, что Яндекс
+    # повторяет страницы: без этой проверки сбор шёл бы бесконечно, а «Найдено» всё росло
+    known: set[str] = set()
     while True:
-        page = list_unlim_page(s, sk, uid, offset)
+        try:
+            # Терпеливо — только посреди списка: там сбой стоил бы всего уже прочитанного
+            page = _list_page_patiently(s, sk, uid, offset) if offset else list_unlim_page(s, sk, uid, offset)
+        except Exception as e:
+            if not offset:
+                raise
+            raise ListBroken(seen, e) from e
         children = [x for x in page if (x.get("path") or "").rstrip("/") != UNLIM_ROOT]
-        files = [x for x in children if x.get("type") == "file"]
-        dirs += len(children) - len(files)
+        fresh = []
+        for x in children:
+            if x.get("path") not in known:
+                known.add(x.get("path"))
+                fresh.append(x)
+        if len(children) >= LIST_PAGE and not fresh:
+            raise ListBroken(seen, RuntimeError(
+                f"Яндекс повторяет уже присланные страницы списка (с {offset}-го файла)"))
+        files = [x for x in fresh if x.get("type") == "file"]
+        dirs += len(fresh) - len(files)
         added += save_listed_files(files)
         seen += len(files)
         total_bytes += sum(int((x.get("meta") or {}).get("size") or 0) for x in files)
@@ -256,23 +317,22 @@ def fetch_cluster_resources(s, sk, uid, psid, cluster_rows: list[dict]) -> int:
             cid = cl.get("id")
             for f in cl.get("items", []) or []:
                 fid = f.get("id") or f.get("resource_id")
-                if not fid:
-                    continue
-                # photoslice отдаёт и удалённые фото (корзина) — их bulk-download
-                # НЕ качает (HTTP 409 BulkDownloadNoFilesToDownload), а один
-                # trash-путь роняет весь батч. Не пишем их в БД вообще.
-                if fid.startswith("/trash"):
+                # Фотосрез отдаёт все фото аккаунта: и обычного Диска (их качает ветка Диска,
+                # отсюда они ушли бы второй копией в _unlim), и корзины (их не скачать). Берём
+                # только безлимит
+                if not fid or not is_unlim_id(fid):
                     continue
                 name = f.get("name") or fid.rsplit("/", 1)[-1]
                 size = int(f.get("size", 0) or 0)
                 md5 = f.get("md5") or f.get("etag")
                 mime = f.get("mimetype") or f.get("type")
+                # Файл, который mpfs/list уже записал как «/photounlim/имя», второй строкой не нужен
                 added += c.execute(
                     """INSERT INTO unlim_files
                        (file_id, cluster_id, name, size, md5, mime, status)
-                       VALUES (?, ?, ?, ?, ?, ?, 'pending')
-                       ON CONFLICT(file_id) DO NOTHING""",
-                    (fid, cid, name, size, md5, mime),
+                       SELECT ?, ?, ?, ?, ?, ?, 'pending'
+                       WHERE NOT EXISTS (SELECT 1 FROM unlim_files WHERE file_id IN (?, ?))""",
+                    (fid, cid, name, size, md5, mime, fid, unlim_twin(fid)),
                 ).rowcount
             c.execute("UPDATE unlim_clusters SET fetched=1 WHERE cluster_id=?",
                       (cid,))
@@ -366,21 +426,26 @@ def cmd_collect():
         list_error = None
         try:
             listed = collect_via_list(s, sk, uid)
-        except AuthExpiredError as e:
-            # 401/403 на внутренний метод бывает и при живых куках — перепроверяем вход
-            if not _session_alive(s):
-                print(f"\n❌ auth_expired | Ошибка авторизации: {e}")
-                print("   Обновите cookies.json в Web UI или браузере и запустите сбор заново.")
-                return EXIT_AUTH
-            list_error = f"Яндекс отклонил запрос списка ({e}), хотя вход действует"
-            listed = 0
-        except Exception as e:
-            list_error = str(e)
-            listed = 0
-        if list_error:
+        except Exception as e:  # noqa: BLE001 — разбираем ниже
+            listed = e.seen if isinstance(e, ListBroken) else 0
+            cause = e.cause if isinstance(e, ListBroken) else e
+            if isinstance(cause, AuthExpiredError):
+                # 401/403 на внутренний метод бывает и при живых куках — перепроверяем вход
+                if not _session_alive(s):
+                    print(f"\n❌ auth_expired | Ошибка авторизации: {cause}")
+                    print("   Обновите cookies.json в Web UI или браузере и запустите сбор заново.")
+                    return EXIT_AUTH
+                list_error = f"Яндекс отклонил запрос списка ({cause}), хотя вход действует"
+            else:
+                list_error = str(cause)
             log.error(f"mpfs/list: {list_error}")
-            print(f"  ⚠️ Список через mpfs/list не получен ({list_error}) — пробую фотосрез")
+        if listed and list_error:
+            print(f"  ⚠️ Список безлимита оборвался ({list_error}). Уже найденное сохранено: {files_text(listed)}")
+        # Фотосрез — только когда mpfs/list не нашёл ни одного файла: после части списка он
+        # ничего не добавил бы, кроме риска вторых копий
         if not listed:
+            if list_error:
+                print(f"  ⚠️ Список через mpfs/list не получен ({list_error}) — пробую фотосрез")
             try:
                 code = collect_via_photoslice(s, sk, uid)
             except Exception as e:  # noqa: BLE001 — запасной путь не должен ронять сбор
