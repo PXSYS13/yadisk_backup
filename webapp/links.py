@@ -20,7 +20,7 @@ from public_download import connect_db as links_connect
 from unlim_common import DEFERRED_MARKER
 from utils import EXIT_DISK_FULL, LINKS_DIRNAME, files_text, hhmm, sqlite_ro_uri, sqlite_tx
 from webapp import config, paths
-from webapp.tasks import SLOT_LINKS, tm
+from webapp.tasks import SLOT_LINKS, organize_moving, tm
 
 log = logging.getLogger("webui")
 router = APIRouter()
@@ -155,6 +155,8 @@ def links_start() -> tuple[bool, str]:
     """Запускает скачивание по ссылкам, если оно ещё не идёт. Бережный режим — меньше потоков."""
     if tm.any_alive(SLOT_LINKS):
         return True, "Скачивание по ссылкам уже идёт"
+    if organize_moving():
+        return False, "Сначала дождитесь конца сортировки: она переносит файлы, и скачивание их перепутает"
     workers = 2 if config.get_settings().get("gentle") else 3
     return tm.start(SLOT_LINKS, "public_download.py", ["--wait", "--workers", str(workers)])
 
@@ -167,7 +169,7 @@ class LinkAddPayload(BaseModel):
 
 
 class LinkIdPayload(BaseModel):
-    id: int | None = None
+    id: int | None = Field(None, ge=1, le=2 ** 63 - 1)  # SQLite не примет число больше
 
 
 @router.post("/api/links/add")
@@ -225,7 +227,9 @@ def api_links_retry_now(p: LinkIdPayload):
             conn.execute(f"UPDATE link_files SET status='pending', error=NULL WHERE status='failed'{only}", params)
             conn.execute(f"UPDATE links SET limit_until=NULL, error_kind=NULL, error=NULL "
                          f"WHERE state='active'{only.replace('link_id', 'id')}", params)
-        poke(conn, wake=True)
+        # Будить — только идущий процесс: новый начнёт с полного раунда и без этого, а
+        # оставшийся флаг пропустил бы его первое ожидание
+        poke(conn, wake=tm.any_alive(SLOT_LINKS))
     finally:
         conn.close()
     ok, msg = links_start()
@@ -241,7 +245,7 @@ def api_links_relist(p: LinkIdPayload):
     try:
         with sqlite_tx(conn):
             conn.execute("UPDATE links SET listed_at=NULL WHERE id=? AND state='active'", (p.id,))
-        poke(conn, wake=True)
+        poke(conn, wake=tm.any_alive(SLOT_LINKS))
     finally:
         conn.close()
     ok, msg = links_start()

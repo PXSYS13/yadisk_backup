@@ -14,7 +14,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from utils import APP_VERSION
+from utils import APP_VERSION, scrub_urls
 from webapp import access, config, diagnostics, paths
 from webapp.links import links_status
 from webapp.local_disk import free_space
@@ -76,7 +76,8 @@ def tail_file(path: Path, lines: int) -> list[str]:
 def support_info() -> dict:
     """Диагностика для поддержки: версия, окружение, конфиг без секретов, состояние БД и задач."""
     cfg = config.get_config()
-    token = access.check_token(cfg["token"])
+    # Последняя проверка ключа, а не новая: отчёт нужен как раз тогда, когда Яндекс не отвечает
+    token = access.token_snapshot(cfg["token"])
     acc = token.get("account") or {}
     return {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -125,12 +126,24 @@ def build_support_bundle() -> Path:
     with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as zf:
         for entry in list_logs():
             try:
-                zf.write(paths.LOG_DIR / entry["name"], entry["name"])
+                _add_scrubbed(zf, paths.LOG_DIR / entry["name"], entry["name"])
             except OSError:
                 pass
-        zf.writestr("support-info.json", json.dumps(support_info(), ensure_ascii=False, indent=2, default=str))
+        info = json.dumps(support_info(), ensure_ascii=False, indent=2, default=str)
+        zf.writestr("support-info.json", scrub_urls(info))
     log.info("собран архив логов для поддержки: %s", name)
     return bundle
+
+
+def _add_scrubbed(zf: zipfile.ZipFile, path: Path, name: str) -> None:
+    """Журнал в архив построчно, без путей и параметров ссылок.
+
+    Подписанная ссылка на файл Яндекса — сама по себе доступ к нему; журналы прежних версий
+    их ещё содержат, а отчёт люди выкладывают в чат и на GitHub.
+    """
+    with open(path, "rb") as src, zf.open(name, "w") as dst:
+        for line in src:
+            dst.write(scrub_urls(line.decode("utf-8", errors="replace")).encode("utf-8"))
 
 
 @router.get("/api/logs")

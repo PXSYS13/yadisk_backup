@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import sqlite3
+from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import pytest
@@ -280,7 +281,7 @@ def test_round_downloads_defers_silent_storage_and_reports_progress(db, net, tmp
     dl = str(tmp_path / "dl")
     assert pd.run(db, dl, workers=2) == EXIT_DEFERRED
     a = os.path.join(dl, LINKS_DIRNAME, "Свадьба", "a.jpg")
-    assert open(a, "rb").read() == b"photo-a"
+    assert Path(a).read_bytes() == b"photo-a"
     rows = _files(db)
     assert rows["/a.jpg"]["status"] == "downloaded"
     assert rows["/Sub/b.txt"]["status"] == "pending"
@@ -297,7 +298,7 @@ def test_round_downloads_defers_silent_storage_and_reports_progress(db, net, tmp
     fake.calls.clear()
     assert pd.run(db, dl, workers=2) == EXIT_OK
     assert [c for c in fake.calls if c[0] == "download"] == [("download", "/Sub/b.txt")]
-    assert open(os.path.join(dl, LINKS_DIRNAME, "Свадьба", "Sub", "b.txt"), "rb").read() == b"text-b"
+    assert Path(os.path.join(dl, LINKS_DIRNAME, "Свадьба", "Sub", "b.txt")).read_bytes() == b"text-b"
 
 
 def test_wrong_md5_is_an_error_not_a_download(db, net, tmp_path):
@@ -355,7 +356,7 @@ def test_single_file_link_lands_directly_in_the_links_folder(db, net, tmp_path):
     pd.add_link(db, "https://disk.yandex.ru/i/F1", "/", {"name": "Договор.pdf", "type": "file"})
     dl = str(tmp_path / "dl")
     assert pd.run(db, dl, workers=1) == EXIT_OK
-    assert open(os.path.join(dl, LINKS_DIRNAME, "Договор.pdf"), "rb").read() == b"pdf-bytes"
+    assert Path(os.path.join(dl, LINKS_DIRNAME, "Договор.pdf")).read_bytes() == b"pdf-bytes"
 
 
 def test_deferred_photo_gets_a_safety_preview(db, net, tmp_path):
@@ -366,7 +367,7 @@ def test_deferred_photo_gets_a_safety_preview(db, net, tmp_path):
     pd.run(db, dl, workers=1)
     row = _files(db)["/Свадьба/1.jpg"]
     want = os.path.join(dl, PREVIEW_DIRNAME, LINKS_DIRNAME, "Свадьба", "Свадьба", "1.jpg.jpg")
-    assert row["preview_path"] == want and open(want, "rb").read() == b"JPEGPREVIEW"
+    assert row["preview_path"] == want and Path(want).read_bytes() == b"JPEGPREVIEW"
 
 
 def test_preview_goes_away_once_the_original_is_downloaded(db, net, tmp_path):
@@ -388,7 +389,7 @@ def test_preview_goes_away_once_the_original_is_downloaded(db, net, tmp_path):
     fake.dead.clear()
     assert pd.run(db, dl, workers=1) == EXIT_OK
     assert os.listdir(os.path.join(dl, PREVIEW_DIRNAME)) == []  # опустевшие подпапки убраны, «_превью» на месте
-    assert open(os.path.join(dl, LINKS_DIRNAME, "Свадьба", "Свадьба", "2.jpg"), "rb").read() == b"two"
+    assert Path(os.path.join(dl, LINKS_DIRNAME, "Свадьба", "Свадьба", "2.jpg")).read_bytes() == b"two"
 
 
 def test_removed_link_is_skipped_and_forgotten(db, net, tmp_path):
@@ -444,3 +445,68 @@ def test_status_command_lists_links_without_addresses(db, capsys):
     assert pd.cmd_status(db) == EXIT_OK
     out = capsys.readouterr().out
     assert "#1 «Свадьба»" in out and "https://" not in out
+
+
+def test_link_to_a_file_inside_a_folder_downloads_that_file(db, net, tmp_path):
+    """…/d/KEY/Sub/f.jpg — ссылка на один файл внутри папки: качаем его, а не всю папку."""
+    fake = net(FakeYandex({"/Sub/f.jpg": b"photo"}))
+    real_get = fake.get
+
+    def get(url, params=None, **kw):
+        if url == pd.API and (params or {}).get("path") == "/Sub/f.jpg" and not (params or {}).get("preview_size"):
+            return Resp(data=fake._file("/Sub/f.jpg"))
+        return real_get(url, params=params, **kw)
+
+    fake.get = get
+    _add(db, sub="/Sub/f.jpg", name="f.jpg", kind="file")
+    dl = str(tmp_path / "dl")
+    assert pd.run(db, dl, workers=1) == EXIT_OK
+    assert ("download", "/Sub/f.jpg") in fake.calls
+    assert Path(dl, LINKS_DIRNAME, "f.jpg").read_bytes() == b"photo"
+
+
+def test_part_named_file_in_a_strangers_folder_survives(db, net, tmp_path):
+    net(FakeYandex({"/movie.mp4": b"m" * 50, "/movie.mp4.part": b"p" * 10}))
+    _add(db)
+    dl = str(tmp_path / "dl")
+    assert pd.run(db, dl, workers=1) == EXIT_OK
+    folder = Path(dl, LINKS_DIRNAME, "Свадьба")
+    assert (folder / "movie.mp4").read_bytes() == b"m" * 50
+    assert (folder / "movie.mp4.part").read_bytes() == b"p" * 10
+
+
+def test_names_differing_only_in_case_get_their_own_files(db, net, tmp_path, monkeypatch):
+    """«Photo.jpg» и «photo.jpg» в чужой папке на Windows и macOS — один файл: второй получает хеш."""
+    import utils
+
+    monkeypatch.setattr(utils, "CASE_INSENSITIVE_PATHS", True)
+    net(FakeYandex({"/Photo.jpg": b"A" * 10, "/photo.jpg": b"B" * 20}))
+    _add(db)
+    assert pd.run(db, str(tmp_path / "dl"), workers=2) == EXIT_OK
+    rows = _files(db)
+    a, b = rows["/Photo.jpg"]["local_path"], rows["/photo.jpg"]["local_path"]
+    assert utils.path_key(a) != utils.path_key(b)
+    assert Path(a).read_bytes() == b"A" * 10 and Path(b).read_bytes() == b"B" * 20
+
+
+def test_files_that_cannot_be_written_do_not_stop_the_links(db, net, tmp_path, monkeypatch):
+    """Длинное имя или FAT32 — вина одного файла: серия «диск не принимает» не растёт."""
+    net(FakeYandex({f"/{i}.jpg": b"x" for i in range(12)}))
+    _add(db)
+    monkeypatch.setattr(pd, "too_big_for_folder", lambda folder, size: "файл больше 4 ГБ, а диск FAT32")
+    assert pd.run(db, str(tmp_path / "dl"), workers=1) == EXIT_PARTIAL
+    rows = _files(db)
+    assert {r["status"] for r in rows.values()} == {"failed"}
+    assert all(r["error"].startswith("local_file |") for r in rows.values())
+
+
+def test_full_disk_under_the_links_database_is_exit_4(db, net, tmp_path, monkeypatch, capsys):
+    import sqlite3
+
+    def full(*a, **k):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(pd, "run", full)
+    monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path / "dl"))
+    assert pd.main([]) == EXIT_DISK_FULL
+    assert "local_disk |" in capsys.readouterr().out

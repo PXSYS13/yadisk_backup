@@ -3,6 +3,7 @@
 import io
 import json
 import urllib.error
+import urllib.request
 
 import pytest
 
@@ -118,6 +119,31 @@ def test_fetch_errors_are_fatal_only_for_a_bad_key():
 
     with pytest.raises(ss.SyncError):
         ss.fetch_donations("t", opener=html, pause=0)
+
+
+def test_key_goes_only_to_donationalerts_over_https():
+    assert ss._check_url(ss.API_URL + "?page=2") and ss._check_url(ss.TOKEN_URL)
+    for url in ("http://www.donationalerts.com/api/v1/alerts/donations",
+                "https://evil.example/api",
+                "https://www.donationalerts.com.evil.example/api",
+                "https://www.donationalerts.com@evil.example/api",
+                "file:///etc/passwd"):
+        with pytest.raises(ss.SyncError) as e:
+            ss._request(url, "секрет")
+        assert e.value.fatal and "секрет" not in str(e.value)
+
+
+def test_redirects_stay_inside_donationalerts():
+    handler = ss._DonationAlertsOnly()
+    req = urllib.request.Request(ss.API_URL, headers={"Authorization": "Bearer t"})
+    # Обычный urllib унёс бы заголовок с ключом на любой адрес
+    for target in ("https://evil.example/steal", "http://www.donationalerts.com/api/v1/alerts/donations"):
+        with pytest.raises(ss.SyncError) as e:
+            handler.redirect_request(req, None, 302, "Found", {}, target)
+        assert e.value.fatal
+    moved = handler.redirect_request(req, None, 301, "Moved", {}, "https://donationalerts.com/api/v1/alerts/donations")
+    assert moved.full_url.startswith("https://donationalerts.com/")
+    assert moved.get_header("Authorization") == "Bearer t"
 
 
 def test_sync_writes_only_on_change(tmp_path, capsys):
@@ -248,3 +274,44 @@ def test_widget_import_refuses_a_page_without_donations(tmp_path, capsys, monkey
     assert ss.main(["--from-widget", str(page)]) == 1
     assert "На странице нет донатов" in capsys.readouterr().out
     assert path.read_text(encoding="utf-8") == '{"supporters": []}'
+
+
+@pytest.mark.parametrize("text", [
+    "Пишите t​.me/spamchan",       # нулевая ширина внутри ссылки
+    "Пишите @​spamchan",           # и после @
+    "Подписывайтесь@spamchan",          # @ сразу после слова
+    "Спасибо...@spamchan",
+    "Пишите ＠spamchan",                # широкий @
+    "Бонусы на casino.bet",
+    "Скидки на магазин.рф",
+])
+def test_links_and_mentions_cannot_sneak_through(text):
+    cleaned = ss.clean_text(text, 160)
+    assert "spamchan" not in cleaned and ".bet" not in cleaned and ".рф" not in cleaned
+
+
+def test_incomplete_pages_never_shrink_the_list():
+    """Пустая страница посреди списка или ответ без номера последней — список неполный: ошибка,
+    иначе merge выкинул бы всех, кто дальше этой страницы."""
+    def gap(url, token):
+        page = int(url.rsplit("=", 1)[1])
+        data = [donation(1)] if page == 1 else []
+        return FakeResp(json.dumps({"data": data, "meta": {"last_page": 3}}).encode())
+
+    with pytest.raises(ss.SyncError):
+        ss.fetch_donations("t", opener=gap, pause=0)
+
+    def no_meta(url, token):
+        return FakeResp(json.dumps({"data": [donation(1)]}).encode())
+
+    with pytest.raises(ss.SyncError):
+        ss.fetch_donations("t", opener=no_meta, pause=0)
+
+
+def test_empty_answer_does_not_wipe_the_supporters(tmp_path):
+    path = tmp_path / "supporters.json"
+    path.write_text(json.dumps({"supporters": [{"id": "da-1", "name": "Анна"}]}), encoding="utf-8")
+    opener, _ = pages([])
+    with pytest.raises(ss.SyncError):
+        ss.sync("t", path=path, opener=opener, pause=0)
+    assert json.loads(path.read_text(encoding="utf-8"))["supporters"][0]["name"] == "Анна"

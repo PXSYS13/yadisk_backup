@@ -114,12 +114,15 @@ def _get_exif_date_jpeg(path: str) -> tuple[int, int] | None:
                 if marker == b"\xff\xe1":  # APP1 (Exif)
                     data = f.read(length)
                     if data.startswith(b"Exif\x00\x00"):
-                        m = re.search(rb"(19\d{2}|20\d{2}):(\d{2}):(\d{2})", data)
-                        if m:
-                            y = int(m.group(1).decode("ascii"))
-                            mo = int(m.group(2).decode("ascii"))
+                        # Дат в EXIF несколько: последней правки (DateTime — первая в файле),
+                        # съёмки и оцифровки. Самая ранняя из них — съёмка
+                        found = []
+                        for m in re.finditer(rb"(19\d{2}|20\d{2}):(\d{2}):(\d{2})", data):
+                            y, mo = int(m.group(1)), int(m.group(2))
                             if 1970 <= y <= 2035 and 1 <= mo <= 12:
-                                return y, mo
+                                found.append((y, mo))
+                        if found:
+                            return min(found)
                     break
                 else:
                     f.seek(length, os.SEEK_CUR)
@@ -207,13 +210,28 @@ def unique_path(dst: str) -> str:
         i += 1
 
 
+def _is_link_or_mount(path: str) -> bool:
+    """Ссылка, junction Windows или другой диск, подключённый папкой: внутрь не ходим.
+
+    os.walk не считает junction ссылкой: сортировка уносила бы файлы с другого диска
+    (копированием, которое при нехватке места оставляет обрезанный файл) и удаляла бы там папки.
+    """
+    try:
+        if os.path.islink(path) or os.path.ismount(path):
+            return True
+        attrs = getattr(os.lstat(path), "st_file_attributes", 0)
+    except OSError:
+        return True
+    return bool(attrs & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT: junction и прочие точки повторной обработки
+
+
 def scan(root: str, tree: list | None = None) -> list[dict]:
     """Файлы для сортировки. В tree (если передан) ложится сам обход: (папка, подпапки, файлы)."""
     files = []
     skip = {os.path.join(root, d) for d in SKIP_DIRS}
     print(f"\n[1/4] Сканирую {root}...")
     for dp, dirs, fns in os.walk(root):
-        dirs[:] = [d for d in dirs if os.path.join(dp, d) not in skip]
+        dirs[:] = [d for d in dirs if os.path.join(dp, d) not in skip and not _is_link_or_mount(os.path.join(dp, d))]
         if tree is not None:
             tree.append((dp, list(dirs), list(fns)))
         for fn in fns:
@@ -425,7 +443,11 @@ def main():
             last = time.time()
 
     cleaned = 0
-    for dp, dirs, fns in os.walk(root, topdown=False):
+    walked = []  # сверху вниз, без ссылок и junction; убираем снизу вверх
+    for dp, dirs, _fns in os.walk(root):
+        dirs[:] = [d for d in dirs if not _is_link_or_mount(os.path.join(dp, d))]
+        walked.append(dp)
+    for dp in reversed(walked):
         rel = os.path.relpath(dp, root)
         first = rel.split(os.sep)[0] if rel != "." else ""
         if first in SKIP_DIRS:

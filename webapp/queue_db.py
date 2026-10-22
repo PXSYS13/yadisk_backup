@@ -22,7 +22,7 @@ ALLOWED_TABLES = {"files", "unlim_files"}
 ALLOWED_COLUMNS = {"remote_path", "file_id"}
 
 # Временные ошибки Диска: явный старт возвращает такие файлы в очередь
-DISK_TRANSIENT_ERRORS = ("local_disk |", "auth_expired |", "server_50x |",
+DISK_TRANSIENT_ERRORS = ("local_disk |", "local_file |", "auth_expired |", "server_50x |",
                          "download_timeout |", "rate_limit |",
                          # Версии до 1.2 писали «ИмяИсключения: текст» без метки и считали
                          # таймаут молчащего сервера ошибкой файла — такие файлы застревали навсегда
@@ -40,6 +40,8 @@ REASON_TEXT = (
     ("rate_limit |", "Яндекс просил обращаться реже"),
     ("auth_expired |", "Доступ устарел — обновите ключ или доступ к Безлимиту"),
     ("local_disk |", "Не удалось записать файл на ваш диск"),
+    ("local_file |", "Файл не записать в эту папку: слишком длинное имя или файл больше 4 ГБ для диска FAT32"),
+    ("gone |", "Файла больше нет на Диске"),
     ("bad_file |", "Файл пришёл повреждённым"),
     ("http_error |", "Яндекс отказал в скачивании"),
     ("refused |", "Яндекс отказал в скачивании"),
@@ -203,6 +205,25 @@ def db_has_pending(db_file: Path, table: str) -> bool:
         c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
         try:
             return c.execute(f"SELECT 1 FROM {table} WHERE status = 'pending' LIMIT 1").fetchone() is not None
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return False
+
+
+def unlim_has_rows_outside(db_file: Path) -> bool:
+    """В очереди безлимита есть файлы не из безлимита: старый список (фотосрез до октября 2026)
+    брал все фото аккаунта. Их уберёт только свежий сбор списка — до скачивания, иначе они
+    ушли бы второй копией в _unlim (их скачивает ветка Диска)."""
+    if not db_file.exists():
+        return False
+    try:
+        c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
+        try:
+            return c.execute(
+                "SELECT 1 FROM unlim_files WHERE status IN ('pending', 'failed') "
+                "AND substr(file_id, 1, 12) != '/photounlim/' AND substr(file_id, 1, 11) != 'photounlim:' "
+                "LIMIT 1").fetchone() is not None
         finally:
             c.close()
     except sqlite3.Error:
@@ -394,7 +415,7 @@ def list_problem_files(db_file: Path, table: str, id_col: str, limit: int) -> di
     """Нескачанные файлы: упавшие и отложенные, с причиной простыми словами."""
     table = validate_sql_ident(table, ALLOWED_TABLES, "table")
     id_col = validate_sql_ident(id_col, ALLOWED_COLUMNS, "column")
-    out: dict = {"items": [], "reasons": {}, "total": 0}
+    out: dict = {"items": [], "reasons": {}, "total": 0, "failed": 0}
     if not db_file.exists():
         return out
     c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
@@ -403,14 +424,18 @@ def list_problem_files(db_file: Path, table: str, id_col: str, limit: int) -> di
         cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
         preview_col = "preview_path" if "preview_path" in cols else "NULL AS preview_path"
         where = ("status='failed' OR (status='pending' AND COALESCE(error, '') LIKE ?)")
-        for r in c.execute(f"SELECT error, COUNT(*) AS n FROM {table} WHERE {where} GROUP BY substr(error, 1, 20)",
-                           (DEFERRED_MARKER + "%",)):
+        for r in c.execute(f"SELECT status, error, COUNT(*) AS n FROM {table} WHERE {where} "
+                           f"GROUP BY status, substr(error, 1, 20)", (DEFERRED_MARKER + "%",)):
             text = reason_text(r["error"])
             out["reasons"][text] = out["reasons"].get(text, 0) + r["n"]
             out["total"] += r["n"]
+            if r["status"] == "failed":
+                out["failed"] += r["n"]
+        # Сначала упавшие: их можно повторить кнопкой, а отложенных бывают тысячи, и за ними
+        # упавшие не попадали в первые limit строк
         for r in c.execute(
             f"SELECT {id_col} AS path, size, status, error, {preview_col} FROM {table} WHERE {where} "
-            f"ORDER BY status DESC, {id_col} LIMIT ?",
+            f"ORDER BY status, {id_col} LIMIT ?",
             (DEFERRED_MARKER + "%", limit),
         ):
             out["items"].append({

@@ -117,7 +117,8 @@
       const [pc, pl] = STATE[p.state] || STATE.unknown;
       const tl = (p.timeline || []).slice(-96).map((b) =>
         `<span class="${b.ok_ratio == null ? '' : b.ok_ratio >= 0.99 ? 'ok' : b.ok_ratio > 0.5 ? 'slow' : 'fail'}"></span>`).join('');
-      const avail = p.availability && p.availability['1h'] != null ? ` · за час ${p.availability['1h']}%` : '';
+      const avail = p.availability && p.availability['1h'] != null
+        ? ` · за час ${String(p.availability['1h']).replace('.', ',')}%` : '';
       return `<div class="probe"><div style="flex:1"><b>${esc(PROBE_LABEL[p.key] || p.label)}</b>
           <div class="tiny">${p.latency_ms_p50 ? `ответ ≈ ${p.latency_ms_p50} мс` : ''}${avail}</div>
           <div class="timeline" title="последние сутки">${tl}</div></div>

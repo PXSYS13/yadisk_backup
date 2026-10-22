@@ -6,6 +6,8 @@ diagnose_tasks() ищет эти метки в свежих журналах и 
 
 from __future__ import annotations
 
+import re
+
 from utils import (
     EXIT_AUTH,
     EXIT_DEFERRED,
@@ -57,6 +59,17 @@ def _affects(disk: tuple[str, str], unlim: tuple[str, str]) -> list[dict]:
         {"what": "Обычный диск (REST API)", "state": disk[0], "text": disk[1]},
         {"what": "Безлимит (веб-версия Диска)", "state": unlim[0], "text": unlim[1]},
     ]
+
+
+# Хвост строки FAIL — путь файла на Диске («… | disk:/Видео/Timeout.mkv»), и пути в кавычках
+# из текста ошибки: имя файла — не повод для баннера («Timeout.mkv» — не таймаут Яндекса)
+_FILE_TAIL_RE = re.compile(r" \| (?:disk:|/).*$")
+_QUOTED_RE = re.compile(r"'[^']*'")
+
+
+def _marker_text(line: str) -> str:
+    """Строка журнала без путей к файлам — в ней ищутся маркеры правил."""
+    return _QUOTED_RE.sub("''", _FILE_TAIL_RE.sub("", line))
 
 
 # Правила диагностики по маркерам в логах задач. Порядок = приоритет.
@@ -140,7 +153,7 @@ _DIAG_RULES: list[dict] = [
     },
     {
         "kind": "timeout",
-        "markers": ("download_timeout", "timeout", "таймаут"),
+        "markers": ("download_timeout", "timeout |", "таймаут"),
         "title": "Яндекс отвечает слишком медленно (таймауты)",
         "message": "Превышено время ожидания ответа от Яндекса (сетевой таймаут).",
         "explain": "Ответы приходят дольше лимита ожидания — перегрузка на стороне Яндекса "
@@ -172,7 +185,7 @@ def diagnose_tasks() -> dict:
     # Строки скачивания по ссылкам объясняет свой экран: здесь они дали бы баннер «Диска».
     # Сортировка печатает имена файлов («timeout_2024.docx») — это не про Яндекс
     # Превью — бонус: «превью …: HTTP 434» или таймаут превью не объясняют, почему не качаются файлы
-    tagged = [(slot, ln.lower()) for slot, ln in
+    tagged = [(slot, _marker_text(ln.lower())) for slot, ln in
               tm.recent_log_lines(40, exclude=(SLOT_LINKS, SLOT_ORGANIZE), with_slots=True)
               if "превью" not in ln.lower()]
 

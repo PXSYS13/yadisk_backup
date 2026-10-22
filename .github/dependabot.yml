@@ -1,0 +1,19 @@
+# Свежие зависимости без ручной слежки: раз в неделю один общий pull request на uv.lock
+# (так уязвимость вроде старого certifi не залежится), раз в месяц — на действия GitHub Actions.
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns: ["*"]

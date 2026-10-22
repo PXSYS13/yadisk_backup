@@ -28,7 +28,9 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import logging
+import math
 import os
 import re
 import shutil
@@ -85,13 +87,20 @@ from utils import (
     hhmm,
     human_bytes,
     is_local_disk_error,
+    is_sqlite_disk_error,
     keep_awake,
+    local_copy_matches,
+    local_error_kind,
+    part_path_for,
     preview_path_for,
     previews_enabled,
     remove_preview,
     remove_quiet,
     retry_every_sec,
     sanitize_component,
+    scrub_urls,
+    to_long_path,
+    too_big_for_folder,
     under_webui,
 )
 
@@ -390,6 +399,20 @@ def mark_pending(file_ids: list[str], error: str, worker_id: int | None = None) 
         )
 
 
+def mark_failed(file_ids: list[str], error: str, worker_id: int | None = None) -> None:
+    """Сразу в 'failed', без повторов: файл не записать в эту папку (имя, FAT32) — Яндекс
+    отдаст его и в третий раз, а лягут байты туда же. «Повторить ошибки» вернёт его в очередь."""
+    if not file_ids:
+        return
+    clause, extra = _owner_clause(worker_id)
+    with _tx() as c:
+        c.executemany(
+            "UPDATE unlim_files SET status='failed', attempts=MAX(COALESCE(attempts, 0), ?), "
+            f"worker_id=NULL, error=? WHERE file_id=?{clause}",
+            [(MAX_ATTEMPTS, error[:500], i, *extra) for i in file_ids],
+        )
+
+
 def heartbeat(file_ids: list[str], worker_id: int) -> None:
     """Продлевает assigned_at своей пачки — признак, что воркер жив и качает."""
     if not file_ids:
@@ -464,7 +487,10 @@ def shared_cooldown_remaining() -> float:
         return 0.0
     finally:
         c.close()
-    return max(0.0, float(row[0]) - time.time()) if row else 0.0
+    until = float(row[0]) if row else 0.0
+    if not math.isfinite(until):  # испорченная запись (прежние версии верили любому Retry-After)
+        return 0.0
+    return min(max(0.0, until - time.time()), float(OUTAGE_PAUSES_SEC[-1]))
 
 
 # ── Недоступные серверы хранения ────────────────────────────────────────────
@@ -520,7 +546,8 @@ class PrepareError:
     """Почему Яндекс не собрал ZIP.
 
     kind — машинная категория (auth_expired | rate_limit | server_50x | timeout |
-    connection | invalid_json | prepare_failed | refused), text — объяснение для человека.
+    connection | invalid_json | prepare_failed | refused | gone — файла больше нет на Диске),
+    text — объяснение для человека.
     str() даёт 'категория | текст': по этому префиксу диагностика Web UI
     распознаёт проблему в логах воркера.
     """
@@ -555,13 +582,17 @@ class PrepareError:
 
 
 def _retry_after_sec(r) -> float | None:
-    """Retry-After в секундах, если Яндекс его прислал числом."""
+    """Retry-After в секундах, если Яндекс его прислал числом; не дольше RATE_LIMIT_MAX_PAUSE_SEC.
+
+    Пауза общая для всех воркеров и следующих запусков: «Retry-After: 86400» (или «inf»)
+    остановил бы весь безлимит на сутки.
+    """
     headers = getattr(r, "headers", None) or {}
     try:
         value = float(headers.get("Retry-After"))
     except (TypeError, ValueError):
         return None
-    return value if value > 0 else None
+    return min(value, RATE_LIMIT_MAX_PAUSE_SEC) if math.isfinite(value) and value > 0 else None
 
 
 def _prepare_http_error(r, op: str = "prepare") -> PrepareError:
@@ -637,11 +668,16 @@ def get_file_url(s, sk, uid, path: str) -> tuple[str | None, PrepareError | None
         log.warning(f"url exc: {err}")
         return None, err
     except Exception as e:
-        err = PrepareError("connection", f"Сбой связи с сервером Яндекса: {e}")
+        err = PrepareError("connection", f"Сбой связи с сервером Яндекса: {scrub_urls(e)}")
         log.warning(f"url exc: {err}")
         return None, err
 
     trace = response_trace(r)
+    if r.status_code == 404:
+        # Файл удалили или перенесли после сбора списка — это не отказ Яндекса
+        err = PrepareError("gone", f"HTTP 404: файла больше нет на Диске — его удалили или перенесли{trace}", 404)
+        log.warning(f"url {err}")
+        return None, err
     # На частые запросы Яндекс отвечает капчей — это лимит, а не протухшие куки
     if "captcha" in str(getattr(r, "text", "") or "").lower()[:2000]:
         err = PrepareError("rate_limit", f"Яндекс показал капчу: слишком частые запросы (HTTP {r.status_code}){trace}",
@@ -662,7 +698,9 @@ def get_file_url(s, sk, uid, path: str) -> tuple[str | None, PrepareError | None
     elif "error" in data:
         e = data.get("error")
         e_str = (e.get("title") or e.get("id") or str(e)) if isinstance(e, dict) else str(e)
-        err = PrepareError("prepare_failed", f"Яндекс не выдал ссылку на файл: {e_str} | ответ: {str(e)[:200]}{trace}")
+        gone = any(t in str(e).lower() for t in ("not found", "notfound", "не найден"))
+        err = PrepareError("gone" if gone else "prepare_failed",
+                           f"Яндекс не выдал ссылку на файл: {e_str} | ответ: {str(e)[:200]}{trace}")
     elif not isinstance(data.get("file"), str) or not data["file"]:
         err = PrepareError("prepare_failed", f"В ответе Яндекса нет ссылки на файл | ответ: {str(data)[:200]}{trace}")
     else:
@@ -693,7 +731,7 @@ def prepare_zip(s, sk, uid, paths: list[str]) -> tuple[str | None, PrepareError 
         log.warning(f"prepare exc: {err}")
         return None, err
     except Exception as e:
-        err = PrepareError("connection", f"Сбой связи с сервером Яндекса: {e}")
+        err = PrepareError("connection", f"Сбой связи с сервером Яндекса: {scrub_urls(e)}")
         log.warning(f"prepare exc: {err}")
         return None, err
 
@@ -757,17 +795,38 @@ def safe_extract_dst(base_dir: str, member_name: str) -> str | None:
     return dst
 
 
-def _non_colliding_path(path: str) -> str:
-    """Генерирует уникальный путь с суффиксом _1, _2 если файл уже существует."""
-    if not os.path.exists(path):
-        return path
+def _claim_free_path(path: str) -> str:
+    """Свободное имя: path или path_1, path_2 … — и сразу занимает его пустым файлом.
+
+    Воркеры — отдельные процессы. Проверка «имя свободно» и перенос файла у двух воркеров,
+    докачавших разные фото с одним именем (IMG_0001.JPG бывает у многих камер), могли
+    совпасть — и второе фото затирало первое. Создание с O_EXCL занимает имя атомарно.
+    """
     base, ext = os.path.splitext(path)
-    i = 1
+    cand, i = path, 0
     while True:
-        cand = f"{base}_{i}{ext}"
-        if not os.path.exists(cand):
+        try:
+            os.close(os.open(to_long_path(cand), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
             return cand
-        i += 1
+        except FileExistsError:
+            i += 1
+            cand = f"{base}_{i}{ext}"
+
+
+def _place_file(tmp: str, dst: str) -> str:
+    """Переносит готовый tmp на свободное имя рядом с dst (dst, dst_1 …). Возвращает итоговый путь."""
+    final = _claim_free_path(dst)
+    try:
+        try:
+            os.replace(to_long_path(tmp), to_long_path(final))
+        except OSError as e:
+            if e.errno != errno.EXDEV:
+                raise
+            shutil.move(to_long_path(tmp), to_long_path(final))  # временная папка на другом диске
+    except OSError:
+        remove_quiet(to_long_path(final))  # пустая заглушка не должна остаться вместо фото
+        raise
+    return final
 
 
 def _clean_stem(name: str) -> tuple[str, str]:
@@ -802,6 +861,14 @@ def _download_zip(
     """Стримит ZIP во временный .part и атомарно переименовывает. None — успех."""
     tmp = zip_path + ".part"
     t0 = time.monotonic()
+    try:
+        return _download_zip_to(s, url, tmp, zip_path, worker_id, batch_idx, t0, on_progress)
+    finally:
+        remove_quiet(tmp)  # и при Ctrl+C: недокачанный архив не остаётся в папке
+
+
+def _download_zip_to(s, url: str, tmp: str, zip_path: str, worker_id: int, batch_idx: int, t0: float,
+                     on_progress: Callable[[], None] | None) -> FetchFailure | None:
     try:
         with s.get(url, stream=True, timeout=(30, 300)) as r:
             r.raise_for_status()
@@ -848,23 +915,25 @@ def _download_zip(
         resp = getattr(e, "response", None)
         code = getattr(resp, "status_code", None)
         trace = response_trace(resp) if resp is not None else ""
+        # В тексте исключения — подписанная ссылка на архив: её в журналы не пишем
         if code == 429:
-            failure = FetchFailure("rate_limit", f"HTTP 429 при скачивании архива: {e}{trace}")
+            failure = FetchFailure("rate_limit", f"HTTP 429 при скачивании архива: {scrub_urls(e)}{trace}")
         elif code is not None and code >= 500:
-            failure = FetchFailure("server_50x", f"HTTP {code} при скачивании архива: {e}{trace}")
+            failure = FetchFailure("server_50x", f"HTTP {code} при скачивании архива: {scrub_urls(e)}{trace}")
         else:
-            failure = FetchFailure("refused", f"HTTP {code} при скачивании архива: {e}{trace}")
+            failure = FetchFailure("refused", f"HTTP {code} при скачивании архива: {scrub_urls(e)}{trace}")
     except requests.exceptions.Timeout as e:
-        failure = FetchFailure("timeout", f"таймаут при скачивании архива: {e}")
+        failure = FetchFailure("timeout", f"таймаут при скачивании архива: {scrub_urls(e)}")
     except requests.exceptions.ConnectionError as e:
-        failure = FetchFailure("connection", f"обрыв соединения при скачивании архива: {e}")
+        failure = FetchFailure("connection", f"обрыв соединения при скачивании архива: {scrub_urls(e)}")
     except OSError as e:
-        kind = "local_disk" if is_local_disk_error(e) else "connection"
-        failure = FetchFailure(kind, f"ошибка записи архива: {e}")
+        if isinstance(e, requests.RequestException):  # сетевые сбои requests — тоже OSError
+            failure = FetchFailure("connection", f"обрыв при скачивании архива: {scrub_urls(e)}")
+        else:
+            failure = FetchFailure("local_disk", f"ошибка записи архива: {e}")
     except Exception as e:
-        failure = FetchFailure("connection", f"сбой скачивания архива: {e}")
+        failure = FetchFailure("connection", f"сбой скачивания архива: {scrub_urls(e)}")
     log.error(f"w{worker_id} b{batch_idx} download: {failure}")
-    remove_quiet(tmp)
     return failure
 
 
@@ -883,29 +952,34 @@ def _extract_zip(zip_path: str, worker_id: int, batch_idx: int) -> FetchResult:
                     log.warning(f"w{worker_id} пропускаю опасное имя в архиве: {m.filename!r}")
                     errors += 1
                     continue
+                tmp = part_path_for(dst)
                 try:
-                    if os.path.exists(dst):
-                        if os.path.getsize(dst) == m.file_size:
-                            extracted.append(ExtractedItem(os.path.basename(m.filename), m.file_size, dst))
-                            total_bytes += m.file_size
-                            reused += 1
-                            continue
-                        # Другой файл с тем же именем — сохраняем с уникальным суффиксом, не перезаписывая
-                        dst = _non_colliding_path(dst)
-                    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
-                    with zf.open(m) as src, open(dst, "wb") as f:
+                    if os.path.exists(to_long_path(dst)) and os.path.getsize(to_long_path(dst)) == m.file_size:
+                        extracted.append(ExtractedItem(os.path.basename(m.filename), m.file_size, dst))
+                        total_bytes += m.file_size
+                        reused += 1
+                        continue
+                    os.makedirs(to_long_path(os.path.dirname(dst) or "."), exist_ok=True)
+                    # Сначала во временный файл: оборванная распаковка (CRC, место, Ctrl+C) не оставит
+                    # обрезанное фото под настоящим именем. Другой файл с тем же именем не затираем
+                    with zf.open(m) as src, open(to_long_path(tmp), "wb") as f:
                         shutil.copyfileobj(src, f, 1024 * 1024)
+                    dst = _place_file(tmp, dst)
                     extracted.append(ExtractedItem(os.path.basename(m.filename), m.file_size, dst))
                     total_bytes += m.file_size
-                except OSError as e:
+                except BaseException as e:
+                    remove_quiet(to_long_path(tmp))
+                    if not isinstance(e, Exception):
+                        raise
+                    if not isinstance(e, OSError):
+                        errors += 1
+                        log.warning(f"w{worker_id} extract {m.filename}: {e}")
+                        continue
                     if is_local_disk_error(e):
                         # Место/права — дальше распаковывать бессмысленно, и файлы не виноваты
                         log.error(f"w{worker_id} b{batch_idx} extract {m.filename}: {e}")
                         return FetchResult(extracted, total_bytes,
                                            FetchFailure("local_disk", f"ошибка записи при распаковке: {e}"))
-                    errors += 1
-                    log.warning(f"w{worker_id} extract {m.filename}: {e}")
-                except Exception as e:
                     errors += 1
                     log.warning(f"w{worker_id} extract {m.filename}: {e}")
     except zipfile.BadZipFile as e:
@@ -925,8 +999,11 @@ def download_and_extract(
 
     Возвращает FetchResult(распакованные ExtractedItem(имя, размер, dst), суммарные байты, причина сбоя).
     """
-    os.makedirs(ZIP_TMP_DIR, exist_ok=True)
-    os.makedirs(EXTRACT_DIR, exist_ok=True)
+    try:
+        os.makedirs(ZIP_TMP_DIR, exist_ok=True)
+        os.makedirs(EXTRACT_DIR, exist_ok=True)
+    except OSError as e:  # диск отключили посреди скачивания
+        return FetchResult([], 0, FetchFailure("local_disk", f"не создать папку для файлов: {e}"))
     zip_path = os.path.join(ZIP_TMP_DIR, f"w{worker_id}_b{batch_idx}.zip")
     failure = _download_zip(s, url, zip_path, worker_id, batch_idx, on_progress)
     if failure is not None:
@@ -949,7 +1026,6 @@ def download_file(
     суффикс _1, если файл с таким именем уже лежит в папке: чужой файл не затираем.
     Редирект на сервер хранения и молчащие серверы разбирает storage_fetch.fetch_to_file.
     """
-    os.makedirs(ZIP_TMP_DIR, exist_ok=True)
     tmp = os.path.join(ZIP_TMP_DIR, f"w{worker_id}_file.part")
     name = os.path.basename(dst)
     t0 = time.monotonic()
@@ -966,22 +1042,25 @@ def download_file(
                 on_progress()
 
     try:
-        written, _host, failure = fetch_to_file(
-            s, url, tmp,
-            expected_size=expected_size or None,
-            expected_md5=expected_md5,
-            host_is_dead=host_is_dead,
-            storage_timeout=STORAGE_READ_TIMEOUT_SEC,
-            on_progress=progress,
-        )
+        try:
+            os.makedirs(ZIP_TMP_DIR, exist_ok=True)
+        except OSError as e:  # диск отключили посреди скачивания
+            written, failure = 0, FetchFailure("local_disk", f"не создать папку для файлов: {e}")
+        else:
+            written, _host, failure = fetch_to_file(
+                s, url, tmp,
+                expected_size=expected_size or None,
+                expected_md5=expected_md5,
+                host_is_dead=host_is_dead,
+                storage_timeout=STORAGE_READ_TIMEOUT_SEC,
+                on_progress=progress,
+            )
         if failure is None:
             try:
-                os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
-                final = _non_colliding_path(dst)
-                shutil.move(tmp, final)
+                os.makedirs(to_long_path(os.path.dirname(dst) or "."), exist_ok=True)
+                final = _place_file(tmp, dst)
             except OSError as e:
-                kind = "local_disk" if is_local_disk_error(e) else "connection"
-                failure = FetchFailure(kind, f"ошибка записи файла: {e}")
+                failure = FetchFailure(local_error_kind(e), f"ошибка записи файла: {e}")
             else:
                 dur = max(0.001, time.monotonic() - t0)
                 log.info("w%d: %s скачан %s за %.1f с (%s/с)", worker_id, name,
@@ -1226,7 +1305,6 @@ class Worker:
                 self._exit(EXIT_DISK_FULL)
             time.sleep(30)
             return
-        self._disk_full_streak = 0
 
         total = sum(_batch_size(it) for it in batch)
         max_att = max((int(it.get("attempts") or 0) for it in batch), default=0)
@@ -1262,6 +1340,7 @@ class Worker:
         files_before, bytes_before = self.total_files, self.total_bytes
         deferred = 0
         failed = False
+        # rejected — файл не записать в эту папку: он сразу в ошибках, пачка идёт дальше
         for idx, item in enumerate(batch):
             if idx and shared_cooldown_remaining() > 0:
                 # Другой воркер поймал 429 — остаток вернём, общий цикл выждет паузу
@@ -1269,6 +1348,8 @@ class Worker:
                 break
             outcome = self._fetch_one(item, ids[idx + 1:])
             self._heartbeat()  # мелкие файлы качаются быстрее, чем срабатывает on_progress
+            if outcome == "rejected":
+                continue
             if outcome == "failed":
                 failed = True
                 break
@@ -1287,22 +1368,28 @@ class Worker:
             self._on_all_deferred(deferred)
 
     def _fetch_one(self, item: dict, rest: list[str]) -> str:
-        """Один файл режима direct: 'done' | 'deferred' | 'failed'.
+        """Один файл режима direct: 'done' | 'deferred' | 'rejected' | 'failed'.
 
         deferred — сервер хранения файла недоступен: файл вернулся в очередь без
-        сжигания попытки, пачка продолжается. failed — сбой уже обработан, а rest
-        (не начатый остаток пачки) возвращён в очередь до обработки: она может
-        завершить процесс.
+        сжигания попытки, пачка продолжается. rejected — файл не записать в эту папку
+        (длинное имя, FAT32): он сразу в ошибках, пачка продолжается. failed — сбой уже
+        обработан, а rest (не начатый остаток пачки) возвращён в очередь до обработки:
+        она может завершить процесс.
         """
         fid = str(item["file_id"])
         name = sanitize_component(os.path.basename(str(item.get("name") or fid)))
         dst = os.path.join(EXTRACT_DIR, name)
         expected = _batch_size(item)
-        if expected > 0 and os.path.isfile(dst) and os.path.getsize(dst) == expected:
-            # Уже лежит в папке (прошлый запуск или архив) — второй раз не качаем
+        if expected > 0 and local_copy_matches(dst, expected, item.get("md5")):
+            # Уже лежит в папке (прошлый запуск или архив) — второй раз не качаем. По MD5, а не
+            # только по имени и размеру: «IMG_0001.JPG» того же размера бывает и другим фото
             mark_done([fid], {fid: dst})
             self._on_file_done(fid, expected)
             return "done"
+        if why := too_big_for_folder(EXTRACT_DIR, expected):
+            mark_failed([fid], f"local_file | {why}", self.id)
+            self.say(f"batch {self.batch_idx}: ⚠️ Файл {name} не скачиваю: {why}")
+            return "rejected"
 
         for attempt in range(2):
             url, err = get_file_url(self.session, self.sk, self.uid, fid)
@@ -1332,6 +1419,11 @@ class Worker:
                          f"Его файлы откладываю на {DEAD_HOST_TTL_SEC // 60} мин, попытки не сжигаю.")
             self._save_preview(item, name)
             return "deferred"
+        if failure is not None and failure.is_local_file:
+            # Имя или размер не подходят этой папке: повтор ничего не изменит, диск в порядке
+            mark_failed([fid], str(failure), self.id)
+            self.say(f"batch {self.batch_idx}: ⚠️ Файл {name} не записать в папку: {failure}")
+            return "rejected"
         if failure is not None:
             _release_to_pending(rest, self.id)
             if failure.is_local:
@@ -1341,7 +1433,7 @@ class Worker:
                 self._on_batch_failed([item], str(failure), failure.is_server_issue, 5, failure.kind)
             return "failed"
 
-        size = os.path.getsize(path)
+        size = os.path.getsize(to_long_path(path))
         mark_done([fid], {fid: path})
         self._on_file_done(fid, size)
         return "done"
@@ -1414,8 +1506,13 @@ class Worker:
                 self.say("auth_expired | КРИТИЧЕСКАЯ ОШИБКА: Авторизация отклонена Яндексом (401/403).")
                 self.say("Куки устарели. Обновите cookies.json в Web UI или браузере и перезапустите процесс.")
                 self._exit(EXIT_AUTH)
-        else:
-            self._refresh_auth()
+        elif not self._refresh_auth():
+            # sk живёт недолго — его обновляем после любого сбоя. Вход на Диск не прошёл
+            # (редирект на паспорт) — значит, протухли куки, а не Яндекс отказывает
+            _release_to_pending([it["file_id"] for it in batch], self.id)
+            self.say("auth_expired | Яндекс больше не пускает по этим кукам. Обновите доступ к Безлимиту "
+                     "в «Настройках».")
+            self._exit(EXIT_AUTH)
         print(f"             Причина: {err}")
         print(f"             (Статус серверов Яндекса: {TELEGRAM_CHANNEL})")
 
@@ -1449,11 +1546,15 @@ class Worker:
         time.sleep(30)
 
     def _note_success(self) -> None:
-        """Яндекс отдал хоть что-то — серия сбоев прервана."""
+        """Яндекс отдал хоть что-то, и файл лёг на диск, — серии сбоев прерваны."""
         self._fail_streak = 0
         self._streak_files.clear()
         self._streak_causes.clear()
         self._rate_limit_streak = 0
+        # Только запись файла прерывает серию «диск не принимает». Проверка места перед
+        # пачкой — нет: при свободном месте файл может не записываться (права, отключённый
+        # диск), и серия обнулялась бы перед каждой пачкой, а файл перекачивался бы вечно
+        self._disk_full_streak = 0
         self._last_success_at = time.monotonic()
 
     def _on_file_done(self, fid: str, size: int) -> None:
@@ -1487,9 +1588,17 @@ class Worker:
     def _on_batch_failed(self, batch: list[dict], reason: str, server_issue: bool,
                          delay: float, kind: str = "other") -> None:
         """Пачка не дала ни одного файла. Решает, кто виноват, и что делать дальше."""
-        self._fail_streak += 1
         ids = [it["file_id"] for it in batch]
-        self._streak_files.update(str(i) for i in ids)
+        if kind == "gone" and len(batch) == 1:
+            # Файла больше нет на Диске: это не отказ Яндекса и не повод для общей паузы.
+            # Иначе несколько удалённых файлов в конце очереди держали бы её «в отказе» часами
+            self._burn_attempt(batch[0], reason)
+            return
+        self._fail_streak += 1
+        # Серию «Яндекс не отдаёт» подтверждают новые файлы или сбои на стороне Яндекса.
+        # Файл, который уже не скачивался с постоянной ошибкой, — битый файл, а не отказ
+        self._streak_files.update(str(it["file_id"]) for it in batch
+                                  if server_issue or not int(it.get("attempts") or 0))
         cause = _failure_cause(kind)
         self._streak_causes[cause] += 1
 
@@ -1632,7 +1741,18 @@ def main() -> int:
 
     if not os.path.exists(DB_FILE):
         sys.exit("Нет unlim_state.db — сначала запусти unlim_download.py --collect")
+    try:
+        return _main_run(worker, args)
+    except sqlite3.OperationalError as e:
+        if not is_sqlite_disk_error(e):
+            raise
+        # База лежит на том же диске, что и файлы: он кончился — это код 4, а не падение
+        worker.say(f"local_disk | Не получается записать базу unlim_state.db: {e}. "
+                   f"Освободите место или проверьте, что диск подключён.")
+        return EXIT_DISK_FULL
 
+
+def _main_run(worker: Worker, args: argparse.Namespace) -> int:
     ensure_attempts_column()
     if args.retry_failed:
         n_res = reset_failed()

@@ -131,3 +131,39 @@ def test_endpoint_and_demo(monkeypatch):
     monkeypatch.setenv("YADISK_DEMO", "1")
     demo = client.get("/api/supporters?demo=1").json()
     assert demo["source"] == "demo" and demo["people"] == len(demo["supporters"]) == 12
+
+
+def test_remote_answer_must_be_a_supporters_list(monkeypatch):
+    """«[]», «null» или ошибка прокси вместо списка не заменяют хороший список пустым на 15 минут."""
+    class Resp:
+        def __init__(self, body):
+            self.status_code = 200
+            self._body = body
+            self.raw = self
+
+        def read(self, n, decode_content=True):
+            return self._body[:n]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    for body in (b"[]", b"null", b'{"error": "blocked by proxy"}', b'{"supporters": {"a": 1}}'):
+        monkeypatch.setattr(supporters.requests, "get", lambda url, body=body, **kw: Resp(body))
+        assert supporters.fetch_remote("https://example.test/s.json") is None, body
+
+
+def test_many_donations_do_not_push_out_newer_manual_records():
+    """Донаты в файле идут первыми: обрезка до сортировки теряла свежие записи, добавленные руками."""
+    donations = [{"id": f"da-{i}", "name": f"Донор {i}", "date": "2026-01-01"} for i in range(supporters.MAX_ITEMS)]
+    manual = {"name": "Ручная запись", "date": "2026-10-20"}
+    got = supporters.normalize({"supporters": [*donations, manual]})["supporters"]
+    assert len(got) == supporters.MAX_ITEMS and got[0]["name"] == "Ручная запись"
+
+
+def test_invisible_characters_are_dropped_from_names_and_messages():
+    raw = {"supporters": [{"name": "Ан​на‮", "message": "t​.me/канал⁦ спасибо"}]}
+    item = supporters.normalize(raw)["supporters"][0]
+    assert item["name"] == "Анна" and "​" not in item["message"] and "⁦" not in item["message"]

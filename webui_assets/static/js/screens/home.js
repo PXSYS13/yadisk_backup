@@ -21,11 +21,12 @@
 
   function heroActions(r, s) {
     const failed = (r.summary || {}).failed_files || 0;
+    // Настройка нужна и после прошлого запуска (ключ и доступ удалили) — тогда состояние
+    // «готово» или «нужно действие», и без этой кнопки карточка оставалась без кнопок
+    if (isSetup(r)) return `<button class="primary big" data-action="go-setup">Начать настройку${icon('arrow')}</button>`;
     switch (r.state) {
       case 'idle':
-        return isSetup(r)
-          ? `<button class="primary big" data-action="go-setup">Начать настройку${icon('arrow')}</button>`
-          : `<button class="primary big" data-action="rescue-start">${icon('download')}Сохранить мои файлы</button>`;
+        return `<button class="primary big" data-action="rescue-start">${icon('download')}Сохранить мои файлы</button>`;
       case 'running':
         return `<button data-action="rescue-stop">${icon('stop')}Остановить</button>`;
       case 'waiting':
@@ -35,7 +36,7 @@
         return r.running ? `<button data-action="rescue-stop">${icon('stop')}Остановить</button>` : App.actionButtons(r.action, s, true);
       case 'done':
         return `<button class="primary big" data-action="open-folder" data-which="download">${icon('folder')}Открыть папку</button>` +
-          (failed ? `<button data-action="retry-failed" data-source="all">${icon('refresh')}Повторить для ${fmt.files(failed)}</button>` : '') +
+          (failed ? `<button data-action="retry-failed" data-source="all">${icon('refresh')}Повторить для ${fmt.filesOf(failed)}</button>` : '') +
           `<button data-action="relist" data-source="all">${icon('download')}Проверить новые файлы</button>`;
       case 'stopped':
         return `<button class="primary big" data-action="rescue-start">${icon('play')}Продолжить</button>`;
@@ -136,7 +137,7 @@
     const etas = Object.values(src).map((x) => x.eta_sec).filter(Boolean);
     const eta = etas.length ? Math.max(...etas) : null;
     const done = tile('ok', 'Скачано', fmt.num(sm.downloaded_files || 0),
-      `${fmt.bytes(sm.downloaded_bytes || 0)} · из ${fmt.files(sm.selected_files || 0)}`);
+      `${fmt.bytes(sm.downloaded_bytes || 0)} · из ${fmt.filesOf(sm.selected_files || 0)}`);
     const wait = tile('wait', 'Ждут Яндекса', fmt.num(sm.deferred_files || 0), sm.deferred_files
       ? (r.next_retry_at ? `повтор в ${fmt.hhmm(r.next_retry_at)}` : 'программа повторит сама') : 'таких пока нет');
     const queue = tile('', 'В очереди', fmt.num(left), left ? (eta ? `осталось ≈ ${fmt.duration(eta)}` : 'ждут своей очереди') : 'очередь пуста');

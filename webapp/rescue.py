@@ -51,6 +51,7 @@ from webapp.queue_db import (
     filter_to_folders,
     release_orphaned_unlim,
     reset_transient_disk_failures,
+    unlim_has_rows_outside,
     unskip_category_marker,
     unskip_markers,
 )
@@ -176,6 +177,8 @@ class Rescue:
 
     def __init__(self):
         self._lock = threading.Lock()
+        # Запуск задачи и «Остановить» не пересекаются: после остановки ничего не запускается
+        self._launch_lock = threading.Lock()
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
         self.branches = {"disk": Branch("disk"), "unlim": Branch("unlim")}
@@ -364,10 +367,28 @@ class Rescue:
                 b.wake.set()
         return bool(waiting)
 
+    def resume_access(self, source: str) -> bool:
+        """Ключ к Диску или доступ к Безлимиту обновили: ветка, которая ждала этого, качает снова.
+
+        Иначе она стояла бы «нужно ваше действие», пока соседняя ветка качает (хоть сутки),
+        и выйти из этого можно было только остановкой всего скачивания. True — ветка запущена.
+        """
+        with self._lock:
+            if not self.is_running() or self._closing:
+                return False
+            b = self.branches[source]
+            if b.alive() or b.state != "needs_action" or b.action not in ("token", "cookies"):
+                return False
+            self._log(f"🔑 {b.label}: доступ обновлён — продолжаю")
+            self._event(source, "run", "Доступ обновлён — продолжаю скачивание")
+            self._restart_branch(b)
+            return True
+
     def stop(self) -> tuple[bool, str]:
         if not self.is_running():
             return False, "Спасение не идёт"
-        self._stop_evt.set()
+        with self._launch_lock:  # задача, которая запускается прямо сейчас, — до остановки
+            self._stop_evt.set()
         for b in self.branches.values():
             b.wake.set()
         # Гасим ВСЕ задачи Диска и Безлимита — в том числе запущенные с вкладок вручную
@@ -429,11 +450,18 @@ class Rescue:
         return self._stop_evt.is_set()
 
     def _own_start(self, slot: str, script: str, args: list[str]) -> tuple[bool, str]:
-        """Запускает задачу через tm и помечает её как свою."""
-        ok, msg = tm.start(slot, script, args)
-        if ok:
-            self._owned_slots.add(slot)
-        return ok, msg
+        """Запускает задачу через tm и помечает её как свою. После «Остановить» — ничего.
+
+        Иначе воркер, запущенный в ту же секунду, что нажали «Остановить», качал бы дальше,
+        а его файлы спасение считало бы брошенными и потом скачивало второй раз.
+        """
+        with self._launch_lock:
+            if self._stopped():
+                return False, "Скачивание остановлено"
+            ok, msg = tm.start(slot, script, args)
+            if ok:
+                self._owned_slots.add(slot)
+            return ok, msg
 
     def _wait_task(self, slot: str, on_finish_msg: str = "") -> int:
         """Ждёт задачу, которую только что запустили в слоте. -1 — спасение остановлено."""
@@ -471,6 +499,8 @@ class Rescue:
             ok, msg = self._own_start(slot, script, args)
             if ok:
                 break
+            if self._stopped():
+                return -1
             # Слот занят задачей, запущенной вручную, — дождёмся её и запустим свою
             self._log(f"⏳ {b.label}: {activity} — жду уже запущенную задачу ({msg})")
             if self._stop_evt.wait(5):
@@ -793,6 +823,8 @@ class Rescue:
             b.odd_rounds = 0
             return self._wait_round(b, deferred, outage=(code == EXIT_OUTAGE))
         if code in (0, EXIT_PARTIAL):
+            if b.relist:  # «Обновить список» нажали, пока шаг заканчивался
+                return True
             failed = int(stats.get("failed") or 0)
             b.state = "done"
             b.activity = ""
@@ -841,6 +873,8 @@ class Rescue:
         """Ждёт следующий раунд. kind: deferred — файлы на молчащих серверах, outage —
         Яндекс не отвечает, crash — процесс оборвался (повтор раньше). reason — чем
         заменить стандартный текст причины, resume — слово в ленту при возобновлении."""
+        if b.relist:  # «Обновить список» нажали, пока шаг заканчивался: собираем сразу, без паузы
+            return True
         kind = kind or ("deferred" if deferred and not outage else "outage")
         b.state = "waiting"
         b.wait_kind = kind
@@ -864,6 +898,10 @@ class Rescue:
                 manual = True
                 break
         b.wake.clear()
+        if not self._stopped():
+            # Ветка больше не ждёт — до того, как пропадёт время попытки: иначе, пока она
+            # считает базу перед скачиванием, Главная писала бы «Следующая попытка в .»
+            b.state = "checking"
         b.next_retry_at = None
         b.wait_kind = None
         if self._stopped():
@@ -902,7 +940,8 @@ class Rescue:
                 x.activity = ""
         self._log(f"💾 {reason} — останавливаю скачивание. Освободите место или выберите другую папку")
         self._event(None, "err", f"{reason} — скачивание на паузе")
-        self._stop_evt.set()
+        with self._launch_lock:
+            self._stop_evt.set()
         for x in self.branches.values():
             x.wake.set()
         stop_and_wait(tm.stop_matching(SLOT_DISK) + tm.stop_matching(UNLIM_SLOT_PREFIX))
@@ -1057,7 +1096,8 @@ class Rescue:
         if not listing_stale(rec, time.time()):
             self._log(f"📋 Безлимит: список фото и видео собран {when_text(rec['at'])} — заново не собираю")
             self._event("unlim", "info", f"Список фото и видео собран {when_text(rec['at'])} — заново не собираю")
-        elif not explicit and db_has_pending(paths.UNLIM_DB_FILE, "unlim_files"):
+        elif (not explicit and db_has_pending(paths.UNLIM_DB_FILE, "unlim_files")
+              and not unlim_has_rows_outside(paths.UNLIM_DB_FILE)):
             self._list_after(b, rec)
         else:
             code = self._unlim_list(b)

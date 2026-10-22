@@ -456,3 +456,83 @@ def test_organize_get_date_mtime_fallback(tmp_path):
 
 
 
+
+
+@pytest.mark.parametrize("name", ["COM0.txt", "LPT¹.jpg", "CON .txt", "nul .tar.gz", "CONIN$", "conout$.log"])
+def test_less_known_reserved_windows_names_prefixed(name):
+    """Windows считает устройствами и COM0/LPT¹, и «CON .txt» (пробел перед точкой)."""
+    assert sanitize_component(name) == "_" + name
+
+
+def test_names_too_long_for_any_filesystem_are_shortened():
+    """Имя длиннее 255 байт не создать на Linux/macOS (255 знаков — на Windows): файл не скачался бы
+    никогда. Укороченное сохраняет тип файла, а хеш не даёт слиться двум длинным именам."""
+    from utils import MAX_NAME_LEN, name_len
+
+    a, b = "Я" * 300 + "-а.docx", "Я" * 300 + "-б.docx"
+    short_a, short_b = sanitize_component(a), sanitize_component(b)
+    assert short_a.endswith(".docx") and short_a != short_b
+    assert name_len(short_a) <= MAX_NAME_LEN - 16
+    # Что помещалось раньше — не меняется (имена уже скачанных файлов остаются прежними)
+    fits = "Я" * 120 + ".docx"
+    assert sanitize_component(fits) == fits
+
+
+def test_resolve_keeps_hashed_names_within_the_limit(tmp_path):
+    from utils import MAX_NAME_LEN, name_len, resolve_local_path
+
+    name = "a" * (MAX_NAME_LEN - 4) + ":.txt"  # чистка добавит хеш — имя вылезло бы за предел
+    local = resolve_local_path(str(tmp_path), f"disk:/{name}")
+    assert name_len(local.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]) <= MAX_NAME_LEN
+    assert local.endswith(".txt")
+    taken: set[str] = set()
+    first = resolve_local_path(str(tmp_path), "disk:/" + "b" * MAX_NAME_LEN, taken)
+    second = resolve_local_path(str(tmp_path), "disk:/" + "b" * MAX_NAME_LEN + "/../x", taken)
+    assert first != second
+
+
+def test_part_file_never_takes_a_real_file_name(tmp_path):
+    """«видео.mp4.part» бывает настоящим файлом той же папки Диска — временный файл его не затрёт."""
+    import os
+
+    from utils import part_path_for
+
+    target = os.path.join(str(tmp_path), "видео.mp4")
+    part = part_path_for(target)
+    assert os.path.dirname(part) == str(tmp_path)  # та же папка: переименование атомарно
+    assert part != target + ".part" and part.endswith(".part")
+    assert part_path_for(target) == part != part_path_for(target + ".part")
+
+
+def test_file_too_big_for_fat32_is_caught_before_download(monkeypatch, tmp_path):
+    import utils
+
+    monkeypatch.setattr(utils, "filesystem_type", lambda path: "FAT32")
+    assert utils.too_big_for_folder(str(tmp_path), 5 * 1024 ** 3)
+    assert utils.too_big_for_folder(str(tmp_path), 4 * 1024 ** 3 - 1) is None
+    monkeypatch.setattr(utils, "filesystem_type", lambda path: "NTFS")
+    assert utils.too_big_for_folder(str(tmp_path), 5 * 1024 ** 3) is None
+
+
+def test_file_specific_write_errors_are_told_from_disk_problems():
+    import errno
+
+    from utils import is_local_disk_error, local_error_kind
+
+    for code in (errno.ENAMETOOLONG, errno.EFBIG, errno.EINVAL):
+        assert local_error_kind(OSError(code, "x")) == "local_file"
+    for code in (errno.ENOSPC, errno.EIO, errno.EACCES, errno.ENOENT):
+        err = OSError(code, "x")
+        assert is_local_disk_error(err) and local_error_kind(err) == "local_disk"
+
+
+def test_path_key_joins_nfc_and_nfd_on_macos(monkeypatch):
+    import unicodedata
+
+    import utils
+
+    nfc, nfd = unicodedata.normalize("NFC", "Отчёт.docx"), unicodedata.normalize("NFD", "Отчёт.docx")
+    monkeypatch.setattr(utils.sys, "platform", "darwin")
+    assert utils.path_key(nfc) == utils.path_key(nfd)
+    monkeypatch.setattr(utils.sys, "platform", "win32")
+    assert utils.path_key(nfc) != utils.path_key(nfd)  # NTFS их различает

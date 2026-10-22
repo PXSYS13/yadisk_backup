@@ -100,6 +100,45 @@ def test_changed_md5_resets_downloaded_to_pending(st):
     assert row["local_path"] == "C:/out/a.jpg"  # путь сохранён — перекачаем на то же место
 
 
+def test_changed_md5_resets_file_found_on_disk_to_pending(st):
+    """Найденный при докачке (skipped без ошибки) — та же скачанная копия: новая версия на Диске
+    возвращает его в очередь, а не остаётся старой навсегда."""
+    st.mark_pending("disk:/a.jpg", 100, "md5-old")
+    st.mark_skipped("disk:/a.jpg", "C:/out/a.jpg")
+    st.mark_pending("disk:/a.jpg", 120, "md5-new")
+    row = next(iter(st.get_pending()))
+    assert (row["remote_path"], row["size"], row["md5"]) == ("disk:/a.jpg", 120, "md5-new")
+    # Без изменений — остаётся найденным
+    st.mark_skipped("disk:/a.jpg", "C:/out/a.jpg")
+    st.mark_pending("disk:/a.jpg", 120, "md5-new")
+    assert st.get_stats()["skipped"] == 1
+
+
+def test_pending_reader_survives_a_write_from_another_process(st, tmp_path):
+    """Скачивание читает очередь, пока «Повторить ошибки» в Web UI пишет в ту же базу.
+
+    Открытый на всё скачивание SELECT держал снимок базы: после чужой записи каждая
+    запись скачивания падала с «database is locked».
+    """
+    import sqlite3
+
+    import state as state_mod
+
+    st.mark_pending_batch([(f"disk:/f{i:04d}.bin", i, None) for i in range(state_mod.PENDING_CHUNK + 50)])
+    st.mark_pending("disk:/failed.bin", 1, None)
+    st.mark_failed("disk:/failed.bin", "server_50x | x")
+    pending = st.get_pending()
+    first = next(pending)
+    other = sqlite3.connect(st.db_path, timeout=5)
+    with other:
+        other.execute("UPDATE files SET status='pending', error=NULL WHERE status='failed'")
+    other.close()
+    st.mark_downloaded(first["remote_path"], "/out/" + first["remote_path"])
+    rest = [r["remote_path"] for r in pending]
+    assert len(rest) == state_mod.PENDING_CHUNK + 49  # все, кроме первого; порции стыкуются без потерь
+    assert first["remote_path"] not in rest
+
+
 def test_category_skipped_is_not_resurrected_by_rescan(st):
     st.mark_pending("disk:/doc.pdf", 10, "m1")
     st._conn().execute("UPDATE files SET status='skipped', error='not in selected categories'")
@@ -195,3 +234,20 @@ def test_mark_pending_batch(st):
     assert stats["bytes_total"] == 600
 
 
+
+
+def test_disk_modification_time_is_kept_for_the_copy(st):
+    """Время изменения на Диске доходит до задачи скачивания; повторный сбор без него его не стирает."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    import downloader
+
+    entry = SimpleNamespace(path="disk:/a.jpg", size=5, md5=None,
+                            modified=datetime(2020, 9, 13, 12, 26, 40, tzinfo=timezone.utc))
+    batch: list = []
+    downloader._register_file(entry, batch, None)
+    st.mark_pending_batch(batch)
+    st.mark_pending("disk:/a.jpg", 5, None)  # старый формат — без времени
+    job = next(downloader._jobs_from_state(st))
+    assert job.modified == 1_600_000_000.0 and job.downloaded_at is None

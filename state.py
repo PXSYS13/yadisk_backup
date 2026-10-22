@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS meta (
 # Маркер отложенного файла в колонке error (его же считает db_stats в webui.py)
 DEFERRED_MARKER = "storage_down | "
 
+# Сколько строк очереди get_pending читает за раз
+PENDING_CHUNK = 500
+
 # Маркеры в колонке error: файл снят выбором человека, и это обратимо. Ставит и
 # снимает их webui.py; сбор списка обновляет у таких строк размер и MD5, но не статус
 CATEGORY_SKIP_MARKER = "not in selected categories"
@@ -102,11 +105,12 @@ class State:
             conn = self._conn()
             conn.executescript(SCHEMA)
             cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
-            for col in ("storage_host", "preview_path"):
+            # modified — когда файл менялся на Диске (секунды эпохи): то же время получает копия
+            for col, kind in (("storage_host", "TEXT"), ("preview_path", "TEXT"), ("modified", "REAL")):
                 if col in cols:
                     continue
                 try:
-                    conn.execute(f"ALTER TABLE files ADD COLUMN {col} TEXT")
+                    conn.execute(f"ALTER TABLE files ADD COLUMN {col} {kind}")
                 except sqlite3.OperationalError as e:  # колонку успел добавить другой процесс
                     if "duplicate column" not in str(e).lower():
                         raise
@@ -145,35 +149,39 @@ class State:
 
     def mark_pending_batch(
         self,
-        items: Iterable[tuple[str, int | None, str | None]],
+        items: Iterable[tuple],
     ) -> None:
         """Пакетная регистрация файлов — значительно ускоряет scan_tree и scan_media.
 
         Уже скачанный файл, у которого на Диске изменился MD5, возвращается в pending:
-        бэкап должен догнать новую версию. Статус пропущенных (skipped) не трогаем —
-        это выбор пользователя (категории, папки) или дубликат. У снятых выбором
+        бэкап должен догнать новую версию. Найденный в папке при докачке (skipped без
+        ошибки) — тоже: это такая же скачанная копия. Статус остальных пропущенных не
+        трогаем — это выбор пользователя (категории, папки) или дубликат. У снятых выбором
         обновляем размер и MD5: файл мог измениться, пока его папка была не выбрана,
         и после возврата в очередь проверка скачанного сравнит его со старыми данными.
+
+        items — (remote_path, size, md5) или (remote_path, size, md5, modified).
         """
-        items_list = [(*item, *SELECTION_MARKERS) for item in items]
+        items_list = [(*item[:3], item[3] if len(item) > 3 else None, *SELECTION_MARKERS) for item in items]
         if not items_list:
             return
         with self._tx() as conn:
             conn.executemany(
                 """
-                INSERT INTO files (remote_path, size, md5, status)
-                VALUES (?, ?, ?, 'pending')
+                INSERT INTO files (remote_path, size, md5, modified, status)
+                VALUES (?, ?, ?, ?, 'pending')
                 ON CONFLICT(remote_path) DO UPDATE SET
                     size = excluded.size,
                     md5 = COALESCE(excluded.md5, files.md5),
+                    modified = COALESCE(excluded.modified, files.modified),
                     status = CASE
-                        WHEN files.status = 'downloaded'
+                        WHEN files.status IN ('downloaded', 'skipped') AND files.error IS NULL
                              AND excluded.md5 IS NOT NULL AND files.md5 IS NOT NULL
                              AND excluded.md5 <> files.md5
                         THEN 'pending'
                         ELSE files.status
                     END
-                WHERE files.status <> 'skipped' OR files.error IN (?, ?)
+                WHERE files.status <> 'skipped' OR files.error IS NULL OR files.error IN (?, ?)
                 """,
                 items_list,
             )
@@ -277,12 +285,29 @@ class State:
             )
             return cur.rowcount
 
-    def get_pending(self) -> Iterable[sqlite3.Row]:
-        """Возвращает курсор с pending-файлами. Читается лениво, без загрузки всего в RAM."""
-        return self._conn().execute(
-            "SELECT remote_path, size, md5, local_path, error, storage_host, preview_path "
-            "FROM files WHERE status='pending' ORDER BY size ASC"
-        )
+    def get_pending(self) -> Iterator[sqlite3.Row]:
+        """pending-файлы от мелких к крупным, порциями по PENDING_CHUNK строк.
+
+        Открытый SELECT нельзя держать всё скачивание: он держит снимок базы, и после
+        записи другого процесса («Повторить ошибки», «Обновить список») каждая запись
+        здесь падала бы с «database is locked», а журнал state.db-wal рос бы без предела.
+        Поэтому сначала читаются номера строк (немного памяти и на сотни тысяч файлов),
+        потом сами строки порциями — между порциями курсор закрыт. Строка, которая
+        за это время перестала быть pending, пропускается.
+        """
+        conn = self._conn()
+        ids = [r[0] for r in conn.execute("SELECT rowid FROM files WHERE status='pending' ORDER BY size ASC")]
+        for start in range(0, len(ids), PENDING_CHUNK):
+            chunk = ids[start:start + PENDING_CHUNK]
+            rows = {r["rowid"]: r for r in conn.execute(
+                "SELECT rowid, remote_path, size, md5, local_path, error, storage_host, preview_path, "
+                "modified, downloaded_at "
+                f"FROM files WHERE status='pending' AND rowid IN ({','.join('?' * len(chunk))})",
+                chunk,
+            )}
+            for rid in chunk:
+                if rid in rows:
+                    yield rows[rid]
 
     def get_pending_stats(self) -> dict[str, int]:
         """Быстро возвращает количество и сумму байт pending файлов."""
@@ -367,9 +392,15 @@ class State:
         )
 
     def get_all_downloaded(self) -> Iterable[sqlite3.Row]:
+        """Файлы, которые лежат в папке: скачанные и найденные при докачке (skipped без ошибки).
+
+        Снятые выбором и дубликаты сюда не входят: их local_path мог остаться от прошлых
+        назначений, а самих файлов в папке нет и быть не должно.
+        """
         return self._conn().execute(
             "SELECT remote_path, local_path, md5, size FROM files "
-            "WHERE status IN ('downloaded', 'skipped') AND local_path IS NOT NULL"
+            "WHERE (status = 'downloaded' OR (status = 'skipped' AND error IS NULL)) "
+            "AND local_path IS NOT NULL"
         )
 
     def get_stats(self) -> dict[str, int]:

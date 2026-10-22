@@ -269,6 +269,16 @@ class TaskManager:
 tm = TaskManager()
 
 
+def organize_moving() -> bool:
+    """Идёт сортировка с переносом файлов: качать и менять папку сейчас нельзя.
+
+    Файлы уезжают из-под скачивания: база помнит прежние места, и следующий раунд скачал бы
+    разложенные файлы заново (или положил новый файл туда, куда сортировка уже перенесла другой).
+    """
+    t = tm.get(SLOT_ORGANIZE)
+    return t is not None and t.alive() and "move" in t.cmd
+
+
 def stop_and_wait(tasks: list[Task]) -> None:
     """Дожидается остановленных задач и их reader-потоков."""
     for t in tasks:

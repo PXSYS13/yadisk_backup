@@ -411,14 +411,37 @@ def cmd_scan_media(cfg: dict, args: argparse.Namespace) -> int:
     return 0
 
 
-def _scan_if_empty(cfg: dict, state: State, args: argparse.Namespace) -> None:
-    if state.get_stats().get("pending", 0) == 0:
-        print("В БД нет pending-файлов. Сначала выполни: python main.py scan")
-        # Но всё-равно попробуем — может пользователь сначала запустил download
-        if not args.no_scan:
-            print("Запускаю scan автоматически (--no-scan чтобы отключить)...")
-            with closing(make_client(cfg["token"])) as client:
-                scan_tree(client, state, root=args.root)
+def _scan_if_empty(cfg: dict, state: State, args: argparse.Namespace) -> int | None:
+    """Пустая очередь — сначала собрать список, как `scan`. Код выхода, если сбор не удался."""
+    if state.get_stats().get("pending", 0) != 0:
+        return None
+    print("В БД нет pending-файлов. Сначала выполни: python main.py scan")
+    # Но всё-равно попробуем — может пользователь сначала запустил download
+    if args.no_scan:
+        return None
+    print("Запускаю scan автоматически (--no-scan чтобы отключить)...")
+    unreadable: list[str] = []
+
+    def on_note(kind: str, names: list[str]) -> None:
+        if kind == "unreadable_folders":
+            unreadable.extend(names)
+
+    try:
+        with closing(make_client(cfg["token"])) as client:
+            scan_tree(client, state, root=args.root, on_note=on_note)
+    except RootNotFound as e:
+        print(f"Папки {e.path} нет на Диске: её переименовали, перенесли или удалили.", flush=True)
+        return EXIT_PARTIAL
+    except Exception as e:  # noqa: BLE001 — известные ошибки сбора — код выхода, как у scan
+        code = scan_exit_code(e)
+        if code is None:
+            raise
+        return _scan_failed(code, e)
+    if unreadable:
+        # Найденное уже в очереди и скачается; непрочитанные папки соберутся в следующий раз
+        print(f"server_50x | Не удалось прочитать {len(unreadable)} папок — Яндекс не ответил. "
+              f"Скачиваю найденное, список соберу заново при следующем запуске.", flush=True)
+    return None
 
 
 def cmd_download(cfg: dict, args: argparse.Namespace) -> int:
@@ -427,7 +450,8 @@ def cmd_download(cfg: dict, args: argparse.Namespace) -> int:
         if (code := _require_token(cfg)) is not None:
             return code
         with State(str(DB_FILE)) as state:
-            _scan_if_empty(cfg, state, args)
+            if (code := _scan_if_empty(cfg, state, args)) is not None:
+                return code
             return _run_download(cfg, state, workers)
     # Компьютер не засыпает и между попытками: серверы Яндекса оживают когда угодно
     with keep_awake():
@@ -445,16 +469,17 @@ def _download_rounds(cfg: dict, args: argparse.Namespace, workers: int) -> int:
         code = _require_token(cfg)
         if code is None:
             with State(str(DB_FILE)) as state:
-                if round_no == 1:
-                    _scan_if_empty(cfg, state, args)
-                deferred_before = state.get_deferred_stats()["files"]
-                downloaded_before = state.get_stats()["downloaded"]
-                code = _run_download(cfg, state, workers, wait=True)
-                if round_no > 1:
-                    got = state.get_stats()["downloaded"] - downloaded_before
-                    _print_round_result(round_no, deferred_before, got)
-                if code == EXIT_DEFERRED:
-                    waiting = _deferred_text(state)
+                # Пустая очередь после первого раунда — только если сбор списка тогда не удался
+                code = _scan_if_empty(cfg, state, args)
+                if code is None:
+                    deferred_before = state.get_deferred_stats()["files"]
+                    downloaded_before = state.get_stats()["downloaded"]
+                    code = _run_download(cfg, state, workers, wait=True)
+                    if round_no > 1:
+                        got = state.get_stats()["downloaded"] - downloaded_before
+                        _print_round_result(round_no, deferred_before, got)
+                    if code == EXIT_DEFERRED:
+                        waiting = _deferred_text(state)
         if code not in (EXIT_DEFERRED, EXIT_OUTAGE):
             if round_no > 1 and code in (EXIT_OK, EXIT_PARTIAL):
                 print("Отложенных файлов больше нет — повторять нечего.", flush=True)

@@ -105,17 +105,24 @@ def test_broken_folder_setting_means_whole_disk(raw):
 
 def test_rows_removed_by_selection_get_fresh_size_and_md5_but_stay_skipped(tmp_path):
     with State(str(tmp_path / "state.db")) as st:
-        st.mark_pending_batch([("disk:/A/x.jpg", 1, "a" * 32), ("disk:/B/y.jpg", 1, "b" * 32)])
+        st.mark_pending_batch([("disk:/A/x.jpg", 1, "a" * 32), ("disk:/B/y.jpg", 1, "b" * 32),
+                               ("disk:/C/z.jpg", 1, "e" * 32)])
         conn = st._conn()
         conn.execute("UPDATE files SET status='skipped', error=? WHERE remote_path='disk:/A/x.jpg'",
                      (FOLDER_SKIP_MARKER,))
         conn.execute("UPDATE files SET status='skipped', error=NULL WHERE remote_path='disk:/B/y.jpg'")
-        st.mark_pending_batch([("disk:/A/x.jpg", 5, "c" * 32), ("disk:/B/y.jpg", 5, "d" * 32)])
+        conn.execute("UPDATE files SET status='skipped', error='duplicate (md5 match)' "
+                     "WHERE remote_path='disk:/C/z.jpg'")
+        st.mark_pending_batch([("disk:/A/x.jpg", 5, "c" * 32), ("disk:/B/y.jpg", 5, "d" * 32),
+                               ("disk:/C/z.jpg", 5, "f" * 32)])
         rows = {r["remote_path"]: r for r in conn.execute("SELECT * FROM files")}
     assert (rows["disk:/A/x.jpg"]["status"], rows["disk:/A/x.jpg"]["size"]) == ("skipped", 5)
     assert rows["disk:/A/x.jpg"]["md5"] == "c" * 32
-    # Дубликат или уже лежащий на месте файл — не трогаем
-    assert (rows["disk:/B/y.jpg"]["size"], rows["disk:/B/y.jpg"]["md5"]) == (1, "b" * 32)
+    # Уже лежавший на месте файл изменился на Диске — это та же скачанная копия: качаем новую версию
+    assert (rows["disk:/B/y.jpg"]["status"], rows["disk:/B/y.jpg"]["size"]) == ("pending", 5)
+    assert rows["disk:/B/y.jpg"]["md5"] == "d" * 32
+    # Дубликат не трогаем
+    assert (rows["disk:/C/z.jpg"]["size"], rows["disk:/C/z.jpg"]["md5"]) == (1, "e" * 32)
 
 
 # ── downloader: обход выбранных папок и общих папок ─────────────────────────
@@ -161,7 +168,7 @@ class FakeState:
         self.rows = []
 
     def mark_pending_batch(self, items):
-        self.rows += [path for path, _s, _m in items]
+        self.rows += [item[0] for item in items]
 
 
 def test_selected_root_is_walked_alone():

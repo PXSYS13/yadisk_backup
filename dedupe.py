@@ -90,9 +90,13 @@ def main() -> int:
     print("=" * 70)
     print("ШАГ 2: ДЕДУПЛИКАЦИЯ ПО MD5")
     print("=" * 70)
+    # Оставить можно только то, что есть или будет в папке: скачанное, найденное при докачке
+    # (skipped без ошибки) и ждущее скачивания. Снятый выбором папок или типов файл не скачается —
+    # его двойник из выбранной папки иначе пометился бы дублем и не скачался бы тоже
     rows = conn.execute(
         "SELECT remote_path, size, md5, status FROM files "
-        "WHERE status IN ('pending', 'downloaded', 'skipped') AND md5 IS NOT NULL AND size > 0"
+        "WHERE (status IN ('pending', 'downloaded') OR (status = 'skipped' AND error IS NULL)) "
+        "AND md5 IS NOT NULL AND md5 <> '' AND size > 0"
     ).fetchall()
     groups: dict[tuple[str, int], list[sqlite3.Row]] = defaultdict(list)
     for r in rows:

@@ -706,8 +706,10 @@ def test_pipeline_applies_categories_after_scan(tmp_path, monkeypatch):
     def finish(slot, on_finish_msg=""):
         # «Скачивание» забирает всю очередь, как настоящий main.py download
         if "скачиваю" in on_finish_msg:
-            with sqlite3.connect(db) as c:
+            c = sqlite3.connect(db)
+            with c:
                 c.execute("UPDATE files SET status='downloaded' WHERE status='pending'")
+            c.close()
         return 0
 
     monkeypatch.setattr(pipe, "_wait_task", finish)

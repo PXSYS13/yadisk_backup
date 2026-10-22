@@ -197,7 +197,9 @@ def test_full_disk_stops_the_queue(tmp_path, net, monkeypatch):
     monkeypatch.setattr(downloader, "_download_one", full)
     counters = downloader.download_all("t", st, str(tmp_path / "dl"), workers=1)
     assert counters["aborted"] == "local_disk"
-    assert counters["failed"] == downloader.LOCAL_DISK_GIVE_UP  # остальные не тронуты
+    # Начатые до остановки файлы записаны, остальные не тронуты
+    assert downloader.LOCAL_DISK_GIVE_UP <= counters["failed"] < len(rows)
+    assert st.get_stats()["failed"] == counters["failed"]
     assert main._download_exit_code(counters) == EXIT_DISK_FULL
     st.close()
 
@@ -223,3 +225,52 @@ def test_exit_code_priorities():
     assert main._download_exit_code({"failed": 3, "deferred": 0}) == EXIT_PARTIAL
     assert main._download_exit_code({"failed": 3, "deferred": 1}) == EXIT_DEFERRED
     assert main._download_exit_code({"failed": 0, "deferred": 1, "aborted": "local_disk"}) == EXIT_DISK_FULL
+
+
+def test_api_outage_defers_the_file_instead_of_failing_it(tmp_path, net):
+    """Яндекс так и не выдал ссылку (503 после всех повторов): файл не виноват — он ждёт раунда,
+    а не пишется ошибкой, которую повторит только человек."""
+    cli = _Client({}, fail_with=yadisk.exceptions.UnavailableError(None, "503"))  # паузы tenacity — через time.sleep
+    res = downloader._download_one(downloader.DownloadJob("disk:/a.jpg", 5, None), cli, str(tmp_path))
+    assert res.status == "deferred" and res.error.startswith(DEFERRED_MARKER)
+    # Удалённый файл — по-прежнему ошибка: ждать нечего
+    gone = _Client({}, fail_with=yadisk.exceptions.PathNotFoundError(None, "404"))
+    res = downloader._download_one(downloader.DownloadJob("disk:/b.jpg", 5, None), gone, str(tmp_path))
+    assert res.status == "failed" and len(gone.calls) == 1  # без повторов
+
+
+def test_part_named_sibling_is_not_overwritten(tmp_path, net):
+    """В папке Диска лежат «видео.mp4» и «видео.mp4.part» (недокачанная загрузка браузера):
+    скачивание первого не удаляет и не затирает второй."""
+    net.storage[ALIVE] = b"photo"
+    cli = _Client({"disk:/v/видео.mp4.part": ALIVE, "disk:/v/видео.mp4": ALIVE})
+    for remote in ("disk:/v/видео.mp4.part", "disk:/v/видео.mp4"):
+        res = downloader._download_one(downloader.DownloadJob(remote, 5, None), cli, str(tmp_path))
+        assert res.status == "downloaded"
+    assert sorted(p.name for p in (tmp_path / "v").iterdir()) == ["видео.mp4", "видео.mp4.part"]
+
+
+def test_file_too_big_for_the_folder_fails_alone_without_download(tmp_path, net, monkeypatch):
+    import utils
+
+    monkeypatch.setattr(utils, "filesystem_type", lambda path: "FAT32")
+    cli = _Client({"disk:/big.mkv": ALIVE})
+    res = downloader._download_one(downloader.DownloadJob("disk:/big.mkv", 5 * 1024 ** 3, None), cli, str(tmp_path))
+    assert res.status == "failed" and res.error.startswith("local_file | ")
+    assert cli.calls == [] and net.hits == []  # гигабайты не качались впустую
+
+
+def test_files_that_cannot_be_written_do_not_stop_the_queue(tmp_path, net, monkeypatch):
+    """Длинное имя или FAT32 мешают одному файлу, а не диску: остальные качаются дальше."""
+    rows = [(f"disk:/f{i}.jpg", 5) for i in range(15)]
+    st = _state_with(tmp_path, rows)
+    monkeypatch.setattr(downloader, "_get_thread_client", lambda token: _Client({}))
+
+    def name_too_long(job, client, download_dir):
+        return downloader.DownloadResult(job, "failed", None, 0, "local_file | OSError: [Errno 36] File name too long", 0)
+
+    monkeypatch.setattr(downloader, "_download_one", name_too_long)
+    counters = downloader.download_all("t", st, str(tmp_path / "dl"), workers=1)
+    assert "aborted" not in counters and counters["failed"] == len(rows)
+    assert main._download_exit_code(counters) == EXIT_PARTIAL
+    st.close()

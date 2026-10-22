@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import html
 import http.server
 import json
 import os
@@ -41,6 +42,7 @@ import re
 import secrets
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -61,6 +63,8 @@ SCOPE = "oauth-donation-index"
 REDIRECT_PORT = 8765
 REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}/callback"
 TOKEN_ENV = "DONATIONALERTS_TOKEN"
+# Ключ и секрет приложения уходят только сюда — по https и без переходов на чужие адреса
+ALLOWED_HOSTS = frozenset({"www.donationalerts.com", "donationalerts.com"})
 
 ID_PREFIX = "da-"
 ANONYMOUS = "Аноним"
@@ -86,14 +90,19 @@ HOWTO = (
 # Ссылки и @упоминания вырезаем: список видят все пользователи программы, рекламе там не место
 _URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
 _DOMAIN_RE = re.compile(
-    r"(?i)\b[\w-]+(?:\.[\w-]+)*\.(?:ru|su|com|net|org|me|io|gg|tv|cc|ly|link|xyz|top|info|site|online|shop)"
+    r"(?i)\b[\w-]+(?:\.[\w-]+)*\.(?:ru|su|рф|com|net|org|me|io|gg|tv|cc|ly|link|xyz|top|info|site|online|shop"
+    r"|by|kz|ua|uz|pro|biz|app|dev|bet|live|store|club|space|fun|art|news|tech|vip|win|click|website|icu"
+    r"|fm|to|co|ai|uk|us|eu|de|pw|ws|cn|tk|games|moscow)"
     r"\b(?:/\S*)?"
 )
-_MENTION_RE = re.compile(r"(?<![\w.])@\w{2,}")
+# Упоминание — и сразу после слова («Подписывайтесь@канал»): адрес почты к этому времени уже
+# вырезан по домену
+_MENTION_RE = re.compile(r"@\w{2,}")
 
 
 class SyncError(Exception):
-    """Ошибка, после которой список обновлять нельзя. fatal — ключ не подходит (нужен человек)."""
+    """Ошибка, после которой список обновлять нельзя. fatal — нужен человек: ключ не подходит
+    или DonationAlerts уводит на чужой адрес."""
 
     def __init__(self, text: str, fatal: bool = False):
         super().__init__(text)
@@ -107,6 +116,10 @@ def clean_text(value, limit: int, keep_mentions: bool = False) -> str:
     """
     if not isinstance(value, str):
         return ""
+    # Широкие «＠» и буквы — обычными, невидимые знаки (нулевой ширины, разворот текста) — прочь:
+    # иначе «t\u200b.me/канал» проходил бы фильтр, а на экране выглядел бы ссылкой
+    value = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in unicodedata.normalize("NFKC", value)
+                    if unicodedata.category(ch) not in ("Cf", "Co", "Cs", "Cn"))
     text = _URL_RE.sub(" ", value)
     text = _DOMAIN_RE.sub(" ", text)
     text = _MENTION_RE.sub((lambda m: m.group(0)[1:]) if keep_mentions else " ", text)
@@ -339,10 +352,38 @@ def import_widget(html_path: Path, path: Path = SUPPORTERS_FILE, dry_run: bool =
     return changed
 
 
+def _check_url(url: str) -> str:
+    """Адрес DonationAlerts по https — или SyncError: ключ на чужой адрес не отправляем."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or (parts.hostname or "").lower() not in ALLOWED_HOSTS:
+        raise SyncError(f"{url} — не адрес DonationAlerts по https: ключ туда не отправляю", fatal=True)
+    return url
+
+
+class _DonationAlertsOnly(urllib.request.HTTPRedirectHandler):
+    """Переадресация только по https внутри DonationAlerts.
+
+    Обычный urllib переносит на новый адрес все заголовки, Authorization с ключом тоже, —
+    даже на чужой сайт и по http.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _check_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_DonationAlertsOnly)
+
+
+def _urlopen(req: urllib.request.Request):
+    _check_url(req.full_url)
+    return _OPENER.open(req, timeout=TIMEOUT_SEC)
+
+
 def _request(url: str, token: str):
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}", "Accept": "application/json", "User-Agent": USER_AGENT})
-    return urllib.request.urlopen(req, timeout=TIMEOUT_SEC)
+    return _urlopen(req)
 
 
 def fetch_donations(token: str, opener=None, pause: float = PAGE_PAUSE_SEC) -> list[dict]:
@@ -368,12 +409,19 @@ def fetch_donations(token: str, opener=None, pause: float = PAGE_PAUSE_SEC) -> l
         out.extend(x for x in data if isinstance(x, dict))
         meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
         last = meta.get("last_page")
-        if not data or not isinstance(last, int) or page >= last:
-            break
+        # Без номера последней страницы или с пустой страницей посреди списка он неполный, а
+        # список донатов переписывается целиком — пропали бы все донаты дальше этой страницы
+        if not isinstance(last, int) or isinstance(last, bool):
+            raise SyncError(f"DonationAlerts не сообщил, сколько всего страниц (страница {page})")
+        if page >= last:
+            return out
+        if not data:
+            raise SyncError(f"DonationAlerts прислал пустую страницу {page} из {last}")
         page += 1
         if pause:
             time.sleep(pause)
-    return out
+    raise SyncError(f"Донатов больше, чем {MAX_PAGES} страниц: поднимите MAX_PAGES в tools/sync_supporters.py",
+                    fatal=True)
 
 
 def load_current(path: Path = SUPPORTERS_FILE) -> dict:
@@ -399,6 +447,11 @@ def sync(token: str, path: Path = SUPPORTERS_FILE, dry_run: bool = False, opener
     except ValueError as e:
         raise SyncError(f"{path.name} — не JSON ({e}): исправьте файл руками", fatal=True) from e
     donations = fetch_donations(token, opener=opener, pause=pause)
+    had = any(str(x.get("id", "")).startswith(ID_PREFIX) for x in current.get("supporters") or []
+              if isinstance(x, dict))
+    if not donations and had:
+        # Сбой DonationAlerts стёр бы из списка всех, кто поддержал проект: ждём следующего запуска
+        raise SyncError("DonationAlerts вернул пустой список донатов — список не трогаю")
     new = merge(current, donations, today=today)
     text = dump(new)
     try:
@@ -439,7 +492,7 @@ def get_token() -> int:
                 text = "Готово. Вернитесь в окно терминала — ключ уже там."
             else:
                 got["error"] = query.get("error", ["нет кода авторизации"])[0]
-                text = "Не получилось: " + got["error"]
+                text = "Не получилось: " + html.escape(got["error"])
             body = f"<meta charset='utf-8'><p style='font:18px sans-serif;margin:40px'>{text}</p>".encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -469,9 +522,9 @@ def get_token() -> int:
     req = urllib.request.Request(TOKEN_URL, data=form, headers={
         "Content-Type": "application/x-www-form-urlencoded", "User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
+        with _urlopen(req) as resp:
             answer = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (SyncError, urllib.error.URLError, OSError, ValueError) as e:
         print(f"DonationAlerts не выдал ключ: {e}")
         return 1
     token = answer.get("access_token") if isinstance(answer, dict) else None
