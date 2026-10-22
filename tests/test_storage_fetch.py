@@ -121,3 +121,89 @@ def test_dead_hosts_expire(monkeypatch):
     dead.mark("s3klg.storage.yandex.net")
     dead.clear()
     assert dead.count() == 0
+
+
+class _BrokenFile:
+    """Файл, запись в который падает с заданным OSError."""
+
+    def __init__(self, err):
+        self.err = err
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def write(self, data):
+        raise self.err
+
+
+@pytest.mark.parametrize("err,kind", [
+    (OSError(27, "File too large"), "local_file"),     # FAT32 и файл больше 4 ГБ (Linux, macOS)
+    (OSError(36, "File name too long"), "local_file"),
+    (OSError(28, "No space left on device"), "local_disk"),
+    (OSError(5, "Input/output error"), "local_disk"),  # флешка отвалилась
+    (OSError("без errno"), "local_disk"),
+])
+def test_write_errors_are_local_never_yandex(tmp_path, monkeypatch, err, kind):
+    """Ошибка записи — не «обрыв связи»: иначе файл качался бы снова и ждал Яндекса вечно."""
+    import builtins
+
+    real_open = builtins.open
+    monkeypatch.setattr(builtins, "open",
+                        lambda path, mode="r", *a, **k: _BrokenFile(err) if "w" in mode else real_open(path, mode, *a, **k))
+    *_, failure = _fetch(tmp_path, {"s1klg.storage.yandex.net": _Stream(b"data")}, expected_size=4)
+    assert failure.kind == kind
+
+
+def test_network_errors_inside_the_body_stay_network(tmp_path):
+    class Chunked(_Stream):
+        def iter_content(self, chunk_size):
+            yield b"da"
+            raise requests.exceptions.ChunkedEncodingError("Connection broken")
+
+    *_, failure = _fetch(tmp_path, {"s1klg.storage.yandex.net": Chunked(b"data")}, expected_size=4)
+    assert failure.kind == "connection"
+
+
+def test_signed_links_never_reach_the_error_text(tmp_path):
+    """Подписанная ссылка на файл — сама по себе доступ к нему: в журнал и отчёт она не попадает."""
+    link = "https://s1klg.storage.yandex.net/rdisk/abc123?uid=42&rtoken=SECRET&s=sig"
+    err = requests.exceptions.HTTPError(f"403 Client Error: Forbidden for url: {link}",
+                                        response=_Stream(status=403))
+    cut = requests.exceptions.ConnectionError(
+        "HTTPSConnectionPool(host='s1klg.storage.yandex.net', port=443): Max retries exceeded "
+        "with url: /rdisk/abc123?uid=42&rtoken=SECRET (Caused by ProtocolError())")
+
+    class Raises(_Stream):
+        def __init__(self, exc):
+            super().__init__(b"x")
+            self.exc = exc
+
+        def raise_for_status(self):
+            raise self.exc
+
+        def iter_content(self, chunk_size):
+            raise self.exc
+
+    for exc in (err, cut):
+        *_, failure = _fetch(tmp_path, {"s1klg.storage.yandex.net": Raises(exc)}, expected_size=1)
+        text = str(failure)
+        assert "SECRET" not in text and "uid=42" not in text and "abc123" not in text
+        assert "s1klg.storage.yandex.net" in text  # сервер для диагностики остаётся
+
+
+def test_headers_go_only_to_the_first_request(tmp_path):
+    seen = {}
+
+    class Session(_Session):
+        def get(self, url, stream=False, timeout=None, allow_redirects=True, headers=None):
+            seen[url.split("/")[2]] = headers
+            return super().get(url, stream, timeout, allow_redirects)
+
+    s = Session({"s1klg.storage.yandex.net": _Stream(b"data")})
+    *_, failure = sf.fetch_to_file(s, "https://dl/s1klg.storage.yandex.net/x", str(tmp_path / "f"),
+                                   expected_size=4, headers={"Authorization": "OAuth t"})
+    assert failure is None
+    assert seen == {"dl": {"Authorization": "OAuth t"}, "s1klg.storage.yandex.net": None}

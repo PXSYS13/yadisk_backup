@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import unicodedata
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,12 +22,14 @@ from pathlib import Path
 # Слеши тоже сюда: имя файла с '\' или '/' на Яндекс.Диске легально, а локально
 # превратилось бы в разделитель пути и увело файл мимо DOWNLOAD_DIR.
 _WIN_FORBIDDEN = '<>:"|?*\\/'
-# Зарезервированные имена Windows
+# Зарезервированные имена Windows (и с любым расширением: «NUL.txt» — тоже устройство)
 _WIN_RESERVED = {
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+    *(f"COM{i}" for i in "0123456789¹²³"),
+    *(f"LPT{i}" for i in "0123456789¹²³"),
 }
+# Имя файла или папки длиннее не создать: 255 байт UTF-8 (ext4, APFS) или 255 знаков UTF-16 (NTFS)
+MAX_NAME_LEN = 255
 
 IS_WINDOWS = sys.platform.startswith("win")
 # Windows и macOS (APFS по умолчанию) не различают регистр: Docs/a.txt и docs/a.txt — один файл
@@ -396,11 +399,39 @@ def sanitize_component(name: str) -> str:
     out = "".join(cleaned).rstrip(" .")  # Windows не любит хвостовые пробелы и точки
     if not out or out in (".", ".."):
         out = "_"
-    # Зарезервированные имена
-    stem = out.split(".", 1)[0].upper()
+    # Зарезервированные имена: «CON .txt» Windows тоже считает устройством
+    stem = out.split(".", 1)[0].rstrip(" ").upper()
     if stem in _WIN_RESERVED:
         out = "_" + out
+    if name_len(out) > MAX_NAME_LEN:
+        # Такое имя не создать ни на одной системе — укорачиваем. Хеш полного имени: два длинных
+        # имени с общим началом не сольются в одно. Запас — под хвосты, которые допишет программа
+        out = name_with_tag(out, "_" + _short_hash(name), MAX_NAME_LEN - 16)
     return out
+
+
+def name_len(name: str) -> int:
+    """Длина имени по меркам файловой системы: знаки UTF-16 на Windows, байты UTF-8 — на остальных."""
+    if IS_WINDOWS:
+        return len(name.encode("utf-16-le", "surrogatepass")) // 2
+    return len(name.encode("utf-8", "surrogateescape"))
+
+
+def name_with_tag(name: str, tag: str = "", limit: int = MAX_NAME_LEN) -> str:
+    """Имя с хвостом tag перед расширением: «отчёт.pdf» + «_a1b2c3» → «отчёт_a1b2c3.pdf».
+
+    Не длиннее limit (name_len): лишнее срезается с конца основной части имени, тип файла остаётся.
+    """
+    stem, ext = os.path.splitext(name)
+    out = f"{stem}{tag}{ext}"
+    if name_len(out) <= limit:
+        return out
+    if name_len(ext) > 16:  # «расширение» в 17+ знаков — часть имени, а не тип файла
+        stem, ext = name, ""
+    room = limit - name_len(tag + ext)
+    while stem and name_len(stem) > room:
+        stem = stem[:-1]
+    return f"{stem.rstrip(' .')}{tag}{ext}"
 
 
 def sanitize_remote_path(remote_path: str) -> str:
@@ -466,16 +497,19 @@ def _strip_long_prefix(path: str) -> str:
     return path
 
 
-def _short_hash(remote_path: str) -> str:
-    return hashlib.sha256(remote_path.encode("utf-8", errors="replace")).hexdigest()[:6]
+def _short_hash(remote_path: str, n: int = 6) -> str:
+    return hashlib.sha256(remote_path.encode("utf-8", errors="replace")).hexdigest()[:n]
 
 
 def path_key(path: str) -> str:
     r"""Ключ занятого пути: пути, которые ФС считает одним файлом, дают один ключ.
 
-    На Windows 'D:/YAD-bak\a_b\x.txt' и 'D:\YAD-bak\A_B\x.txt' — один и тот же файл.
+    На Windows 'D:/YAD-bak\a_b\x.txt' и 'D:\YAD-bak\A_B\x.txt' — один и тот же файл. На macOS
+    к тому же «ё» одной буквой и «е» с двумя точками (NFC и NFD) — одно имя.
     """
     p = os.path.normpath(path)
+    if sys.platform == "darwin":
+        p = unicodedata.normalize("NFC", p)
     return p.lower() if CASE_INSENSITIVE_PATHS else p
 
 
@@ -502,23 +536,31 @@ def resolve_local_path(
     else:
         changed = raw_parts[-1:] != clean_parts[-1:]
     if clean_parts and changed:
-        stem, ext = os.path.splitext(clean_parts[-1])
-        clean_parts[-1] = f"{stem}_{_short_hash(remote_path)}{ext}"
+        clean_parts[-1] = name_with_tag(clean_parts[-1], f"_{_short_hash(remote_path)}")
 
     rel = "/".join(clean_parts)
     local = os.path.join(download_dir, rel.replace("/", os.sep))
 
     if existing_paths is not None:
         if path_key(local) in existing_paths:
-            stem, ext = os.path.splitext(local)
+            folder, name = os.path.split(local)
             h = _short_hash(remote_path)
-            local, n = f"{stem}_{h}{ext}", 1
+            local, n = os.path.join(folder, name_with_tag(name, f"_{h}")), 1
             while path_key(local) in existing_paths:  # занято и имя с хешем — почти невозможно
                 n += 1
-                local = f"{stem}_{h}_{n}{ext}"
+                local = os.path.join(folder, name_with_tag(name, f"_{h}_{n}"))
         existing_paths.add(path_key(local))
 
     return local
+
+
+def part_path_for(local_path: str) -> str:
+    """Где качать файл до проверки: в той же папке, под именем, которого не бывает у файлов Диска.
+
+    «имя.part» совпадало с настоящим файлом той же папки (недокачанная загрузка браузера
+    «видео.mp4.part») и затирало его, а к длинному имени хвост «.part» добавлял лишние знаки.
+    """
+    return os.path.join(os.path.dirname(local_path), f".yadisk-{_short_hash(local_path, 16)}.part")
 
 
 def safe_int(val: object, default: int = 4, min_val: int = 1, max_val: int = 16) -> int:
@@ -640,6 +682,8 @@ def avoid_case_collision(local_path: str) -> str:
     """
     if not IS_WINDOWS:
         return local_path
+    if not os.path.lexists(to_long_path(local_path)):
+        return local_path  # такого имени нет ни в каком регистре: папку можно не читать
     parent = os.path.dirname(local_path)
     name = os.path.basename(local_path)
     if not parent or not os.path.isdir(parent):
@@ -735,6 +779,19 @@ def local_copy_matches(local_path: str, size: int | None, md5: str | None) -> bo
         return False
 
 
+_URL_TAIL_RE = re.compile(r"(https?://[^/\s'\"?#]+)[/?#][^\s'\")]*")
+_URL_PATH_RE = re.compile(r"(\burl: )/[^\s'\")]*")
+
+
+def scrub_urls(text: object) -> str:
+    """Текст без путей и параметров ссылок: «…for url: https://downloader.disk.yandex.ru/…».
+
+    Подписанная ссылка на файл Яндекса — сама по себе доступ к нему (и uid владельца): в журналы,
+    базу и отчёт для поддержки она попадать не должна. Сервер в тексте остаётся.
+    """
+    return _URL_PATH_RE.sub(r"\1/…", _URL_TAIL_RE.sub(r"\1/…", str(text)))
+
+
 def remove_quiet(path: str) -> None:
     """Удаляет файл, если он есть. Ошибки глотает — это уборка, не бизнес-логика."""
     try:
@@ -743,21 +800,36 @@ def remove_quiet(path: str) -> None:
         pass
 
 
-# Ошибки локального диска: кончилось место, нет прав, путь занят файлом, диск отключён.
-# Сколько ни повторяй запрос к Яндексу — они не пройдут.
+# Ошибки записи, в которых виноват сам файл, а не диск: имя длиннее, чем разрешает файловая
+# система, недопустимое для неё имя (Windows отвечает EINVAL) или файл больше 4 ГБ для FAT32.
+# Такой файл не запишется в эту папку никогда, а остальные пишутся — качать дальше
+LOCAL_FILE_ERRNOS = frozenset({errno.ENAMETOOLONG, errno.EINVAL, errno.EFBIG})
+# Ошибки локального диска: кончилось место или квота, нет прав, путь занят файлом, диск
+# отключён или сбоит. Сколько ни повторяй запрос к Яндексу — они не пройдут.
 LOCAL_DISK_ERRNOS = frozenset({
     errno.ENOSPC, errno.EACCES, errno.EPERM, errno.EROFS, errno.EEXIST,
-    errno.EISDIR, errno.ENOTDIR, errno.ENAMETOOLONG, errno.ENOENT,
-})
+    errno.EISDIR, errno.ENOTDIR, errno.ENOENT, errno.EIO,
+    *(e for e in (getattr(errno, "EDQUOT", None),) if e is not None),
+}) | LOCAL_FILE_ERRNOS
 
 
 def is_local_disk_error(exc: BaseException) -> bool:
-    """OSError локальной файловой системы (не сеть): место, права, отсутствующий диск."""
+    """OSError локальной файловой системы (не сеть): место, права, отсутствующий диск, имя файла."""
     return (
         isinstance(exc, OSError)
         and not isinstance(exc, (ConnectionError, TimeoutError))
         and getattr(exc, "errno", None) in LOCAL_DISK_ERRNOS
     )
+
+
+def is_local_file_error(exc: BaseException) -> bool:
+    """Локальная ошибка из-за самого файла (LOCAL_FILE_ERRNOS): диск тут ни при чём."""
+    return is_local_disk_error(exc) and getattr(exc, "errno", None) in LOCAL_FILE_ERRNOS
+
+
+def local_error_kind(exc: BaseException) -> str:
+    """Вид сбоя записи для строки «вид | текст»: local_file — виноват файл, local_disk — диск."""
+    return "local_file" if is_local_file_error(exc) else "local_disk"
 
 
 def is_sqlite_disk_error(exc: BaseException) -> bool:
@@ -779,8 +851,26 @@ def is_sqlite_disk_error(exc: BaseException) -> bool:
 _FAT_FILESYSTEMS = frozenset({"fat", "fat12", "fat16", "fat32", "vfat", "msdos"})
 
 
+# Самый большой файл, который принимает FAT32
+FAT_MAX_FILE_BYTES = 4 * 1024 ** 3 - 1
+
+
 def is_fat_filesystem(fs: str | None) -> bool:
     return bool(fs) and fs.strip().lower() in _FAT_FILESYSTEMS
+
+
+def too_big_for_folder(folder: str, size: int | None) -> str | None:
+    """Почему файл такого размера не записать в эту папку (FAT32 и файл больше 4 ГБ), иначе None.
+
+    Проверка до скачивания: иначе гигабайты качались бы впустую, а запись падала бы в самом конце.
+    """
+    if not size or size <= FAT_MAX_FILE_BYTES:
+        return None
+    fs = filesystem_type(folder)
+    if not is_fat_filesystem(fs):
+        return None
+    return (f"файл {human_bytes(size)} больше 4 ГБ, а папка для файлов — на диске {fs}: такой файл "
+            f"туда не записать. Выберите в настройках папку на диске NTFS или exFAT")
 
 
 def fs_type_from_mounts(path: str, mounts: str) -> str | None:

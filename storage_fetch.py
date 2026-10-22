@@ -20,7 +20,7 @@ from urllib.parse import urljoin, urlsplit
 
 import requests
 
-from utils import is_local_disk_error
+from utils import local_error_kind, scrub_urls
 
 # Живой сервер хранения отвечает меньше чем за секунду, молчащий — не отвечает никогда
 STORAGE_TIMEOUT_SEC = 10
@@ -54,7 +54,8 @@ def response_trace(r) -> str:
 class FetchFailure:
     """Почему архив или файл не скачался (или архив не распаковался).
 
-    kind: local_disk | not_zip | bad_zip | bad_file | server_50x | rate_limit | refused |
+    kind: local_disk | local_file (этот файл не записать в папку: длинное имя, FAT32) |
+          not_zip | bad_zip | bad_file | server_50x | rate_limit | refused |
           timeout | connection | storage_down (сервер хранения не ответил) |
           storage_skip (он же уже известен как недоступный). str() даёт
           'категория | текст' для логов и Web UI.
@@ -70,6 +71,11 @@ class FetchFailure:
     @property
     def is_local(self) -> bool:
         return self.kind == "local_disk"
+
+    @property
+    def is_local_file(self) -> bool:
+        """Не записать именно этот файл (имя, размер для FAT32): диск в порядке, качать дальше."""
+        return self.kind == "local_file"
 
     @property
     def is_server_issue(self) -> bool:
@@ -129,18 +135,21 @@ def fetch_to_file(
     storage_timeout: float = STORAGE_TIMEOUT_SEC,
     reject_pages: bool = True,
     on_progress: Callable[[int, int], None] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, str, FetchFailure | None]:
     """Скачивает файл по ссылке Яндекса в tmp_path. Возвращает (байт, сервер, сбой | None).
 
     expected_size: None — размер неизвестен (пустой ответ считается сбоем), 0 — файл
     действительно пустой. При сбое tmp_path может остаться — убирает вызывающий.
-    on_progress(written, total) вызывается на каждом куске.
+    on_progress(written, total) вызывается на каждом куске. headers — только для первого
+    запроса: ключ доступа не уходит на сервер хранения, куда ведёт редирект.
     """
     host = ""
     written = 0
     trace = ""
     try:
-        r = session.get(url, stream=True, allow_redirects=False, timeout=LINK_TIMEOUT)
+        first = {"headers": headers} if headers else {}
+        r = session.get(url, stream=True, allow_redirects=False, timeout=LINK_TIMEOUT, **first)
         location = (getattr(r, "headers", None) or {}).get("Location")
         if r.status_code in _REDIRECT_CODES and location:
             r.close()
@@ -179,24 +188,31 @@ def fetch_to_file(
         resp = getattr(e, "response", None)
         code = getattr(resp, "status_code", None)
         trace = response_trace(resp) if resp is not None else ""
+        # В тексте исключения requests — подписанная ссылка на файл: её в журналы не пишем
         if code == 429:
-            return written, host, FetchFailure("rate_limit", f"HTTP 429 при скачивании файла: {e}{trace}", host)
+            return written, host, FetchFailure(
+                "rate_limit", f"HTTP 429 при скачивании файла: {scrub_urls(e)}{trace}", host)
         if code is not None and code >= 500:
-            return written, host, FetchFailure("server_50x", f"HTTP {code} при скачивании файла: {e}{trace}", host)
-        return written, host, FetchFailure("refused", f"HTTP {code} при скачивании файла: {e}{trace}", host)
+            return written, host, FetchFailure(
+                "server_50x", f"HTTP {code} при скачивании файла: {scrub_urls(e)}{trace}", host)
+        return written, host, FetchFailure("refused", f"HTTP {code} при скачивании файла: {scrub_urls(e)}{trace}", host)
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
         if host and written == 0:
             # Сервер хранения не отдал ни байта — он недоступен, файл не виноват
             return 0, host, FetchFailure(
                 "storage_down", f"сервер хранения {host} не отвечает ({type(e).__name__})", host)
         if isinstance(e, requests.exceptions.Timeout):
-            return written, host, FetchFailure("timeout", f"таймаут при скачивании файла: {e}", host)
-        return written, host, FetchFailure("connection", f"обрыв соединения при скачивании файла: {e}", host)
+            return written, host, FetchFailure("timeout", f"таймаут при скачивании файла: {scrub_urls(e)}", host)
+        return written, host, FetchFailure(
+            "connection", f"обрыв соединения при скачивании файла: {scrub_urls(e)}", host)
     except OSError as e:
-        kind = "local_disk" if is_local_disk_error(e) else "connection"
-        return written, host, FetchFailure(kind, f"ошибка записи файла: {e}", host)
+        if isinstance(e, requests.RequestException):  # сетевые сбои requests — тоже OSError
+            return written, host, FetchFailure("connection", f"обрыв при скачивании файла: {scrub_urls(e)}", host)
+        # Остальное — от записи файла: место, права, отключённый диск, длинное имя, FAT32.
+        # Повтор скачивания тут не поможет, и Яндекс ни при чём
+        return written, host, FetchFailure(local_error_kind(e), f"ошибка записи файла: {e}", host)
     except Exception as e:  # noqa: BLE001 — любой сбой должен стать FetchFailure, а не исключением
-        return written, host, FetchFailure("connection", f"сбой скачивания файла: {e}", host)
+        return written, host, FetchFailure("connection", f"сбой скачивания файла: {scrub_urls(e)}", host)
 
     if content_len and written != content_len:
         return written, host, FetchFailure(
@@ -227,22 +243,22 @@ def preview_failure_text(failure: FetchFailure) -> tuple[bool, str]:
     return False, f"не скачалось — {failure.text}"
 
 
-def fetch_preview(session, url: str, dst: str) -> FetchFailure | None:
+def fetch_preview(session, url: str, dst: str, headers: dict[str, str] | None = None) -> FetchFailure | None:
     """Скачивает превью (JPEG) в dst атомарно. None — успех.
 
     Превью отдаёт отдельный сервис Яндекса: оно доступно и тогда, когда сервер
-    хранения оригинала молчит.
+    хранения оригинала молчит. headers — для первого запроса (ключ доступа к Диску).
     """
     tmp = dst + ".part"
     try:
         os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
-        _written, _host, failure = fetch_to_file(session, url, tmp, expected_size=None, reject_pages=True)
+        _written, _host, failure = fetch_to_file(session, url, tmp, expected_size=None, reject_pages=True,
+                                                 headers=headers)
         if failure is None:
             os.replace(tmp, dst)
         return failure
     except OSError as e:
-        kind = "local_disk" if is_local_disk_error(e) else "connection"
-        return FetchFailure(kind, f"ошибка записи превью: {e}")
+        return FetchFailure(local_error_kind(e), f"ошибка записи превью: {e}")
     finally:
         try:
             os.remove(tmp)
