@@ -187,14 +187,25 @@ def test_clean_stem():
     assert uw._clean_stem("photo.jpg") == ("photo", ".jpg")
 
 
-def test_non_colliding_path(tmp_path):
+def test_claim_free_path_takes_the_name_at_once(tmp_path):
+    """Имя занимается сразу (O_EXCL): второй воркер с тем же именем получит следующее."""
     orig = tmp_path / "test.jpg"
     orig.write_text("first", encoding="utf-8")
-    cand1 = uw._non_colliding_path(str(orig))
-    assert cand1.endswith("test_1.jpg")
-    (tmp_path / "test_1.jpg").write_text("second", encoding="utf-8")
-    cand2 = uw._non_colliding_path(str(orig))
+    cand1 = uw._claim_free_path(str(orig))
+    assert cand1.endswith("test_1.jpg") and os.path.exists(cand1)
+    cand2 = uw._claim_free_path(str(orig))
     assert cand2.endswith("test_2.jpg")
+    assert orig.read_text(encoding="utf-8") == "first"
+
+
+def test_place_file_never_overwrites_another_photo(tmp_path):
+    (tmp_path / "IMG_0001.JPG").write_bytes(b"first camera")
+    tmp = tmp_path / "w1.part"
+    tmp.write_bytes(b"second camera")
+    final = uw._place_file(str(tmp), str(tmp_path / "IMG_0001.JPG"))
+    assert final.endswith("IMG_0001_1.JPG") and not tmp.exists()
+    assert (tmp_path / "IMG_0001.JPG").read_bytes() == b"first camera"
+    assert (tmp_path / "IMG_0001_1.JPG").read_bytes() == b"second camera"
 
 
 # ── БД: попытки и переход в failed ──────────────────────────────────────────
@@ -887,7 +898,8 @@ def test_get_file_url_success_normalizes_protocol_relative_url():
 
 @pytest.mark.parametrize(
     "status,kind",
-    [(500, "server_50x"), (504, "server_50x"), (429, "rate_limit"), (403, "auth_expired"), (404, "prepare_failed")],
+    [(500, "server_50x"), (504, "server_50x"), (429, "rate_limit"), (403, "auth_expired"), (404, "gone"),
+     (400, "prepare_failed")],
 )
 def test_get_file_url_http_errors_are_typed(status, kind):
     url, err = uw.get_file_url(_url_session(_UrlResp(status, text="oops")), "sk", "1", "/p")
@@ -1223,3 +1235,122 @@ def test_persistent_500_on_file_defers_instead_of_burning(db, quiet_worker, dirs
     assert status_of(db, "2") == ("pending", 0)
     assert w.session.hits.count(alive) == 4  # по одному повтору на файл
     assert w._fail_streak == 0  # не «отказ Яндекса в целом»
+
+
+# ── файлы, которые не записать, удалённые файлы, тёзки ──────────────────────
+
+
+def test_write_failures_end_the_worker_even_when_space_looks_free(db, quiet_worker, dirs, monkeypatch):
+    """Место есть, а файл не пишется (нет прав, диск отключён): серия не обнуляется перед каждой
+    пачкой — воркер выходит с кодом 4, а не перекачивает файл вечно."""
+    monkeypatch.setattr(uw, "check_disk_space", lambda d, n: (True, 10 ** 12))
+    w = quiet_worker
+    w.session = _DirectSession({"1": b"a" * 10, "2": b"b" * 20})
+    denied = uw.FetchFailure("local_disk", "ошибка записи файла: [Errno 13] Permission denied")
+    monkeypatch.setattr(uw, "download_file", lambda *a, **k: ("", denied))
+    with pytest.raises(SystemExit) as e:
+        for _ in range(uw.DISK_FULL_GIVE_UP + 1):
+            batch = uw.take_batch(1, size=1)
+            w._process(batch)
+    assert e.value.code == uw.EXIT_DISK_FULL
+    assert status_of(db, "1")[0] == "pending" and status_of(db, "2")[0] == "pending"
+
+
+def test_file_that_cannot_be_written_fails_alone(db, quiet_worker, dirs, monkeypatch):
+    """Длинное имя или FAT32 — вина файла, не диска: он сразу в ошибках, остальные качаются."""
+    w = quiet_worker
+    w.session = _DirectSession({"1": b"a" * 10, "2": b"b" * 20})
+    real = uw.download_file
+
+    def fake(s, url, dst, *a, **k):
+        if dst.endswith("a.jpg"):
+            return "", uw.FetchFailure("local_file", "ошибка записи файла: [Errno 36] File name too long")
+        return real(s, url, dst, *a, **k)
+
+    monkeypatch.setattr(uw, "download_file", fake)
+    w._process(uw.take_batch(1, size=10))
+    assert status_of(db, "1") == ("failed", uw.MAX_ATTEMPTS)
+    assert status_of(db, "2") == ("downloaded", 0)
+    assert w._disk_full_streak == 0
+
+
+def test_too_big_for_fat32_is_not_downloaded(db, quiet_worker, dirs, monkeypatch):
+    con = sqlite3.connect(db)
+    con.execute("UPDATE unlim_files SET size=? WHERE file_id='1'", (5 * 1024 ** 3,))
+    con.commit()
+    con.close()
+    monkeypatch.setattr(uw, "too_big_for_folder", lambda folder, size: "FAT32" if size > 4 * 1024 ** 3 else None)
+    w = quiet_worker
+    w.session = _DirectSession({"2": b"b" * 20})
+    while batch := uw.take_batch(1, size=10):  # тяжёлый файл берётся отдельной пачкой
+        w._process(batch)
+    assert status_of(db, "1")[0] == "failed" and status_of(db, "2")[0] == "downloaded"
+    assert w.session.asked == ["2"]  # за ссылкой на большой файл не ходили
+
+
+def test_files_deleted_from_disk_do_not_look_like_an_outage(db, quiet_worker, dirs):
+    """404 на ссылку — файла больше нет. Пять таких подряд — не «Яндекс отказывает»: попытки
+    сгорают, и через MAX_ATTEMPTS файлы в ошибках, а не держат очередь часами."""
+    con = sqlite3.connect(db)
+    con.executemany("INSERT INTO unlim_files (file_id, name, size) VALUES (?, ?, 5)",
+                    [(str(i), f"gone{i}.jpg") for i in range(3, 10)])
+    con.commit()
+    con.close()
+    w = quiet_worker
+    w.session = _DirectSession({}, broken={str(i): 404 for i in range(1, 10)})
+    for _ in range(9 * uw.MAX_ATTEMPTS):
+        batch = uw.take_batch(1, size=1)
+        if not batch:
+            break
+        w._process(batch)
+    assert {status_of(db, str(i)) for i in range(1, 10)} == {("failed", uw.MAX_ATTEMPTS)}
+    assert w._fail_streak == 0
+
+
+def test_same_name_and_size_but_other_photo_is_downloaded(db, quiet_worker, dirs):
+    """«a.jpg» того же размера в папке — другое фото (MD5 другой): качаем рядом, а не считаем скачанным."""
+    import hashlib
+
+    dirs.mkdir()
+    (dirs / "a.jpg").write_bytes(b"x" * 10)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE unlim_files SET md5=? WHERE file_id='1'", (hashlib.md5(b"a" * 10).hexdigest(),))
+    con.commit()
+    con.close()
+    w = quiet_worker
+    w.session = _DirectSession({"1": b"a" * 10, "2": b"b" * 20})
+    w._process(uw.take_batch(1, size=10))
+    assert status_of(db, "1")[0] == "downloaded"
+    assert (dirs / "a.jpg").read_bytes() == b"x" * 10 and (dirs / "a_1.jpg").read_bytes() == b"a" * 10
+
+
+def test_dead_cookies_after_a_failure_stop_the_worker(db, quiet_worker, dirs, monkeypatch):
+    """После сбоя sk обновляется; вход не прошёл — это протухшие куки (код 2), а не отказ Яндекса."""
+    (item,) = uw.take_batch(1, size=1)
+
+    def expired(s):
+        raise uw.AuthExpiredError("redirect to passport")
+
+    monkeypatch.setattr(uw, "get_sk_uid", expired)
+    with pytest.raises(SystemExit) as e:
+        quiet_worker._on_prepare_failed([item], uw.PrepareError("server_50x", "HTTP 503", 503))
+    assert e.value.code == uw.EXIT_AUTH
+    assert status_of(db, item["file_id"]) == ("pending", 0)
+
+
+@pytest.mark.parametrize("header,want", [("30", 30.0), ("86400", float(uw.RATE_LIMIT_MAX_PAUSE_SEC)),
+                                         ("inf", None), ("nan", None), ("-5", None), ("soon", None)])
+def test_retry_after_is_capped(header, want):
+    """Пауза общая для всех воркеров и запусков: «Retry-After: 86400» не должен вставать на сутки."""
+    resp = type("R", (), {"headers": {"Retry-After": header}})()
+    assert uw._retry_after_sec(resp) == want
+
+
+def test_broken_shared_cooldown_does_not_stall_forever(db):
+    uw.ensure_attempts_column()
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE IF NOT EXISTS unlim_meta (key TEXT PRIMARY KEY, value TEXT)")
+    con.execute("INSERT INTO unlim_meta VALUES ('cooldown_until', 'inf')")
+    con.commit()
+    con.close()
+    assert uw.shared_cooldown_remaining() == 0.0

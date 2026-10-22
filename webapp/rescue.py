@@ -51,6 +51,7 @@ from webapp.queue_db import (
     filter_to_folders,
     release_orphaned_unlim,
     reset_transient_disk_failures,
+    unlim_has_rows_outside,
     unskip_category_marker,
     unskip_markers,
 )
@@ -1057,7 +1058,8 @@ class Rescue:
         if not listing_stale(rec, time.time()):
             self._log(f"📋 Безлимит: список фото и видео собран {when_text(rec['at'])} — заново не собираю")
             self._event("unlim", "info", f"Список фото и видео собран {when_text(rec['at'])} — заново не собираю")
-        elif not explicit and db_has_pending(paths.UNLIM_DB_FILE, "unlim_files"):
+        elif (not explicit and db_has_pending(paths.UNLIM_DB_FILE, "unlim_files")
+              and not unlim_has_rows_outside(paths.UNLIM_DB_FILE)):
             self._list_after(b, rec)
         else:
             code = self._unlim_list(b)
