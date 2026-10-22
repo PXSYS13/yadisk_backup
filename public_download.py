@@ -1,4 +1,4 @@
-"""Скачивание папки или файла по публичной ссылке Яндекс Диска (disk.yandex.ru/d/…).
+"""Скачивание папки, файла или альбома по публичной ссылке Яндекс Диска.
 
 Ключ доступа не нужен: публичный API отдаёт список файлов и ссылки на них без входа.
 Файлы качаются по одному — «Скачать всё» (ZIP) Яндекс отключил в октябре 2026, — с
@@ -17,8 +17,10 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -29,7 +31,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import requests
 from dotenv import load_dotenv
@@ -165,7 +167,9 @@ def normalize_public_url(text: str) -> tuple[str, str]:
         raise ValueError("Это адрес вашего собственного Диска, а не публичная ссылка. "
                          "Свой Диск программа качает на «Главной»")
     if kind == "a":
-        raise ValueError("Это ссылка на альбом — альбомы программа пока не скачивает. Попросите ссылку на папку")
+        if len(parts) != 2 or not re.fullmatch(r"[\w-]+", parts[1], flags=re.ASCII):
+            raise ValueError("Вставьте ссылку на весь альбом: disk.yandex.ru/a/КЛЮЧ")
+        return f"https://disk.yandex.ru/a/{parts[1]}", "/"
     if kind == "public" and parse_qs(u.query).get("hash"):
         # Старый вид ссылки: ключ — весь адрес
         return f"https://{host}/public/?hash={parse_qs(u.query)['hash'][0]}", "/"
@@ -231,16 +235,21 @@ class PublicApi:
     def __init__(self, session=None, timeout=API_TIMEOUT):
         self.session = session or _new_session()
         self.timeout = timeout
+        self._album = None
 
-    def _get(self, url: str, params: dict) -> dict:
+    def _request(self, method: str, url: str, **kwargs):
         try:
-            resp = self.session.get(url, params=params, timeout=self.timeout)
+            resp = getattr(self.session, method)(url, timeout=self.timeout, **kwargs)
         except requests.exceptions.Timeout:
             raise LinkError("timeout", "Яндекс отвечал слишком долго") from None
         except requests.exceptions.RequestException:
             raise LinkError("network", "Нет связи с Яндексом — проверьте интернет") from None
         if resp.status_code != 200:
             raise _error_for(resp)
+        return resp
+
+    @staticmethod
+    def _json(resp) -> dict:
         try:
             data = resp.json()
         except ValueError:
@@ -249,8 +258,18 @@ class PublicApi:
             raise LinkError("server_50x", "Яндекс ответил непонятно")
         return data
 
+    def _get(self, url: str, params: dict) -> dict:
+        return self._json(self._request("get", url, params=params))
+
+    def _album_api(self):
+        if self._album is None:
+            self._album = PublicAlbumApi(self.session, self.timeout)
+        return self._album
+
     def meta(self, public_url: str, path: str = "/", limit: int | None = None, offset: int = 0,
              preview_size: str | None = None) -> dict:
+        if urlsplit(public_url).path.startswith("/a/"):
+            return self._album_api().meta(public_url, path, limit, offset, preview_size)
         params = {"public_key": public_url, "limit": LIST_LIMIT if limit is None else limit, "offset": offset}
         if path and path != "/":
             params["path"] = path
@@ -259,12 +278,155 @@ class PublicApi:
         return self._get(API, params)
 
     def download_href(self, public_url: str, path: str = "/") -> str:
+        if urlsplit(public_url).path.startswith("/a/"):
+            return self._album_api().download_href(public_url, path)
         params = {"public_key": public_url}
         if path and path != "/":
             params["path"] = path
         href = self._get(API + "/download", params).get("href")
         if not href:
             raise LinkError("server_50x", "Яндекс не выдал ссылку на файл")
+        return href
+
+
+class PublicAlbumApi(PublicApi):
+    """Адаптер веб-клиента альбомов: анонимная сессия, курсор и свежие ссылки.
+
+    REST API папок не знает альбомы. В SQLite хранятся только имя, размер, MD5 и
+    ID элемента в пути; cookies, sk и временные ссылки остаются в памяти потока.
+    """
+
+    def __init__(self, session=None, timeout=API_TIMEOUT):
+        super().__init__(session, timeout)
+        self._states: dict[str, dict] = {}
+
+    def _store(self, url: str) -> dict:
+        resp = self._request("get", url)
+        resp.encoding = "utf-8"
+        match = re.search(r'''<script\b(?=[^>]*\bid=["']store-prefetch["'])[^>]*>(.*?)</script>''',
+                          resp.text, flags=re.S | re.I)
+        if not match:
+            raise LinkError("refused", "Яндекс не отдал данные альбома: возможна проверка в браузере или изменение сайта")
+        try:
+            store = json.loads(match.group(1))
+            if not isinstance(store, dict) or not isinstance(store.get("resources"), dict):
+                raise ValueError
+        except (TypeError, ValueError):
+            raise LinkError("server_50x", "Яндекс отдал непонятные данные альбома") from None
+        return store
+
+    def _state(self, public_url: str, refresh: bool = False) -> dict:
+        state = self._states.get(public_url)
+        if state is not None and not refresh and time.monotonic() - state["at"] < 300:
+            return state
+        store = self._store(public_url)
+        root = store["resources"].get(store.get("rootResourceId")) or {}
+        if root.get("errorCode") in (404, 410):
+            raise LinkError("not_found", "Ссылка на альбом больше не работает: её удалили или закрыли")
+        if root.get("errorCode") in (401, 403):
+            raise LinkError("forbidden", "Владелец закрыл доступ к альбому")
+        sk = (store.get("environment") or {}).get("sk")
+        if root.get("type") != "album" or not root.get("hash") or not sk:
+            raise LinkError("server_50x", "Яндекс не отдал сведения об альбоме")
+        try:
+            items = [store["resources"][key] for key in root["children"]]
+            if not isinstance(root["completed"], bool):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise LinkError("server_50x", "Яндекс не отдал список файлов альбома") from None
+        state = {"name": root.get("name"), "hash": root["hash"], "sk": sk,
+                 "items": items, "completed": root["completed"], "cursors": {}, "seen": set(),
+                 "at": time.monotonic()}
+        self._states[public_url] = state
+        return state
+
+    def _post(self, public_url: str, action: str, params: dict, state: dict | None = None) -> dict:
+        state = state if state is not None else self._state(public_url)
+        body = quote(json.dumps({**params, "hash": state["hash"], "sk": state["sk"]}), safe="~()*!.'")
+        resp = self._request("post", f"https://disk.yandex.ru/public/api/{action}", data=body,
+                             headers={"Content-Type": "text/plain", "X-Requested-With": "XMLHttpRequest",
+                                      "X-Retpath-Y": public_url})
+        data = self._json(resp)
+        if data.get("type") == "captcha" or data.get("captcha"):
+            raise LinkError("refused", "Яндекс просит пройти проверку в браузере — откройте ссылку на альбом")
+        code = data.get("statusCode", 200)
+        if data.get("error") or (isinstance(code, int) and code >= 400):
+            if code in (404, 410):
+                raise LinkError("not_found", "Альбом или фотография больше недоступны")
+            if code in (401, 403):
+                self._states.pop(public_url, None)
+                raise LinkError("refused", "Яндекс отклонил запрос альбома — попробую с новой сессией")
+            if code == 429:
+                raise LinkError("rate_limit", "Яндекс просит обращаться реже")
+            raise LinkError("server_50x", "Яндекс сейчас не отдал данные альбома")
+        return data
+
+    @staticmethod
+    def _item_id(path: str) -> str:
+        match = re.search(r"__([a-f\d]{24})(?:\.[^./]*)?$", path, flags=re.I)
+        if not match:
+            raise LinkError("refused", "Не найден ID файла альбома — обновите список ссылки")
+        return match.group(1)
+
+    @staticmethod
+    def _file(resource: dict) -> dict:
+        item_id = resource.get("albumItemId")
+        meta = resource.get("meta") or {}
+        size = meta.get("size")
+        if (resource.get("type") != "file" or not isinstance(item_id, str)
+                or not re.fullmatch(r"[a-f\d]{24}", item_id, flags=re.I)
+                or not isinstance(size, int) or isinstance(size, bool) or size < 0):
+            raise LinkError("server_50x", "Яндекс отдал неполные сведения о файле альбома")
+        name = sanitize_component(str(resource.get("name") or "Файл"))
+        stem, ext = os.path.splitext(name)
+        # ID сохраняет оба файла с одинаковыми именами и не зависит от порядка страниц.
+        filename = f"{stem[:120]}__{item_id}{ext[:16]}"
+        original = meta.get("original") or ""
+        md5 = meta.get("md5") or parse_qs(urlsplit(original).query).get("etag", [""])[0].strip('"')
+        if not re.fullmatch(r"[a-f\d]{32}", md5, flags=re.I):
+            md5 = None
+        return {"type": "file", "name": filename, "path": "/" + filename, "size": size,
+                "md5": md5.lower() if md5 else None}
+
+    def meta(self, public_url: str, path: str = "/", limit: int | None = None, offset: int = 0,
+             preview_size: str | None = None) -> dict:
+        if path != "/":
+            store = self._store(public_url + "/" + self._item_id(path))
+            slider = (store.get("overlays") or {}).get("sliderResourceId")
+            meta = (store["resources"].get(slider) or {}).get("meta") or {}
+            return {"preview": meta.get("xxxlPreview") or meta.get("defaultPreview")}
+        # Не обновляем начальную страницу посередине долгого обхода: это потеряет курсор.
+        state = self._state(public_url, refresh=True) if offset == 0 else self._states.get(public_url)
+        if state is None:
+            raise LinkError("server_50x", "Не найдено начало списка альбома")
+        if offset == 0:
+            items, completed = state["items"], state["completed"]
+        else:
+            cursor = state["cursors"].get(offset)
+            if not cursor:
+                raise LinkError("server_50x", "Не найдено продолжение списка альбома")
+            data = self._post(public_url, "fetch-album-list", {"lastItemId": cursor}, state)
+            items, completed = data.get("resources"), data.get("completed")
+        if not isinstance(items, list) or not isinstance(completed, bool) or (not items and not completed):
+            raise LinkError("server_50x", "Яндекс не отдал весь список альбома — попробую снова")
+        files = [self._file(item) for item in items]
+        ids = {item["albumItemId"] for item in items}
+        if len(ids) != len(items) or ids & state["seen"]:
+            raise LinkError("server_50x", "Яндекс повторил файлы в списке альбома — попробую снова")
+        state["seen"].update(ids)
+        if not completed:
+            cursor = items[-1]["albumItemId"]
+            if cursor in state["cursors"].values():
+                raise LinkError("server_50x", "Яндекс повторил страницу альбома — попробую снова")
+            state["cursors"][offset + len(items)] = cursor
+        return {"type": "album", "name": state["name"],
+                "_embedded": {"items": files, "completed": completed}}
+
+    def download_href(self, public_url: str, path: str = "/") -> str:
+        data = self._post(public_url, "album-download-url", {"itemId": self._item_id(path)})
+        href = (data.get("data") or {}).get("url")
+        if not isinstance(href, str) or not href:
+            raise LinkError("server_50x", "Яндекс не выдал ссылку на оригинал из альбома")
         return href
 
 
@@ -445,7 +607,10 @@ def list_link(api: PublicApi, conn: sqlite3.Connection, link, on_found=None) -> 
                     on_found(found)
                 offset += len(items)
                 total = emb.get("total")
-                if not items or (total is not None and offset >= int(total)) or (total is None and len(items) < LIST_LIMIT):
+                if "completed" in emb:
+                    if emb["completed"]:
+                        break
+                elif not items or (total is not None and offset >= int(total)) or (total is None and len(items) < LIST_LIMIT):
                     break
     _upsert_files(conn, link["id"], gen, batch)
     with sqlite_tx(conn):
