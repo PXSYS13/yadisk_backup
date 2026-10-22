@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import sqlite3
+from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import pytest
@@ -280,7 +281,7 @@ def test_round_downloads_defers_silent_storage_and_reports_progress(db, net, tmp
     dl = str(tmp_path / "dl")
     assert pd.run(db, dl, workers=2) == EXIT_DEFERRED
     a = os.path.join(dl, LINKS_DIRNAME, "Свадьба", "a.jpg")
-    assert open(a, "rb").read() == b"photo-a"
+    assert Path(a).read_bytes() == b"photo-a"
     rows = _files(db)
     assert rows["/a.jpg"]["status"] == "downloaded"
     assert rows["/Sub/b.txt"]["status"] == "pending"
@@ -297,7 +298,7 @@ def test_round_downloads_defers_silent_storage_and_reports_progress(db, net, tmp
     fake.calls.clear()
     assert pd.run(db, dl, workers=2) == EXIT_OK
     assert [c for c in fake.calls if c[0] == "download"] == [("download", "/Sub/b.txt")]
-    assert open(os.path.join(dl, LINKS_DIRNAME, "Свадьба", "Sub", "b.txt"), "rb").read() == b"text-b"
+    assert Path(os.path.join(dl, LINKS_DIRNAME, "Свадьба", "Sub", "b.txt")).read_bytes() == b"text-b"
 
 
 def test_wrong_md5_is_an_error_not_a_download(db, net, tmp_path):
@@ -355,7 +356,7 @@ def test_single_file_link_lands_directly_in_the_links_folder(db, net, tmp_path):
     pd.add_link(db, "https://disk.yandex.ru/i/F1", "/", {"name": "Договор.pdf", "type": "file"})
     dl = str(tmp_path / "dl")
     assert pd.run(db, dl, workers=1) == EXIT_OK
-    assert open(os.path.join(dl, LINKS_DIRNAME, "Договор.pdf"), "rb").read() == b"pdf-bytes"
+    assert Path(os.path.join(dl, LINKS_DIRNAME, "Договор.pdf")).read_bytes() == b"pdf-bytes"
 
 
 def test_deferred_photo_gets_a_safety_preview(db, net, tmp_path):
@@ -366,7 +367,7 @@ def test_deferred_photo_gets_a_safety_preview(db, net, tmp_path):
     pd.run(db, dl, workers=1)
     row = _files(db)["/Свадьба/1.jpg"]
     want = os.path.join(dl, PREVIEW_DIRNAME, LINKS_DIRNAME, "Свадьба", "Свадьба", "1.jpg.jpg")
-    assert row["preview_path"] == want and open(want, "rb").read() == b"JPEGPREVIEW"
+    assert row["preview_path"] == want and Path(want).read_bytes() == b"JPEGPREVIEW"
 
 
 def test_preview_goes_away_once_the_original_is_downloaded(db, net, tmp_path):
@@ -388,7 +389,7 @@ def test_preview_goes_away_once_the_original_is_downloaded(db, net, tmp_path):
     fake.dead.clear()
     assert pd.run(db, dl, workers=1) == EXIT_OK
     assert os.listdir(os.path.join(dl, PREVIEW_DIRNAME)) == []  # опустевшие подпапки убраны, «_превью» на месте
-    assert open(os.path.join(dl, LINKS_DIRNAME, "Свадьба", "Свадьба", "2.jpg"), "rb").read() == b"two"
+    assert Path(os.path.join(dl, LINKS_DIRNAME, "Свадьба", "Свадьба", "2.jpg")).read_bytes() == b"two"
 
 
 def test_removed_link_is_skipped_and_forgotten(db, net, tmp_path):
