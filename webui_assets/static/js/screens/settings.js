@@ -27,7 +27,8 @@
   async function loadCounts() {
     const [d, u] = await Promise.all([App.api.get('/api/disk/preview'), App.api.get('/api/unlim/preview')]);
     counts = { disk: d.ok ? d.data : null, unlim: u.ok ? u.data : null };
-    if (App.state.status) paintWhat(App.state.status, true);
+    // Человек мог уже начать отмечать — его выбор не затираем, числа появятся после сохранения
+    if (App.state.status) paintWhat(App.state.status);
   }
 
   function countFor(cat) {
@@ -47,8 +48,8 @@
     return `${fmt.files(c.total)} · ${fmt.bytes(bytes)}`;
   }
 
-  function paintWhat(s, force) {
-    if (formDirty && !force) return;
+  function paintWhat(s) {
+    if (formDirty) return;
     const st = s.settings || {};
     const labels = st.category_labels || {};
     const running = !!(s.pipeline && s.pipeline.running);
@@ -64,6 +65,13 @@
     App.html(byId('set-sources'), `<div class="checks two">${srcBox('disk', 'hdd', 'Обычный Диск')}${
       srcBox('unlim', 'phone', 'Безлимит (фото с телефона)')}</div>`);
     App.html(byId('set-types'), `<div class="checks types">${Object.keys(labels).map(catBox).join('')}</div>`);
+  }
+
+  // Забыть несохранённые галочки «Что скачивать»: следующая отрисовка покажет сохранённое
+  function discardChecks() {
+    formDirty = false;
+    App.forgetHtml(byId('set-sources'));
+    App.forgetHtml(byId('set-types'));
   }
 
   // Полоса «Есть несохранённые изменения» — только когда что-то поменяли
@@ -213,6 +221,23 @@
     App.text(byId('set-danger-note'), running ? 'Сначала остановите скачивание.' : '');
   }
 
+  // Раскрыть строку «Доступа» или показать папки — куда позвала кнопка (go-access, go-folders)
+  function reveal() {
+    const focus = App.pendingAccessFocus;
+    App.pendingAccessFocus = null;
+    if (focus) {
+      setTimeout(() => {
+        App.Access.open(byId('set-access'), focus);
+        const row = byId('set-access').querySelector(`[data-row="${focus}"]`);
+        if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+    }
+    if (App.pendingFoldersFocus) {
+      App.pendingFoldersFocus = false;
+      setTimeout(() => byId('set-folders').scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
+    }
+  }
+
   const SECTIONS = [['set-sec-access', 'Доступ'], ['set-sec-what', 'Что скачивать'],
     ['set-sec-extra', 'Дополнительно'], ['set-sec-danger', 'Если что-то не так']];
   let observer = null;
@@ -311,7 +336,7 @@
       byId('set-folders').addEventListener('change', onFoldersChange);
     },
     show() {
-      formDirty = false;
+      discardChecks();
       // Несохранённый выбор папок забываем, как и галочки типов; загруженное дерево оставляем
       picker.dirty = false;
       picker.synced = false;
@@ -319,23 +344,12 @@
       paintSavebar();
       loadCounts();
       setTimeout(watchSections, 0);
-      const focus = App.pendingAccessFocus;
-      App.pendingAccessFocus = null;
-      if (focus) {
-        setTimeout(() => {
-          App.Access.open(byId('set-access'), focus);
-          const row = byId('set-access').querySelector(`[data-row="${focus}"]`);
-          if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }, 50);
-      }
-      if (App.pendingFoldersFocus) {
-        App.pendingFoldersFocus = false;
-        setTimeout(() => byId('set-folders').scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
-      }
+      reveal();
     },
+    reveal,
     update(s) {
       App.Access.update(byId('set-access'), s);
-      paintWhat(s, false);
+      paintWhat(s);
       paintExtra(s);
       const st = s.settings || {};
       syncFolders(st);
@@ -360,7 +374,7 @@
   });
 
   App.action('settings-reset', () => {
-    formDirty = false;
+    discardChecks();
     picker.dirty = false;
     picker.synced = false;
     paintSavebar();
@@ -390,7 +404,7 @@
     }
     const res = await App.api.post('/api/settings', body);
     if (res.ok) {
-      formDirty = false;
+      discardChecks();
       picker.dirty = false;
       picker.synced = false;  // сервер мог сжать выбор — перечитаем его
       paintSavebar();

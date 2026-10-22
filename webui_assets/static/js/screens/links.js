@@ -20,7 +20,7 @@
     const total = Math.max(f.total, 1);
     const pct = (n) => `${((100 * n) / total).toFixed(2)}%`;
     const waiting = f.deferred + f.limited;
-    const legend = [`<span><i class="l-done"></i>Скачано ${fmt.num(f.done)} из ${fmt.files(f.total)}${
+    const legend = [`<span><i class="l-done"></i>Скачано ${fmt.num(f.done)} из ${fmt.filesOf(f.total)}${
       it.bytes.total ? ` · ${fmt.bytes(it.bytes.done)} из ${fmt.bytes(it.bytes.total)}` : ''}</span>`];
     if (waiting) legend.push(`<span><i class="l-wait"></i>ждут Яндекса ${fmt.num(waiting)}</span>`);
     if (f.queue) legend.push(`<span><i class="l-pend"></i>в очереди ${fmt.num(f.queue)}</span>`);

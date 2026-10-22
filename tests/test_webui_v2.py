@@ -93,6 +93,9 @@ def test_problem_files_explain_reasons(client, tmp_path, monkeypatch):
     assert any("не отвечает" in k for k in r["reasons"])
     assert any("больше нет" in k for k in r["reasons"])
     assert any("ваш диск" in k for k in r["reasons"])
+    assert r["failed"] == 2
+    # Упавшие — первыми: их повторяют кнопкой, а отложенных бывают тысячи
+    assert [x["state"] for x in client.get("/api/disk/failed?limit=2").json()["items"]] == ["failed", "failed"]
     assert client.get("/api/nope/failed").status_code == 404
 
 

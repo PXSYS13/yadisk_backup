@@ -10,8 +10,12 @@
 
   async function loadProblems() {
     problemsAt = Date.now();
-    const res = await App.api.get(`/api/${source}/failed?limit=300`);
-    problems = res.ok ? res.data : { items: [], reasons: {}, total: 0, error: res.error };
+    const want = source;
+    const res = await App.api.get(`/api/${want}/failed?limit=300`);
+    if (want !== source) return; // пока ждали ответа, открыли другой источник
+    const data = res.ok && res.data ? res.data : null;
+    const error = data ? data.error : res.error || 'Не получилось';
+    problems = error ? { items: [], reasons: {}, total: 0, failed: 0, error } : data;
     paintProblems();
   }
 
@@ -19,13 +23,16 @@
     const box = byId('det-problems');
     if (!box) return;
     if (!problems) { App.html(box, '<p class="muted">Загружаю…</p>'); return; }
+    // Не «всё скачалось»: список просто не загрузился, программа спросит снова через 20 секунд
+    if (problems.error) { App.html(box, `<p class="muted">Не получилось загрузить список: ${esc(problems.error)}</p>`); return; }
     if (!problems.total) {
       App.html(box, `<div class="empty">${App.icon('check')}Всё, что программа уже пробовала, скачалось.</div>`);
       return;
     }
     const reasons = Object.entries(problems.reasons || {}).sort((a, b) => b[1] - a[1])
       .map(([text, n]) => `<li>${esc(text)} — <b>${fmt.files(n)}</b></li>`).join('');
-    const failed = problems.items.filter((x) => x.state === 'failed').length;
+    // Все упавшие, а не только из первых строк: за тысячами отложенных их могло не быть видно
+    const failed = problems.failed || 0;
     const rows = problems.items.map((x) => `<tr>
         <td class="name">${esc(x.name)}${x.preview ? ' <span class="badge">есть превью</span>' : ''}</td>
         <td>${fmt.bytes(x.size)}</td>
@@ -84,8 +91,8 @@
     const name = f.has_sub
       ? `<button class="link fp-name" data-action="fp-open" data-path="${esc(f.path)}" title="Показать папки внутри">${label}${App.icon('chevron')}</button>`
       : `<span class="fp-name">${label}</span>`;
-    const meta = f.files ? `${fmt.num(f.done)} из ${fmt.files(f.files)} · ${fmt.bytes(f.bytes_done)} из ${fmt.bytes(f.bytes)}`
-      : `${fmt.files(f.excluded)} — не выбраны в «Настройках»`;
+    const meta = f.files ? `${fmt.num(f.done)} из ${fmt.filesOf(f.files)} · ${fmt.bytes(f.bytes_done)} из ${fmt.bytes(f.bytes)}`
+      : `${fmt.files(f.excluded)} — ${fmt.plural(f.excluded, 'не выбран', 'не выбраны', 'не выбраны')} в «Настройках»`;
     let tail = '';
     if (f.complete && f.on_disk) {
       tail = `<button class="small ghost" data-action="open-disk-folder" data-path="${esc(f.path)}">${App.icon('folder')}Открыть папку</button>`;
@@ -175,8 +182,11 @@
       App.html(byId('det-counters'), c('', f.selected, 'выбрано') + c('ok', f.done, 'скачано') +
         c('', (f.pending || 0) + (f.in_progress || 0), 'в очереди') + c(f.deferred ? 'wait' : '', f.deferred, 'ждут Яндекса') +
         c(f.failed ? 'err' : '', f.failed, 'не скачались') + c('', f.excluded, 'не выбраны') + c('', f.preview_only, 'есть превью'));
-      App.text(byId('det-hosts'), src.storage_hosts_down
-        ? `Файлы, которые ждут Яндекса, лежат на ${fmt.num(src.storage_hosts_down)} серверах хранения, которые сейчас не отвечают. Программа повторяет их сама.`
+      const hosts = src.storage_hosts_down || 0;
+      App.text(byId('det-hosts'), hosts
+        ? `Файлы, которые ждут Яндекса, лежат на ${fmt.num(hosts)} ${fmt.plural(hosts, 'сервере', 'серверах', 'серверах')} ` +
+          `хранения, ${fmt.plural(hosts, 'который сейчас не отвечает', 'которые сейчас не отвечают', 'которые сейчас не отвечают')}. ` +
+          'Программа повторяет их сама.'
         : '');
       const db = (s[source] || {}).db || {};
       const recent = (db.recent || []).filter((x) => x.status === 'downloaded');

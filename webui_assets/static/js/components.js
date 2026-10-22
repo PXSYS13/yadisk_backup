@@ -229,7 +229,7 @@
     const speed = src.state === 'downloading' && src.speed_bps
       ? ` · <span>${fmt.speed(src.speed_bps)}</span>${src.eta_sec ? ` · <span>осталось ≈ ${fmt.duration(src.eta_sec)}</span>` : ''}` : '';
     return `<div class="card source">${head}${steps}
-      <div><div class="progress-line"><div class="big-number"><b>${fmt.num(f.done)}</b> из ${fmt.files(selected)}</div>
+      <div><div class="progress-line"><div class="big-number"><b>${fmt.num(f.done)}</b> из ${fmt.filesOf(selected)}</div>
         <span class="pct-badge">${fmt.pctText(f.done, selected)}</span></div>
         <div class="bytes-line"><span>${fmt.bytes(b.done)} из ${fmt.bytes(b.selected || b.total)}</span>${speed}</div>
         <div style="margin-top:10px">${bar}</div><div class="legend">${legend}</div>${foldersLine(name, src)}</div>
@@ -433,7 +433,7 @@
     const files = sm.downloaded_files || 0;
     if (!r || !seen || seen.donated || !files || r.action) return null;
     const reached = App.DONATE_MILESTONES.filter((m) => files >= m);
-    const milestone = reached.length ? reached.at(-1) : 0;
+    const milestone = reached.length ? reached[reached.length - 1] : 0;
     const key = `m-${milestone}`;
     if (seen.closed.includes(key)) return null;
     const moment = { key, milestone, files, bytes: sm.downloaded_bytes || 0 };
@@ -558,7 +558,7 @@
       if (q('[data-row="cookies"]')) {
         const coo = s.cookies || {};
         App.text(q('[data-field="cookies-state"]'), coo.ok
-          ? `Подключён${coo.count ? ` (${coo.count} записей)` : ''}`
+          ? `Подключён${coo.count ? ` (${fmt.num(coo.count)} ${fmt.plural(coo.count, 'запись', 'записи', 'записей')})` : ''}`
           : 'Не подключён — нужен, чтобы скачать фото, загруженные с телефона');
         const unlimAction = ((((s.rescue || {}).sources || {}).unlim) || {}).action;
         tone('cookies', unlimAction === 'cookies' ? 'err' : coo.ok ? 'ok' : '');
@@ -656,13 +656,19 @@
   });
 
   // ── Общие действия ──
+  // Уже в «Настройках» — только показываем нужное место: заход на экран заново сбросил бы
+  // несохранённый выбор файлов и папок
+  const toSettings = () => {
+    if (App.state.route === 'settings') App.screens.settings.reveal();
+    else App.go('#/settings');
+  };
   App.action('go-access', (btn) => {
     App.pendingAccessFocus = btn.dataset.field;
-    App.go('#/settings');
+    toSettings();
   });
   App.action('go-folders', () => {
     App.pendingFoldersFocus = true;
-    App.go('#/settings');
+    toSettings();
   });
   App.action('go-setup', () => App.go('#/setup'));
   App.action('rescue-start', (btn) => App.run(btn, () => App.api.post('/api/rescue/start')));

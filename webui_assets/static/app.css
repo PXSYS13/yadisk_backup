@@ -130,7 +130,9 @@ code{font-family:var(--mono);font-size:.9em;background:var(--surface-2);padding:
 .nav a.active{background:var(--accent-soft);color:var(--accent-text)}
 .ico{display:inline-flex;width:18px;height:18px;flex:none}
 .ico .i{width:18px;height:18px;stroke-width:1.75}
-.side-block{display:flex;flex-direction:column;gap:4px;min-height:0}
+/* Не сжимается: на невысоком экране (ноутбук 1366×768) подключения наезжали на низ меню —
+   пусть лучше меню прокручивается */
+.side-block{display:flex;flex-direction:column;gap:4px;flex:none}
 .side-title{font-size:13px;font-weight:500;color:var(--text-3);padding:0 12px 4px}
 .chips{display:flex;flex-direction:column;gap:2px}
 .chip{

@@ -15,7 +15,18 @@
   App.byId = (id) => document.getElementById(id);
   App.esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g,
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  App.html = (el, markup) => { if (el && el.innerHTML !== markup) el.innerHTML = markup; };
+  // Разметку сравниваем с прошлой записанной, а не с innerHTML: браузер пишет её по-своему
+  // (<path/> → <path></path>, checked → checked=""), и блоки с иконками пересоздавались на каждом
+  // опросе — терялся фокус, а клик, пришедшийся на перерисовку, пропадал
+  App.html = (el, markup) => {
+    if (el && el._markup !== markup) {
+      el._markup = markup;
+      el.innerHTML = markup;
+    }
+  };
+  // Следующий App.html перерисует блок, даже если разметка та же: так на экран возвращается
+  // сохранённое вместо галочек, которые человек поменял и не сохранил
+  App.forgetHtml = (el) => { if (el) el._markup = null; };
   App.text = (el, value) => { if (el && el.textContent !== String(value)) el.textContent = String(value); };
 
   // ── Форматирование по-русски ──
@@ -29,6 +40,8 @@
     plural,
     num: (n) => Math.trunc(n || 0).toLocaleString('ru-RU'),
     files: (n) => `${App.fmt.num(n)} ${plural(n || 0, 'файл', 'файла', 'файлов')}`,
+    // После «из» и «для»: «из 21 файла», «для 5 файлов»
+    filesOf: (n) => `${App.fmt.num(n)} ${plural(n || 0, 'файла', 'файлов', 'файлов')}`,
     bytes(n) {
       n = Number(n) || 0;
       const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
@@ -189,6 +202,10 @@
 
   // ── Запросы к программе ──
   async function request(method, url, body) {
+    // Демо показывает придуманные данные, а кнопки поменяли бы настоящие настройки и списки файлов
+    if (method !== 'GET' && App.state.status && App.state.status.demo) {
+      return { ok: false, error: 'Это демо: кнопки здесь ничего не меняют' };
+    }
     let resp;
     try {
       resp = await fetch(url, {
@@ -310,15 +327,22 @@
   // ── Опрос статуса ──
   let pollTimer = null;
   let inFlight = false;
+  let again = false;
   App.refresh = async () => {
-    if (inFlight) return;
+    // Просьба обновить во время запроса (кнопка только что что-то поменяла) не теряется:
+    // ответ, который уже в пути, мог устареть — вместо него сразу спрашиваем снова
+    if (inFlight) { again = true; return; }
     inFlight = true;
     try {
       const url = '/api/status' + (App.demo ? `?demo=${encodeURIComponent(App.demo)}` : '');
-      const res = await App.api.get(url);
-      App.state.offline = !res.ok;
-      if (res.ok) App.state.status = res.data;
-      App.render();
+      do {
+        again = false;
+        const res = await App.api.get(url);
+        if (again) continue;
+        App.state.offline = !res.ok;
+        if (res.ok) App.state.status = res.data;
+        App.render();
+      } while (again);
     } finally {
       inFlight = false;
     }
@@ -341,7 +365,8 @@
 
   App.startPolling = () => {
     const tick = async () => {
-      await App.refresh();
+      // Ошибка в отрисовке одного экрана не должна останавливать опрос — иначе всё замирает до перезагрузки
+      try { await App.refresh(); } catch (e) { console.error(e); }
       pollTimer = setTimeout(tick, document.hidden ? 6000 : 1500);
     };
     clearTimeout(pollTimer);
