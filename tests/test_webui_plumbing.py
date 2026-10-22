@@ -85,6 +85,16 @@ def test_sorting_file_names_do_not_become_yandex_banners(monkeypatch):
     assert _diag(monkeypatch, {webapp.tasks.SLOT_ORGANIZE: sorting})["kind"] is None
 
 
+def test_file_names_in_failures_do_not_become_yandex_banners(monkeypatch):
+    """«FAIL | http_error … | disk:/Видео/Timeout.mkv» — отказ на один файл, а не «Яндекс отвечает медленно»."""
+    lines = ["FAIL | http_error | HTTP 404 при скачивании файла | 120 | disk:/Видео/Timeout.mkv",
+             "FAIL | local_disk | OSError: [Errno 13] Permission denied: 'D:/Видео/Timeout 403 Forbidden.mkv'"]
+    diag = _diag(monkeypatch, {"disk": _Task(lines, alive=True)})
+    assert diag["kind"] == "local_disk" and diag["counts"]["timeout"] == 0 and diag["counts"]["auth_expired"] == 0
+    real = _Task(["FAIL | download_timeout | ReadTimeout: read timed out | 30000 | disk:/a.jpg"], alive=True)
+    assert _diag(monkeypatch, {"disk": real})["kind"] == "timeout"
+
+
 def test_old_finished_tasks_do_not_keep_banners(monkeypatch):
     old = _Task(["auth_expired | КРИТИЧЕСКАЯ ОШИБКА"], finished_ago=webapp.tasks.DIAG_RECENT_SEC + 60)
     assert _diag(monkeypatch, {"unlim_w1": old})["kind"] is None

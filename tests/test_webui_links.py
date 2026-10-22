@@ -138,9 +138,26 @@ def test_retry_now_returns_failed_files_and_lifts_the_pause(client, started, api
     conn = _db()
     assert conn.execute("SELECT status FROM link_files").fetchone()[0] == "pending"
     assert tuple(conn.execute("SELECT limit_until, error_kind FROM links").fetchone()) == (None, None)
-    assert pd.meta_get(conn, "wake") is not None
+    # Процесса не было: новый и так начнёт с полного раунда. Оставшийся флаг пропустил бы его
+    # первое ожидание — лишний раунд и сброшенный список молчащих серверов
+    assert pd.meta_get(conn, "wake") is None
     conn.close()
     assert started and started[0][0] == "links"
+
+
+def test_retry_now_wakes_a_running_download(client, started, api, monkeypatch):
+    client.post("/api/links/add", json={"url": LINK})
+    monkeypatch.setattr(webapp.tasks.tm, "any_alive", lambda prefix: True)
+    assert client.post("/api/links/retry_now", json={"id": 1}).json()["ok"]
+    conn = _db()
+    assert pd.meta_get(conn, "wake") is not None
+    conn.close()
+
+
+@pytest.mark.parametrize("bad", [2 ** 70, 0, -1])
+def test_link_ids_out_of_range_are_rejected_not_crashing(client, started, bad):
+    for url in ("/api/links/remove", "/api/links/retry_now", "/api/links/relist"):
+        assert client.post(url, json={"id": bad}).status_code == 422
 
 
 def test_relist_and_resume_and_stop(client, started, api, monkeypatch):

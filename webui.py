@@ -110,7 +110,10 @@ def main():
 
     # Порт уже занят нами в choose_port: uvicorn получает готовый сокет, и между
     # проверкой и запуском его никто не перехватит
-    server = uvicorn.Server(uvicorn.Config(app, host=ports.HOST, port=port, log_level="warning"))
+    # log_config=None: своя настройка журналов uvicorn сняла бы наш файл-лог с uvicorn.error,
+    # и тексты ошибок сервера (HTTP 500) не попадали бы ни в webui.log, ни в отчёт для поддержки
+    server = uvicorn.Server(uvicorn.Config(app, host=ports.HOST, port=port, log_level="warning",
+                                           log_config=None))
     try:
         server.run(sockets=[sock])
     except KeyboardInterrupt:

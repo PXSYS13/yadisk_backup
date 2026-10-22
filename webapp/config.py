@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import os
+import stat
+import threading
 
 from dotenv import dotenv_values, load_dotenv, set_key
 from fastapi import HTTPException
@@ -16,6 +18,9 @@ from webapp import paths
 
 # Источники, которые умеет качать «Режим спасения»
 SOURCES = ("disk", "unlim")
+# python-dotenv переписывает .env целиком: два сохранения сразу (переключатели в настройках
+# шлют запросы независимо) затирали бы друг друга
+ENV_LOCK = threading.RLock()
 
 
 def get_config() -> dict:
@@ -69,16 +74,29 @@ def get_settings() -> dict:
     }
 
 
+def owner_only(path) -> None:
+    """Файл с ключом или данными входа — только владельцу: другие пользователи компьютера
+    (Linux, macOS) их не прочтут. На Windows права наследуются от папки пользователя."""
+    try:
+        if stat.S_IMODE(os.stat(path).st_mode) & 0o077:
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 def ensure_env_file() -> None:
-    if not paths.ENV_FILE.exists():
-        paths.ENV_FILE.write_text("", encoding="utf-8")
+    with ENV_LOCK:
+        if not paths.ENV_FILE.exists():
+            os.close(os.open(paths.ENV_FILE, os.O_CREAT | os.O_WRONLY, 0o600))
+        owner_only(paths.ENV_FILE)
 
 
 def env_set(key: str, value: str, quote_mode: str = "always") -> None:
     """Пишет ключ в .env и сразу перечитывает .env в окружение программы."""
-    ensure_env_file()
-    set_key(str(paths.ENV_FILE), key, value, quote_mode=quote_mode)
-    load_dotenv(paths.ENV_FILE, override=True)
+    with ENV_LOCK:
+        ensure_env_file()
+        set_key(str(paths.ENV_FILE), key, value, quote_mode=quote_mode)
+        load_dotenv(paths.ENV_FILE, override=True)
 
 
 def env_set_verified(key: str, value: str) -> None:
@@ -87,12 +105,14 @@ def env_set_verified(key: str, value: str) -> None:
     python-dotenv сам экранирует \\ и ' в одинарных кавычках (с версии 1.2.3), но
     подставляет ${…} — значение с таким куском после перечитывания изменилось бы.
     """
-    set_key(str(paths.ENV_FILE), key, value, quote_mode="always")
-    try:
-        saved = dotenv_values(paths.ENV_FILE).get(key)
-    except Exception:  # noqa: BLE001 — нечитаемый .env тоже повод отказать
-        saved = None
-    if (saved or "") != value:
-        raise HTTPException(500, "Не получилось сохранить настройку: файл .env прочитался иначе. "
-                                 "Скачайте отчёт для поддержки во вкладке «Помощь»")
-    os.environ[key] = value
+    with ENV_LOCK:
+        ensure_env_file()
+        set_key(str(paths.ENV_FILE), key, value, quote_mode="always")
+        try:
+            saved = dotenv_values(paths.ENV_FILE).get(key)
+        except Exception:  # noqa: BLE001 — нечитаемый .env тоже повод отказать
+            saved = None
+        if (saved or "") != value:
+            raise HTTPException(500, "Не получилось сохранить настройку: файл .env прочитался иначе. "
+                                     "Скачайте отчёт для поддержки во вкладке «Помощь»")
+        os.environ[key] = value

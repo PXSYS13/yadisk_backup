@@ -16,7 +16,7 @@ import yadisk
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from downloader import account_info, api_error_details, make_client
+from downloader import account_info, api_error_details, make_browse_client
 from unlim_common import missing_required_cookies
 from webapp import config, paths
 
@@ -39,7 +39,9 @@ def check_token(token: str) -> dict:
             and now - _token_check_cache["at"] < _TOKEN_TTL):
         return _token_check_cache["data"]
     try:
-        cli = make_client(token)
+        # Человек ждёт ответа (первый экран, «Сохранить мои файлы», отчёт): короткие таймауты.
+        # С таймаутами скачивания проверка во время сбоя Яндекса висела бы до получаса
+        cli = make_browse_client(token)
         try:
             if not cli.check_token():
                 data = {"ok": False, "msg": "Токен невалиден: Яндекс ответил, что он не действует. "
@@ -202,7 +204,16 @@ def api_set_token(payload: TokenPayload):
     check = check_token(token)
     log.info("токен сохранён (%s): %s", config.mask_token(token),
              check.get("login") if check.get("ok") else check.get("msg"))
+    if check.get("ok") or check.get("unreachable"):
+        _resume_branch("disk")
     return {"ok": True, "check": check}
+
+
+def _resume_branch(source: str) -> None:
+    """Ветка спасения ждала нового ключа или доступа — пусть качает дальше."""
+    from webapp.rescue import rescue  # rescue импортирует access: импорт здесь, а не наверху
+
+    rescue.resume_access(source)
 
 
 @router.post("/api/config/token/clear")
@@ -223,6 +234,7 @@ def api_set_cookies(payload: CookiesPayload):
     tmp = paths.COOKIES_FILE.with_suffix(".json.tmp")
     try:
         tmp.write_text(json.dumps(arr, ensure_ascii=False, indent=2), encoding="utf-8")
+        config.owner_only(tmp)  # данные входа — только владельцу компьютера
         os.replace(tmp, paths.COOKIES_FILE)
     except Exception as e:
         if tmp.exists():
@@ -232,6 +244,7 @@ def api_set_cookies(payload: CookiesPayload):
                 pass
         raise HTTPException(500, f"Не удалось сохранить cookies.json: {e}")
     log.info("cookies сохранены: %d шт", len(arr))
+    _resume_branch("unlim")
     return {"ok": True, "check": check_cookies(), "saved_count": len(arr)}
 
 
