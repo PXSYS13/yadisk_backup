@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -19,7 +22,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
-          version: "0.13.0"
+          # та же версия, что ставят webui.bat и webui.sh
+          version: "0.13.4"
           enable-cache: true
 
       - name: Set up Python
