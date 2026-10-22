@@ -18,6 +18,7 @@ import json
 import re
 import threading
 import time
+import unicodedata
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -44,9 +45,15 @@ _cache: dict | None = None  # {"at": monotonic, "until": monotonic, "result": {.
 
 
 def _clean_text(value, limit: int) -> str:
-    """Одна строка без лишних пробелов, не длиннее limit (обрезанное — с многоточием)."""
+    """Одна строка без лишних пробелов и невидимых знаков, не длиннее limit (обрезанное — с многоточием).
+
+    Невидимые знаки (нулевой ширины, разворот текста справа налево) прятали бы ссылку от фильтра
+    и меняли бы порядок букв на экране.
+    """
     if not isinstance(value, str):
         return ""
+    value = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in unicodedata.normalize("NFKC", value)
+                    if unicodedata.category(ch) not in ("Cf", "Co", "Cs", "Cn"))
     text = " ".join(value.split())
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
@@ -85,11 +92,11 @@ def normalize(raw) -> dict:
             "date": _clean_date(item.get("date")),
             "message": _clean_text(item.get("message"), MAX_MESSAGE) or None,
         })
-        if len(out) >= MAX_ITEMS:
-            break
-    # Сортировка устойчивая: записи одного дня остаются в порядке файла
+    # Сортировка устойчивая: записи одного дня остаются в порядке файла. Обрезаем после неё:
+    # донаты в файле идут первыми, и при 500+ донатах обрезка до сортировки теряла записи вручную
     out.sort(key=lambda x: x["date"] or "", reverse=True)
-    return {"updated": _clean_date(raw.get("updated")) if isinstance(raw, dict) else None, "supporters": out}
+    return {"updated": _clean_date(raw.get("updated")) if isinstance(raw, dict) else None,
+            "supporters": out[:MAX_ITEMS]}
 
 
 def count_people(items: list[dict]) -> int:
@@ -126,7 +133,11 @@ def fetch_remote(url: str | None = None) -> dict | None:
             body = r.raw.read(MAX_BYTES + 1, decode_content=True)
         if len(body) > MAX_BYTES:
             return None
-        return normalize(json.loads(body.decode("utf-8")))
+        raw = json.loads(body.decode("utf-8"))
+        # «[]», «null» или ошибка вместо списка — не повод заменить хороший список пустым
+        if not isinstance(raw, dict) or not isinstance(raw.get("supporters"), list):
+            return None
+        return normalize(raw)
     except (requests.RequestException, OSError, ValueError, UnicodeDecodeError):
         return None
 

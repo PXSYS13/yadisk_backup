@@ -114,3 +114,25 @@ def test_monitor_persists_and_reloads_history(tmp_path):
                    encoding="utf-8")
     m3 = yh.HealthMonitor(token_getter=lambda: None, log_path=log)
     assert m3.snapshot()["probes"][1]["availability"]["10m"] == 100.0
+
+
+def test_corrupted_log_lines_never_stop_the_web_ui(tmp_path):
+    """Строка-не-объект, ts строкой или список вместо пробы — пропускаются, а не роняют запуск."""
+    log = tmp_path / "health.jsonl"
+    good = json.dumps({"probe": "web", "ts": time.time(), "ok": True, "status": 200, "latency_ms": 5})
+    log.write_text("\n".join(["1", "true", '"x"', json.dumps({"probe": ["web"], "ts": 1.0, "ok": True}),
+                              json.dumps({"probe": "web", "ts": "soon", "ok": True, "latency_ms": 1}),
+                              good]) + "\n", encoding="utf-8")
+    m = yh.HealthMonitor(token_getter=lambda: None, log_path=log)
+    assert m.snapshot()["probes"][1]["availability"]["10m"] == 100.0
+    # Журнал обрезан до свежих правильных строк
+    assert log.read_text(encoding="utf-8").splitlines() == [good]
+
+
+def test_log_keeps_only_the_last_day(tmp_path):
+    log = tmp_path / "health.jsonl"
+    old = json.dumps({"probe": "web", "ts": time.time() - yh.HISTORY_SEC - 60, "ok": True, "status": 200,
+                      "latency_ms": 5})
+    log.write_text(old + "\n", encoding="utf-8")
+    yh.HealthMonitor(token_getter=lambda: None, log_path=log)
+    assert log.read_text(encoding="utf-8") == ""

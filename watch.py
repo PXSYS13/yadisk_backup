@@ -54,12 +54,18 @@ def fetch_state() -> dict | None:
             "total": 0,
             "bytes_total": 0,
             "bytes_done": 0,
+            "not_selected": 0,
         }
+        # skipped с ошибкой — сняты выбором папок и типов или дубликаты: их не качают, это
+        # не «уже было локально» и не часть того, что осталось скачать
         for row in conn.execute(
-            "SELECT status, COUNT(*) AS n, COALESCE(SUM(size), 0) AS b "
-            "FROM files GROUP BY status"
+            "SELECT status, (status = 'skipped' AND error IS NOT NULL) AS excluded, "
+            "COUNT(*) AS n, COALESCE(SUM(size), 0) AS b FROM files GROUP BY status, excluded"
         ):
-            stats[row["status"]] = row["n"]
+            if row["excluded"]:
+                stats["not_selected"] += row["n"]
+                continue
+            stats[row["status"]] = stats.get(row["status"], 0) + row["n"]
             stats["total"] += row["n"]
             stats["bytes_total"] += row["b"] or 0
             if row["status"] in ("downloaded", "skipped"):
@@ -175,6 +181,8 @@ def main() -> int:
             print(f"     в очереди: {untried:>6}  (ещё не пробовали)")
             print(f"     ждут Яндекса: {s['deferred']:>3}  (серверов хранения: {s['deferred_hosts']})")
             print(f"     ОШИБОК:    {s['failed']:>6}")
+            if s["not_selected"]:
+                print(f"     не выбрано: {s['not_selected']:>5}  (сняты в «Настройках» или дубликаты — не качаются)")
 
             print("\n  СКОРОСТЬ:")
             print(f"     {files_per_sec:6.2f} файл/сек   {human_bytes(bytes_per_sec)}/сек")

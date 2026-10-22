@@ -104,3 +104,25 @@ def test_doomed_dirs_without_disk():
 
 def test_printable_survives_undecodable_names():
     assert organize._printable("a\udcffb") == "a?b"
+
+
+def test_jpeg_date_is_the_shot_not_the_last_edit(tmp_path):
+    """В EXIF первой идёт дата последней правки (DateTime), съёмка — дальше: берём самую раннюю."""
+    exif = b"Exif\x00\x00" + b"2026:10:01 12:00:00\x00" + b"2014:07:15 09:30:00\x00"
+    app1 = b"\xff\xe1" + (len(exif) + 2).to_bytes(2, "big") + exif
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"\xff\xd8" + app1 + b"\xff\xd9")
+    assert organize.get_exif_date(str(photo)) == (2014, 7)
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="символьные ссылки на Windows требуют прав")
+def test_sorting_does_not_follow_links_out_of_the_folder(tmp_path):
+    outside = tmp_path / "other_drive"
+    outside.mkdir()
+    (outside / "keep.jpg").write_bytes(b"x")
+    root = tmp_path / "backup"
+    root.mkdir()
+    (root / "a.jpg").write_bytes(b"y")
+    os.symlink(outside, root / "link", target_is_directory=True)
+    found = {os.path.basename(f["path"]) for f in organize.scan(str(root))}
+    assert found == {"a.jpg"}

@@ -44,6 +44,7 @@ from utils import (
     categorize,
     in_trash,
     local_error_kind,
+    name_with_tag,
     part_path_for,
     preview_path_for,
     previews_enabled,
@@ -59,6 +60,7 @@ from utils import (
     remove_preview,
     remove_quiet,
     resolve_local_path,
+    short_hash,
     to_disk_path,
     to_long_path,
     too_big_for_folder,
@@ -255,10 +257,19 @@ class RootNotFound(Exception):
 OnNote = Callable[[str, list[str]], None]
 
 
+def _modified_ts(entry) -> float | None:
+    """Когда файл менялся на Диске — секунды эпохи; None, если API не сказал."""
+    when = getattr(entry, "modified", None)
+    try:
+        return when.timestamp() if when is not None else None
+    except (AttributeError, OverflowError, OSError, ValueError):
+        return None
+
+
 def _register_file(entry, batch: list, on_file: OnFile | None) -> int:
     """Кладёт файл API в пачку для БД и дёргает колбэк. Возвращает размер в байтах."""
     size = int(entry.size) if entry.size is not None else None
-    batch.append((entry.path, size, getattr(entry, "md5", None)))
+    batch.append((entry.path, size, getattr(entry, "md5", None), _modified_ts(entry)))
     if on_file:
         on_file(entry.path, size or 0)
     return size or 0
@@ -598,6 +609,8 @@ class DownloadJob:
     error: str | None = None          # последняя ошибка из БД (для отложенных — маркер)
     storage_host: str | None = None   # сервер хранения, на котором файл был отложен
     preview_path: str | None = None   # уже сохранённое страховочное превью
+    modified: float | None = None     # когда файл менялся на Диске — это время получит копия
+    downloaded_at: str | None = None  # когда файл скачивали раньше: значит, на его месте — наша копия
 
 
 @dataclass
@@ -802,6 +815,23 @@ def _describe_download_error(e: BaseException) -> str:
     return f"{name}: {e}{api}"
 
 
+def _set_mtime(local_path: str, ts: float | None) -> None:
+    """Копии — время изменения файла на Диске, а не время скачивания: так его видят проводник,
+    Finder и сортировка по датам. Не получилось — не беда, файл уже на месте."""
+    if not ts:
+        return
+    try:
+        os.utime(to_long_path(local_path), (ts, ts))
+    except (OSError, OverflowError, ValueError):
+        pass
+
+
+def _beside(local_path: str, remote_path: str) -> str:
+    """Свободное имя рядом: «Договор.pdf» → «Договор_a1b2c3.pdf» (хеш пути на Диске)."""
+    folder, name = os.path.split(local_path)
+    return os.path.join(folder, name_with_tag(name, f"_{short_hash(remote_path)}"))
+
+
 def _already_downloaded(job: DownloadJob, local_path: str) -> bool:
     """Resume: локальный файл того же размера (и MD5, если API его отдал) — качать не надо."""
     existing_size = file_size_safe(local_path)
@@ -849,6 +879,12 @@ def _download_one(
 
         if _already_downloaded(job, local_path):
             return finish("skipped", local_path)
+        if not job.downloaded_at and os.path.lexists(to_long_path(local_path)):
+            # На этом месте лежит не наша копия: её положил человек или сортировка переложила
+            # сюда другой файл. Не затираем — наш файл ляжет рядом
+            local_path = _beside(local_path, job.remote_path)
+            if _already_downloaded(job, local_path):
+                return finish("skipped", local_path)
         if why := too_big_for_folder(os.path.dirname(local_path), job.size):
             return finish("failed", error=f"local_file | {why}")
 
@@ -858,6 +894,7 @@ def _download_one(
         remove_quiet(part_path)
         _download_with_retry(client, job.remote_path, part_path, job)
         os.replace(part_path, to_long_path(local_path))
+        _set_mtime(local_path, job.modified)
     except StorageUnavailable as e:
         if part_path:
             remove_quiet(part_path)
@@ -921,6 +958,8 @@ def _jobs_from_state(state: State) -> Iterator[DownloadJob]:
             error=row["error"] if "error" in keys else None,
             storage_host=row["storage_host"] if "storage_host" in keys else None,
             preview_path=row["preview_path"] if "preview_path" in keys else None,
+            modified=row["modified"] if "modified" in keys else None,
+            downloaded_at=row["downloaded_at"] if "downloaded_at" in keys else None,
         )
 
 

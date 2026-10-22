@@ -105,11 +105,12 @@ class State:
             conn = self._conn()
             conn.executescript(SCHEMA)
             cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
-            for col in ("storage_host", "preview_path"):
+            # modified — когда файл менялся на Диске (секунды эпохи): то же время получает копия
+            for col, kind in (("storage_host", "TEXT"), ("preview_path", "TEXT"), ("modified", "REAL")):
                 if col in cols:
                     continue
                 try:
-                    conn.execute(f"ALTER TABLE files ADD COLUMN {col} TEXT")
+                    conn.execute(f"ALTER TABLE files ADD COLUMN {col} {kind}")
                 except sqlite3.OperationalError as e:  # колонку успел добавить другой процесс
                     if "duplicate column" not in str(e).lower():
                         raise
@@ -148,7 +149,7 @@ class State:
 
     def mark_pending_batch(
         self,
-        items: Iterable[tuple[str, int | None, str | None]],
+        items: Iterable[tuple],
     ) -> None:
         """Пакетная регистрация файлов — значительно ускоряет scan_tree и scan_media.
 
@@ -158,18 +159,21 @@ class State:
         трогаем — это выбор пользователя (категории, папки) или дубликат. У снятых выбором
         обновляем размер и MD5: файл мог измениться, пока его папка была не выбрана,
         и после возврата в очередь проверка скачанного сравнит его со старыми данными.
+
+        items — (remote_path, size, md5) или (remote_path, size, md5, modified).
         """
-        items_list = [(*item, *SELECTION_MARKERS) for item in items]
+        items_list = [(*item[:3], item[3] if len(item) > 3 else None, *SELECTION_MARKERS) for item in items]
         if not items_list:
             return
         with self._tx() as conn:
             conn.executemany(
                 """
-                INSERT INTO files (remote_path, size, md5, status)
-                VALUES (?, ?, ?, 'pending')
+                INSERT INTO files (remote_path, size, md5, modified, status)
+                VALUES (?, ?, ?, ?, 'pending')
                 ON CONFLICT(remote_path) DO UPDATE SET
                     size = excluded.size,
                     md5 = COALESCE(excluded.md5, files.md5),
+                    modified = COALESCE(excluded.modified, files.modified),
                     status = CASE
                         WHEN files.status IN ('downloaded', 'skipped') AND files.error IS NULL
                              AND excluded.md5 IS NOT NULL AND files.md5 IS NOT NULL
@@ -296,7 +300,8 @@ class State:
         for start in range(0, len(ids), PENDING_CHUNK):
             chunk = ids[start:start + PENDING_CHUNK]
             rows = {r["rowid"]: r for r in conn.execute(
-                "SELECT rowid, remote_path, size, md5, local_path, error, storage_host, preview_path "
+                "SELECT rowid, remote_path, size, md5, local_path, error, storage_host, preview_path, "
+                "modified, downloaded_at "
                 f"FROM files WHERE status='pending' AND rowid IN ({','.join('?' * len(chunk))})",
                 chunk,
             )}

@@ -1,5 +1,8 @@
 """Тесты политики повторов: что ретраим, что нет и сколько ждём."""
 
+import os
+from pathlib import Path
+
 import pytest
 import yadisk
 
@@ -231,16 +234,41 @@ def test_existing_file_with_same_size_is_skipped(tmp_path):
 def test_partial_file_is_redownloaded(tmp_path):
     target = tmp_path / "disk" / "photo.jpg"
     target.parent.mkdir(parents=True)
-    target.write_bytes(b"12")  # обрыв на середине
+    target.write_bytes(b"12")  # наша прежняя копия оборвалась на середине
 
     cli = FakeClient(payload=b"1234")
     res = _download_one(
-        DownloadJob(remote_path="disk:/disk/photo.jpg", size=4, md5=None),
+        DownloadJob(remote_path="disk:/disk/photo.jpg", size=4, md5=None, downloaded_at="2026-10-01 10:00:00"),
         cli, str(tmp_path),
     )
     assert res.status == "downloaded"
     assert res.bytes_written == 4
     assert target.read_bytes() == b"1234"
+
+
+def test_foreign_file_in_place_is_not_overwritten(tmp_path):
+    """На месте лежит не наша копия: человек положил свой файл или сортировка переложила сюда
+    другой («Работа/Договор.pdf» → «Документы/Договор.pdf»). Его не затираем — наш ляжет рядом."""
+    target = tmp_path / "Документы" / "Договор.pdf"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"work contract")
+
+    cli = FakeClient(payload=b"other contract")
+    res = _download_one(DownloadJob(remote_path="disk:/Документы/Договор.pdf", size=14, md5=None),
+                        cli, str(tmp_path))
+    assert res.status == "downloaded" and res.local_path != str(target)
+    assert target.read_bytes() == b"work contract"
+    assert Path(res.local_path).read_bytes() == b"other contract"
+    assert Path(res.local_path).parent == target.parent
+
+
+def test_downloaded_file_keeps_the_disk_modification_time(tmp_path):
+    cli = FakeClient(payload=b"1234")
+    when = 1_600_000_000.0
+    res = _download_one(DownloadJob(remote_path="disk:/a.jpg", size=4, md5=None, modified=when),
+                        cli, str(tmp_path))
+    assert res.status == "downloaded"
+    assert abs(os.path.getmtime(res.local_path) - when) < 2
 
 
 def test_failure_is_reported_not_raised(tmp_path):
@@ -302,7 +330,8 @@ def test_existing_file_same_size_md5_mismatch_is_redownloaded(tmp_path):
 
     cli = FakeClient(payload=real_data)
     res = _download_one(
-        DownloadJob(remote_path="disk:/disk/doc.txt", size=len(real_data), md5=real_md5),
+        DownloadJob(remote_path="disk:/disk/doc.txt", size=len(real_data), md5=real_md5,
+                    downloaded_at="2026-10-01 10:00:00"),  # испорченная — наша прежняя копия
         cli,
         str(tmp_path),
     )
