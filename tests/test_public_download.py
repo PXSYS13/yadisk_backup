@@ -174,6 +174,8 @@ def _link(conn, link_id=1):
     ("https://disk.yandex.ru/public/?hash=abc%3D", ("https://disk.yandex.ru/public/?hash=abc=", "/")),
     ("https://disk.yandex.ru/a/AbC-1_x?utm=1", ("https://disk.yandex.ru/a/AbC-1_x", "/")),
     ("https://yadi.sk/a/AbC-1_x", ("https://disk.yandex.ru/a/AbC-1_x", "/")),
+    # Ссылка, скопированная при просмотре одного фото, — тот же альбом
+    ("https://disk.yandex.ru/a/AbC-1_x/5f1c0a2b3c4d5e6f7a8b9c0d", ("https://disk.yandex.ru/a/AbC-1_x", "/")),
 ])
 def test_links_people_paste_are_understood(text, want):
     assert pd.normalize_public_url(text) == want
@@ -182,7 +184,7 @@ def test_links_people_paste_are_understood(text, want):
 @pytest.mark.parametrize("text,word", [
     ("", "Вставьте"), ("https://example.com/d/x", "не ссылка Яндекс Диска"),
     ("https://disk.yandex.ru/client/disk/Фото", "собственного Диска"),
-    ("https://disk.yandex.ru/a/xyz/photo", "весь альбом"),
+    ("https://disk.yandex.ru/a/", "ссылку на альбом"),
     ("https://disk.yandex.ru/d/", "/d/"),
 ])
 def test_wrong_links_get_a_plain_explanation(text, word):

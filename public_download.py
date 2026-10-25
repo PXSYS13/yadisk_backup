@@ -151,8 +151,8 @@ CREATE TABLE IF NOT EXISTS links_meta (key TEXT PRIMARY KEY, value TEXT);
 def normalize_public_url(text: str) -> tuple[str, str]:
     """Ссылка → (адрес для публичного API, подпапка '/…' или '/').
 
-    Принимает disk.yandex.ru/d/КЛЮЧ, /i/ (файл), yadi.sk, другие домены Яндекса и
-    ссылку на подпапку (…/d/КЛЮЧ/Подпапка — тогда качается только она). Ошибка —
+    Принимает disk.yandex.ru/d/КЛЮЧ, /i/ (файл), /a/ (альбом), yadi.sk, другие домены
+    Яндекса и ссылку на подпапку (…/d/КЛЮЧ/Подпапка — тогда качается только она). Ошибка —
     ValueError с текстом для человека.
     """
     raw = (text or "").strip()
@@ -174,8 +174,9 @@ def normalize_public_url(text: str) -> tuple[str, str]:
         raise ValueError("Это адрес вашего собственного Диска, а не публичная ссылка. "
                          "Свой Диск программа качает на «Главной»")
     if kind == "a":
-        if len(parts) != 2 or not re.fullmatch(r"[\w-]+", parts[1], flags=re.ASCII):
-            raise ValueError("Вставьте ссылку на весь альбом: disk.yandex.ru/a/КЛЮЧ")
+        # Ссылка, скопированная при просмотре одного фото (…/a/КЛЮЧ/ID), ведёт в тот же альбом
+        if len(parts) < 2 or not re.fullmatch(r"[\w-]+", parts[1], flags=re.ASCII):
+            raise ValueError("Вставьте ссылку на альбом: disk.yandex.ru/a/КЛЮЧ")
         return f"https://disk.yandex.ru/a/{parts[1]}", "/"
     if kind == "public" and parse_qs(u.query).get("hash"):
         # Старый вид ссылки: ключ — весь адрес
