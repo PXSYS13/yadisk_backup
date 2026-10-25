@@ -1,9 +1,13 @@
 """Тесты воркера безлимита: распаковка ZIP и учёт того, что реально приехало."""
 
+import errno
+import io
 import os
 import sqlite3
+import threading
 import time
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -188,25 +192,90 @@ def test_clean_stem():
     assert uw._clean_stem("photo.jpg") == ("photo", ".jpg")
 
 
-def test_claim_free_path_takes_the_name_at_once(tmp_path):
-    """Имя занимается сразу (O_EXCL): второй воркер с тем же именем получит следующее."""
-    orig = tmp_path / "test.jpg"
-    orig.write_text("first", encoding="utf-8")
-    cand1 = uw._claim_free_path(str(orig))
-    assert cand1.endswith("test_1.jpg") and os.path.exists(cand1)
-    cand2 = uw._claim_free_path(str(orig))
-    assert cand2.endswith("test_2.jpg")
-    assert orig.read_text(encoding="utf-8") == "first"
-
-
 def test_place_file_never_overwrites_another_photo(tmp_path):
     (tmp_path / "IMG_0001.JPG").write_bytes(b"first camera")
+    (tmp_path / "IMG_0001_1.JPG").write_bytes(b"third camera")
     tmp = tmp_path / "w1.part"
     tmp.write_bytes(b"second camera")
     final = uw._place_file(str(tmp), str(tmp_path / "IMG_0001.JPG"))
-    assert final.endswith("IMG_0001_1.JPG") and not tmp.exists()
+    assert final == str(tmp_path / "IMG_0001_2.JPG") and not tmp.exists()
     assert (tmp_path / "IMG_0001.JPG").read_bytes() == b"first camera"
-    assert (tmp_path / "IMG_0001_1.JPG").read_bytes() == b"second camera"
+    assert (tmp_path / "IMG_0001_1.JPG").read_bytes() == b"third camera"
+    assert (tmp_path / "IMG_0001_2.JPG").read_bytes() == b"second camera"
+
+
+def test_place_file_skips_a_folder_with_the_same_name(tmp_path):
+    """На месте имени — папка. Windows отвечал на O_EXCL «нет доступа»: файл уходил в local_disk
+    и перекачивался каждый круг. Фото ложится рядом, под следующим именем."""
+    (tmp_path / "IMG_0001.JPG").mkdir()
+    tmp = tmp_path / "w1.part"
+    tmp.write_bytes(b"photo")
+    final = uw._place_file(str(tmp), str(tmp_path / "IMG_0001.JPG"))
+    assert final == str(tmp_path / "IMG_0001_1.JPG")
+    assert (tmp_path / "IMG_0001_1.JPG").read_bytes() == b"photo"
+    assert (tmp_path / "IMG_0001.JPG").is_dir() and not tmp.exists()
+
+
+def test_interrupted_place_leaves_no_empty_file_under_the_real_name(tmp_path, monkeypatch):
+    """Перенос прервали (Ctrl+C, сбой): под настоящим именем не остаётся пустой заглушки — она
+    заняла бы имя фото и выглядела бы как оно само."""
+    tmp = tmp_path / "w1.part"
+    tmp.write_bytes(b"photo")
+
+    def interrupted(*a, **k):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as m:
+        for name in ("rename", "replace", "link"):
+            m.setattr(uw.os, name, interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            uw._place_file(str(tmp), str(tmp_path / "IMG_0001.JPG"))
+    assert not (tmp_path / "IMG_0001.JPG").exists()
+    assert tmp.read_bytes() == b"photo"
+
+
+def test_place_file_on_a_disk_without_hard_links(tmp_path, monkeypatch):
+    """FAT, exFAT, сетевые диски на Linux и macOS: link не работает — имя занимается O_EXCL,
+    чужое фото всё равно не затирается."""
+    monkeypatch.setattr(uw, "IS_WINDOWS", False)
+
+    def no_links(*a, **k):
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(uw.os, "link", no_links)
+    (tmp_path / "a.jpg").write_bytes(b"first")
+    tmp = tmp_path / "w1.part"
+    tmp.write_bytes(b"second")
+    assert uw._place_file(str(tmp), str(tmp_path / "a.jpg")) == str(tmp_path / "a_1.jpg")
+    assert (tmp_path / "a.jpg").read_bytes() == b"first"
+    assert (tmp_path / "a_1.jpg").read_bytes() == b"second" and not tmp.exists()
+
+
+def test_place_file_from_another_disk(tmp_path, monkeypatch):
+    """Временная папка на другом диске: rename и link туда не умеют — копия ложится рядом с фото
+    и переносится так же, без затирания, а лишних файлов не остаётся."""
+    tmp = tmp_path / "tmp" / "w1_file.part"
+    tmp.parent.mkdir()
+    tmp.write_bytes(b"photo")
+    extract = tmp_path / "extract"
+    extract.mkdir()
+    (extract / "a.jpg").write_bytes(b"other")
+    other_disk = os.path.normcase(str(tmp.parent))
+
+    def across(real):
+        def move(src, dst, *a, **k):
+            if os.path.normcase(os.path.dirname(os.path.abspath(src))) == other_disk:
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            return real(src, dst, *a, **k)
+        return move
+
+    with monkeypatch.context() as m:
+        m.setattr(uw.os, "rename", across(os.rename))
+        m.setattr(uw.os, "link", across(os.link))
+        assert uw._place_file(str(tmp), str(extract / "a.jpg")) == str(extract / "a_1.jpg")
+    assert (extract / "a.jpg").read_bytes() == b"other" and (extract / "a_1.jpg").read_bytes() == b"photo"
+    assert sorted(p.name for p in extract.iterdir()) == ["a.jpg", "a_1.jpg"]
+    assert not tmp.exists()
 
 
 # ── БД: попытки и переход в failed ──────────────────────────────────────────
@@ -844,6 +913,94 @@ def test_download_and_extract_http_errors_are_typed(tmp_path, monkeypatch):
     assert res.failure.kind == "refused"
 
 
+def _zip_bytes(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_zip_reuses_only_the_same_file_not_a_namesake(tmp_path, monkeypatch):
+    """На месте лежит «IMG_0001.JPG» того же размера, но другое фото: распаковываем рядом, а не
+    считаем скачанным. То же самое фото (CRC из архива совпал) второй раз не пишем."""
+    extract = tmp_path / "extract"
+    monkeypatch.setattr(uw, "EXTRACT_DIR", str(extract))
+    monkeypatch.setattr(uw, "ZIP_TMP_DIR", str(tmp_path / "zips"))
+    extract.mkdir()
+    (extract / "IMG_0001.JPG").write_bytes(b"other photo!")
+    (extract / "same.jpg").write_bytes(b"same")
+    data = _zip_bytes({"IMG_0001.JPG": b"new photo!!!", "same.jpg": b"same"})
+    res = uw.download_and_extract(_session_with(_FakeStream(data)), "http://x", 1, 1)
+
+    assert res.failure is None
+    assert {it.name: it.dst for it in res.extracted} == {
+        "IMG_0001.JPG": str(extract / "IMG_0001_1.JPG"), "same.jpg": str(extract / "same.jpg")}
+    assert (extract / "IMG_0001.JPG").read_bytes() == b"other photo!"
+    assert (extract / "IMG_0001_1.JPG").read_bytes() == b"new photo!!!"
+    assert sorted(p.name for p in extract.iterdir()) == ["IMG_0001.JPG", "IMG_0001_1.JPG", "same.jpg"]
+
+
+def test_zip_member_that_cannot_be_written_fails_alone(db, sleeps, tmp_path, monkeypatch):
+    """Длинный путь или файл больше 4 ГБ для FAT32 — вина одного файла: остальные записи архива
+    распаковываются, а он сразу в ошибках, как в direct. Раньше весь архив уходил в «диск не
+    принимает»: файлы возвращались в очередь, и через 10 кругов воркер выходил с кодом 4."""
+    uw.ensure_attempts_column()
+    monkeypatch.setattr(uw, "EXTRACT_DIR", str(tmp_path / "extract"))
+    monkeypatch.setattr(uw, "ZIP_TMP_DIR", str(tmp_path / "zips"))
+    real = uw._place_file
+
+    def place(tmp, dst):
+        if dst.endswith("a.jpg"):
+            raise OSError(errno.ENAMETOOLONG, "File name too long", dst)
+        return real(tmp, dst)
+
+    monkeypatch.setattr(uw, "_place_file", place)
+    w = uw.Worker(worker_id=1, batch_size=10, mode="zip")
+    batch = uw.take_batch(1, size=10)  # a.jpg (10 байт) и b.jpg (20 байт)
+    data = _zip_bytes({"a.jpg": b"a" * 10, "b.jpg": b"b" * 20})
+    result = uw.download_and_extract(_session_with(_FakeStream(data)), "http://x", 1, 1)
+    assert result.failure is None and [r.name for r in result.rejected] == ["a.jpg"]
+
+    w._on_downloaded(batch, result, dur=1.0)
+    assert status_of(db, "1") == ("failed", uw.MAX_ATTEMPTS)
+    assert status_of(db, "2") == ("downloaded", 0)
+    assert w._disk_full_streak == 0 and w._fail_streak == 0
+    assert not list((tmp_path / "extract").glob("*.part"))
+
+
+def test_two_workers_unpacking_namesakes_do_not_mix_bytes(tmp_path, monkeypatch):
+    """Два воркера одновременно распаковывают одноимённые фото из разных архивов. Временный файл
+    был общим (имя только по месту назначения): байты смешивались, одно фото терялось."""
+    (tmp_path / "extract").mkdir()  # как в жизни: папку создаёт запуск воркера
+    monkeypatch.setattr(uw, "EXTRACT_DIR", str(tmp_path / "extract"))
+    real_copy = uw.shutil.copyfileobj
+    both_writing = threading.Barrier(2, timeout=10)
+
+    def copy(src, dst, length=0):
+        real_copy(src, dst, length)
+        dst.flush()
+        both_writing.wait()  # оба дописали свой временный файл, но ещё не перенесли
+
+    monkeypatch.setattr(uw.shutil, "copyfileobj", copy)
+    results = {}
+
+    def unpack(worker_id, data):
+        archive = tmp_path / f"w{worker_id}.zip"
+        archive.write_bytes(_zip_bytes({"IMG_0001.JPG": data}))
+        results[worker_id] = uw._extract_zip(str(archive), worker_id, 1)
+
+    threads = [threading.Thread(target=unpack, args=(1, b"A" * 1000)),
+               threading.Thread(target=unpack, args=(2, b"B" * 1000))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert all(r.failure is None and len(r.extracted) == 1 for r in results.values()) and len(results) == 2
+    saved = {Path(it.dst).read_bytes() for r in results.values() for it in r.extracted}
+    assert saved == {b"A" * 1000, b"B" * 1000}
+
+
 def test_check_disk_space(tmp_path, monkeypatch):
     import shutil
     has_space, free_bytes = uw.check_disk_space(str(tmp_path), min_bytes=100)
@@ -952,6 +1109,28 @@ def test_download_file_never_overwrites_existing_file(dirs):
     assert failure is None
     assert path == str(dirs / "a_1.jpg")
     assert (dirs / "a.jpg").read_bytes() == b"other"
+
+
+def test_stale_temp_file_linked_to_a_photo_is_never_written_through(dirs, tmp_path, monkeypatch):
+    """Перенос прервали между link и unlink: временное имя осталось жёсткой ссылкой на готовое
+    фото. Следующая запись во временный файл не должна переписать это фото."""
+    dirs.mkdir()
+    photo = dirs / "old.jpg"
+    photo.write_bytes(b"old photo")
+    (tmp_path / "tmp").mkdir()
+    os.link(photo, tmp_path / "tmp" / "w1_file.part")
+    path, failure = uw.download_file(_session_with(_FakeStream(b"0123456789")), "http://x",
+                                     str(dirs / "new.jpg"), 10, 1)
+    assert failure is None and Path(path).read_bytes() == b"0123456789"
+    assert photo.read_bytes() == b"old photo"
+
+    # То же при распаковке архива: временный файл воркера лежит в папке фото
+    os.link(photo, uw._extract_part_path(str(dirs / "new2.jpg"), 1))
+    monkeypatch.setattr(uw, "ZIP_TMP_DIR", str(tmp_path / "zips"))
+    data = _zip_bytes({"new2.jpg": b"fresh"})
+    res = uw.download_and_extract(_session_with(_FakeStream(data)), "http://x", 1, 1)
+    assert res.failure is None and (dirs / "new2.jpg").read_bytes() == b"fresh"
+    assert photo.read_bytes() == b"old photo"
 
 
 def test_download_file_size_mismatch_is_not_saved(dirs):

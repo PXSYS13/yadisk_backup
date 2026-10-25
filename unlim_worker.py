@@ -38,6 +38,7 @@ import sqlite3
 import sys
 import time
 import zipfile
+import zlib
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -79,6 +80,7 @@ from utils import (
     EXIT_INTERRUPTED,
     EXIT_OUTAGE,
     EXIT_PARTIAL,
+    IS_WINDOWS,
     TELEGRAM_CHANNEL,
     categorize,
     deferred_round_text,
@@ -91,7 +93,6 @@ from utils import (
     keep_awake,
     local_copy_matches,
     local_error_kind,
-    part_path_for,
     preview_path_for,
     previews_enabled,
     remove_preview,
@@ -847,38 +848,93 @@ def safe_extract_dst(base_dir: str, member_name: str) -> str | None:
     return dst
 
 
-def _claim_free_path(path: str) -> str:
-    """Свободное имя: path или path_1, path_2 … — и сразу занимает его пустым файлом.
+def _name_taken(e: OSError, path: str) -> bool:
+    """Ошибка значит «имя уже занято». На месте имени папка — Windows отвечает «нет доступа»."""
+    return isinstance(e, FileExistsError) or (isinstance(e, PermissionError) and os.path.lexists(path))
 
-    Воркеры — отдельные процессы. Проверка «имя свободно» и перенос файла у двух воркеров,
-    докачавших разные фото с одним именем (IMG_0001.JPG бывает у многих камер), могли
-    совпасть — и второе фото затирало первое. Создание с O_EXCL занимает имя атомарно.
+
+def _move_no_clobber(src: str, dst: str) -> bool:
+    """Переносит src в dst, только если имя dst свободно. False — занято (файлом, папкой, ссылкой).
+
+    Без «проверил, потом перенёс»: воркеры — отдельные процессы, и между проверкой и переносом
+    другой воркер мог положить туда своё фото (IMG_0001.JPG бывает у многих камер). Windows:
+    os.rename сам отказывает, если dst есть. Linux и macOS: rename молча затирает, а жёсткая
+    ссылка — нет, поэтому link, затем unlink. Прерванный перенос оставляет только src: пустой
+    заглушки под настоящим именем, как у «занять имя пустым файлом, потом перенести», нет.
+    Диски без жёстких ссылок (FAT, exFAT, часть сетевых) — запасной путь _move_claimed.
     """
-    base, ext = os.path.splitext(path)
-    cand, i = path, 0
-    while True:
-        try:
-            os.close(os.open(to_long_path(cand), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
-            return cand
-        except FileExistsError:
-            i += 1
-            cand = f"{base}_{i}{ext}"
+    s, d = to_long_path(src), to_long_path(dst)
+    try:
+        if IS_WINDOWS:
+            os.rename(s, d)
+            return True
+        os.link(s, d)
+    except OSError as e:
+        if _name_taken(e, d):
+            return False
+        if IS_WINDOWS or e.errno == errno.EXDEV:
+            raise
+        # Ошибку самого диска (места нет, нет прав) запасной путь получит и покажет так же
+        return _move_claimed(s, d)
+    remove_quiet(s)
+    return True
+
+
+def _move_claimed(src: str, dst: str) -> bool:
+    """Запасной путь для дисков без жёстких ссылок: имя занимается пустым файлом (O_EXCL),
+    затем rename. Заглушка живёт доли миллисекунды, при ошибке и Ctrl+C убирается."""
+    try:
+        os.close(os.open(dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except OSError as e:
+        if _name_taken(e, dst):
+            return False
+        raise
+    try:
+        os.replace(src, dst)
+    except BaseException:
+        remove_quiet(dst)
+        raise
+    return True
+
+
+def _copy_beside(tmp: str, dst: str) -> str:
+    """Копия tmp во временный файл в папке dst: перенести между дисками rename не умеет."""
+    local = os.path.join(os.path.dirname(dst), ".yadisk-" + os.path.basename(tmp))
+    remove_quiet(to_long_path(local))
+    try:
+        with open(to_long_path(tmp), "rb") as fs, open(to_long_path(local), "xb") as fd:
+            shutil.copyfileobj(fs, fd, 1024 * 1024)
+    except BaseException:
+        remove_quiet(to_long_path(local))
+        raise
+    return local
 
 
 def _place_file(tmp: str, dst: str) -> str:
-    """Переносит готовый tmp на свободное имя рядом с dst (dst, dst_1 …). Возвращает итоговый путь."""
-    final = _claim_free_path(dst)
+    """Переносит готовый tmp на свободное имя рядом с dst (dst, dst_1 …). Возвращает итоговый путь.
+
+    Занятое имя не затирается никогда — ни файл, ни папка, ни ссылка (см. _move_no_clobber).
+    """
+    base, ext = os.path.splitext(dst)
+    src, cand, i = tmp, dst, 0
     try:
-        try:
-            os.replace(to_long_path(tmp), to_long_path(final))
-        except OSError as e:
-            if e.errno != errno.EXDEV:
-                raise
-            shutil.move(to_long_path(tmp), to_long_path(final))  # временная папка на другом диске
-    except OSError:
-        remove_quiet(to_long_path(final))  # пустая заглушка не должна остаться вместо фото
-        raise
-    return final
+        while True:
+            try:
+                if _move_no_clobber(src, cand):
+                    break
+            except OSError as e:
+                if e.errno != errno.EXDEV or src != tmp:
+                    raise
+                src = _copy_beside(tmp, dst)  # временная папка на другом диске
+                continue
+            i += 1
+            cand = f"{base}_{i}{ext}"
+    finally:
+        if src != tmp:
+            remove_quiet(to_long_path(src))  # копия, если перенести её не удалось
+    if src != tmp:
+        remove_quiet(to_long_path(tmp))
+    return cand
 
 
 def _clean_stem(name: str) -> tuple[str, str]:
@@ -897,10 +953,19 @@ class ExtractedItem(NamedTuple):
     dst: str = ""
 
 
+class RejectedItem(NamedTuple):
+    """Запись архива, которую не записать в эту папку (длинный путь, FAT32): виноват файл, не диск."""
+
+    name: str
+    size: int
+    reason: str  # «local_file | …» — так же, как в режиме direct
+
+
 class FetchResult(NamedTuple):
     extracted: list[ExtractedItem]
     total_bytes: int
     failure: FetchFailure | None = None
+    rejected: tuple[RejectedItem, ...] = ()
 
 
 _NOT_ZIP_CONTENT_TYPES = ("text/html", "application/json", "text/plain")
@@ -989,9 +1054,37 @@ def _download_zip_to(s, url: str, tmp: str, zip_path: str, worker_id: int, batch
     return failure
 
 
+def _extract_part_path(dst: str, worker_id: int) -> str:
+    """Временный файл распаковки рядом с dst — свой у каждого воркера (и процесса).
+
+    Имя только по dst было общим: два воркера, распаковывавшие одноимённые фото из разных
+    архивов, писали в один файл, и одно из фото записывалось смесью байтов.
+    """
+    return os.path.join(os.path.dirname(dst), f".yadisk-w{worker_id}-{os.getpid()}.part")
+
+
+def _same_as_member(path: str, m: zipfile.ZipInfo) -> bool:
+    """На месте уже лежит эта же запись архива: тот же размер и CRC32 (его хранит сам ZIP).
+
+    Только по имени и размеру нельзя: «IMG_0001.JPG» того же размера бывает и другим фото.
+    """
+    crc = 0
+    try:
+        local = to_long_path(path)
+        if not os.path.isfile(local) or os.path.getsize(local) != m.file_size:
+            return False
+        with open(local, "rb") as f:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                crc = zlib.crc32(block, crc)
+    except OSError:
+        return False
+    return crc == m.CRC
+
+
 def _extract_zip(zip_path: str, worker_id: int, batch_idx: int) -> FetchResult:
     """Распаковывает архив в EXTRACT_DIR."""
     extracted: list[ExtractedItem] = []
+    rejected: list[RejectedItem] = []
     total_bytes = 0
     reused = 0
     errors = 0
@@ -1004,17 +1097,20 @@ def _extract_zip(zip_path: str, worker_id: int, batch_idx: int) -> FetchResult:
                     log.warning(f"w{worker_id} пропускаю опасное имя в архиве: {m.filename!r}")
                     errors += 1
                     continue
-                tmp = part_path_for(dst)
+                tmp = _extract_part_path(dst, worker_id)
                 try:
-                    if os.path.exists(to_long_path(dst)) and os.path.getsize(to_long_path(dst)) == m.file_size:
+                    if _same_as_member(dst, m):
                         extracted.append(ExtractedItem(os.path.basename(m.filename), m.file_size, dst))
                         total_bytes += m.file_size
                         reused += 1
                         continue
                     os.makedirs(to_long_path(os.path.dirname(dst) or "."), exist_ok=True)
                     # Сначала во временный файл: оборванная распаковка (CRC, место, Ctrl+C) не оставит
-                    # обрезанное фото под настоящим именем. Другой файл с тем же именем не затираем
-                    with zf.open(m) as src, open(to_long_path(tmp), "wb") as f:
+                    # обрезанное фото под настоящим именем. Другой файл с тем же именем не затираем.
+                    # Старый временный — прочь, а новый только создаём ("xb"): прерванный перенос мог
+                    # оставить его жёсткой ссылкой на готовое фото, и запись поверх испортила бы фото
+                    remove_quiet(to_long_path(tmp))
+                    with zf.open(m) as src, open(to_long_path(tmp), "xb") as f:
                         shutil.copyfileobj(src, f, 1024 * 1024)
                     dst = _place_file(tmp, dst)
                     extracted.append(ExtractedItem(os.path.basename(m.filename), m.file_size, dst))
@@ -1028,19 +1124,27 @@ def _extract_zip(zip_path: str, worker_id: int, batch_idx: int) -> FetchResult:
                         log.warning(f"w{worker_id} extract {m.filename}: {e}")
                         continue
                     if is_local_disk_error(e):
+                        if local_error_kind(e) == "local_file":
+                            # Имя или размер не подходят этой папке (длинный путь, FAT32): виноват
+                            # этот файл, а не диск — остальные записи архива распаковываем дальше
+                            log.warning(f"w{worker_id} b{batch_idx} extract {m.filename}: {e}")
+                            rejected.append(RejectedItem(os.path.basename(m.filename), m.file_size,
+                                                         f"local_file | ошибка записи при распаковке: {e}"))
+                            continue
                         # Место/права — дальше распаковывать бессмысленно, и файлы не виноваты
                         log.error(f"w{worker_id} b{batch_idx} extract {m.filename}: {e}")
                         return FetchResult(extracted, total_bytes,
-                                           FetchFailure("local_disk", f"ошибка записи при распаковке: {e}"))
+                                           FetchFailure("local_disk", f"ошибка записи при распаковке: {e}"),
+                                           tuple(rejected))
                     errors += 1
                     log.warning(f"w{worker_id} extract {m.filename}: {e}")
     except zipfile.BadZipFile as e:
         log.error(f"w{worker_id} b{batch_idx} bad zip: {e}")
         return FetchResult([], 0, FetchFailure("bad_zip", f"архив повреждён: {e}"))
-    log.info("w%d b%d: в архиве %d файлов, распаковано %d (%s), уже были %d, ошибок %d",
+    log.info("w%d b%d: в архиве %d файлов, распаковано %d (%s), уже были %d, не записать %d, ошибок %d",
              worker_id, batch_idx, len(members), len(extracted) - reused,
-             human_bytes(total_bytes), reused, errors)
-    return FetchResult(extracted, total_bytes, None)
+             human_bytes(total_bytes), reused, len(rejected), errors)
+    return FetchResult(extracted, total_bytes, None, tuple(rejected))
 
 
 def download_and_extract(
@@ -1099,6 +1203,9 @@ def download_file(
         except OSError as e:  # диск отключили посреди скачивания
             written, failure = 0, FetchFailure("local_disk", f"не создать папку для файлов: {e}")
         else:
+            # Старый .part — прочь до записи: прерванный перенос (link без unlink) мог оставить его
+            # жёсткой ссылкой на готовое фото, и запись поверх испортила бы фото
+            remove_quiet(tmp)
             written, _host, failure = fetch_to_file(
                 s, url, tmp,
                 expected_size=expected_size or None,
@@ -1610,6 +1717,12 @@ class Worker:
             return
 
         res = split_by_extracted(batch, result.extracted)
+        if result.rejected:
+            rejected = self._reject_unwritable(batch, res.missing, result.rejected)
+            res = res._replace(missing=[fid for fid in res.missing if fid not in rejected])
+            if not res.done and not res.missing:
+                return  # архив Яндекс отдал, просто эти файлы сюда не записать
+            batch = [it for it in batch if str(it["file_id"]) not in rejected]
         if res.done:
             self._on_batch_success(batch, res, dur)
             return
@@ -1619,6 +1732,23 @@ class Worker:
         self.say(f"batch {self.batch_idx}: ⚠️ Сбой отдачи архива узлом Яндекса ({len(batch)} файлов): {reason}")
         server_issue = failure.is_server_issue if failure else False
         self._on_batch_failed(batch, reason, server_issue, 5, failure.kind if failure else "missing")
+
+    def _reject_unwritable(self, batch: list[dict], missing: list[str],
+                           rejected: Iterable[RejectedItem]) -> set[str]:
+        """Записи архива, которые не записать в эту папку, — сразу в ошибки, как в режиме direct:
+        Яндекс отдаст их и в третий раз, а лягут байты туда же. Возвращает их file_id."""
+        missing_set = set(missing)
+        left = [it for it in batch if str(it["file_id"]) in missing_set]
+        failed: set[str] = set()
+        for r in rejected:
+            ids = split_by_extracted(left, [(r.name, r.size)]).done
+            if not ids:
+                continue
+            mark_failed(ids, r.reason, self.id)
+            self.say(f"batch {self.batch_idx}: ⚠️ Файл {r.name} не записать в папку: {r.reason}")
+            failed.update(ids)
+            left = [it for it in left if str(it["file_id"]) not in failed]
+        return failed
 
     def _on_local_disk_failure(self, ids: list[str], failure: FetchFailure) -> None:
         """Локальный диск (место/права) — Яндекс и файлы ни при чём."""
