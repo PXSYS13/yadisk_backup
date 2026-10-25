@@ -837,6 +837,38 @@ def _beside(local_path: str, remote_path: str) -> str:
     return os.path.join(folder, name_with_tag(name, f"_{short_hash(remote_path)}"))
 
 
+def _named_for(local_path: str, remote_path: str) -> bool:
+    """В имени файла — хеш его пути на Диске: так его назвала сама программа (правило до 2.3.1,
+    занятое имя, копия «рядом»). Файл по такому пути — наша копия этого же файла Диска."""
+    return f"_{short_hash(remote_path)}" in os.path.basename(local_path)
+
+
+def _is_leftover(existing: str, fresh: str) -> bool:
+    """На месте лежит начало только что скачанного файла (или он весь) — его можно заменить.
+
+    Версии до 12 октября качали прямо в настоящее имя: обрыв или молчащий сервер оставляли
+    там пустой или недокачанный файл, а в базе — ни отметки о скачивании. Такой файл байт
+    в байт совпадает с началом скачанного. Файл, который положил человек или переложила
+    «Сортировка», не совпадёт, даже если он меньше. Не прочитать — не затираем.
+    """
+    try:
+        path = to_long_path(existing)
+        if os.path.islink(path) or not os.path.isfile(path):
+            return False
+        left = os.path.getsize(path)
+        if left > os.path.getsize(fresh):
+            return False
+        with open(path, "rb") as old, open(fresh, "rb") as new:
+            while left > 0:
+                block = old.read(min(left, 1024 * 1024))
+                if not block or block != new.read(len(block)):
+                    return False
+                left -= len(block)
+        return True
+    except OSError:
+        return False
+
+
 def _already_downloaded(job: DownloadJob, local_path: str) -> bool:
     """Resume: локальный файл того же размера (и MD5, если API его отдал) — качать не надо."""
     existing_size = file_size_safe(local_path)
@@ -884,12 +916,15 @@ def _download_one(
 
         if _already_downloaded(job, local_path):
             return finish("skipped", local_path)
-        if not job.downloaded_at and os.path.lexists(to_long_path(local_path)):
-            # На этом месте лежит не наша копия: её положил человек или сортировка переложила
-            # сюда другой файл. Не затираем — наш файл ляжет рядом
-            local_path = _beside(local_path, job.remote_path)
-            if _already_downloaded(job, local_path):
-                return finish("skipped", local_path)
+        beside = ""
+        if (not job.downloaded_at and not _named_for(local_path, job.remote_path)
+                and os.path.lexists(to_long_path(local_path))):
+            # На этом месте лежит файл, который программа туда не записывала: его мог положить
+            # человек или переложить сортировка. Затираем его, только если это оборванное начало
+            # этого же файла (решится после скачивания), иначе наш файл ляжет рядом
+            beside = _beside(local_path, job.remote_path)
+            if _already_downloaded(job, beside):
+                return finish("skipped", beside)
         if why := too_big_for_folder(os.path.dirname(local_path), job.size):
             return finish("failed", error=f"local_file | {why}")
 
@@ -898,6 +933,8 @@ def _download_one(
         part_path = to_long_path(part_path_for(local_path))
         remove_quiet(part_path)
         _download_with_retry(client, job.remote_path, part_path, job)
+        if beside and not _is_leftover(local_path, part_path):
+            local_path = beside
         os.replace(part_path, to_long_path(local_path))
         _set_mtime(local_path, job.modified)
     except StorageUnavailable as e:

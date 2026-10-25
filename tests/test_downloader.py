@@ -310,18 +310,97 @@ def test_existing_file_with_same_size_is_skipped(tmp_path):
 
 
 def test_partial_file_is_redownloaded(tmp_path):
+    """Версии до 12 октября качали прямо в настоящее имя: обрыв оставлял там начало файла, а в базе —
+    ни отметки о скачивании. Это наш недокачанный файл: он заменяется, а не остаётся под настоящим
+    именем рядом с «photo_a1b2c3.jpg»."""
     target = tmp_path / "disk" / "photo.jpg"
     target.parent.mkdir(parents=True)
-    target.write_bytes(b"12")  # наша прежняя копия оборвалась на середине
+    target.write_bytes(b"12")  # обрыв на середине
+
+    cli = FakeClient(payload=b"1234")
+    res = _download_one(
+        DownloadJob(remote_path="disk:/disk/photo.jpg", size=4, md5=None),
+        cli, str(tmp_path),
+    )
+    assert res.status == "downloaded"
+    assert res.bytes_written == 4
+    assert res.local_path == str(target)
+    assert target.read_bytes() == b"1234"
+    assert os.listdir(target.parent) == ["photo.jpg"]
+
+
+def test_our_broken_copy_is_redownloaded_in_place(tmp_path):
+    target = tmp_path / "disk" / "photo.jpg"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"12")
 
     cli = FakeClient(payload=b"1234")
     res = _download_one(
         DownloadJob(remote_path="disk:/disk/photo.jpg", size=4, md5=None, downloaded_at="2026-10-01 10:00:00"),
         cli, str(tmp_path),
     )
-    assert res.status == "downloaded"
-    assert res.bytes_written == 4
+    assert res.status == "downloaded" and res.local_path == str(target)
     assert target.read_bytes() == b"1234"
+
+
+def test_empty_leftover_of_a_timed_out_download_is_replaced(tmp_path):
+    """Таймаут на молчащем сервере в старой версии оставлял пустой файл под настоящим именем."""
+    target = tmp_path / "Фото" / "IMG_0001.JPG"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"")
+
+    res = _download_one(DownloadJob(remote_path="disk:/Фото/IMG_0001.JPG", size=5, md5=None),
+                        FakeClient(payload=b"photo"), str(tmp_path))
+    assert res.status == "downloaded" and res.local_path == str(target)
+    assert target.read_bytes() == b"photo"
+    assert os.listdir(target.parent) == ["IMG_0001.JPG"]
+
+
+def test_identical_file_of_unknown_size_is_not_duplicated(tmp_path):
+    """Размер файла API не сообщил: копию на месте не проверить заранее. Скачанное совпало с ней —
+    второй копии рядом не появляется."""
+    target = tmp_path / "doc.txt"
+    target.write_bytes(b"same text")
+
+    res = _download_one(DownloadJob(remote_path="disk:/doc.txt", size=None, md5=None),
+                        FakeClient(payload=b"same text"), str(tmp_path))
+    assert res.status == "downloaded" and res.local_path == str(target)
+    assert os.listdir(tmp_path) == ["doc.txt"]
+
+
+def test_copy_under_a_name_with_its_own_hash_is_updated_in_place(tmp_path):
+    """Файл лежит под именем по правилу до 2.3.1 (с хешем пути на Диске) — это наша прежняя копия:
+    новая версия файла заменяет её, а не ложится рядом под именем с двумя хешами."""
+    from utils import legacy_local_path
+
+    remote = "disk:/Встреча: итоги/SomeDox.docx"
+    old = Path(legacy_local_path(str(tmp_path), remote))
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"old version, longer one")
+
+    res = _download_one(DownloadJob(remote_path=remote, size=11, md5=None, local_path=str(old)),
+                        FakeClient(payload=b"new version"), str(tmp_path))
+    assert res.status == "downloaded" and res.local_path == str(old)
+    assert old.read_bytes() == b"new version"
+    assert os.listdir(old.parent) == [old.name]
+
+
+@pytest.mark.parametrize("theirs", [b"work", b"word doc", b"work contract, signed"])
+def test_different_file_of_any_size_is_never_overwritten(tmp_path, theirs):
+    """Меньше, столько же или больше — файл, который не начало нашего, остаётся на месте."""
+    import hashlib
+
+    target = tmp_path / "Документы" / "Договор.pdf"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(theirs)
+
+    ours = b"our file"
+    res = _download_one(DownloadJob(remote_path="disk:/Документы/Договор.pdf", size=len(ours),
+                                    md5=hashlib.md5(ours).hexdigest()),
+                        FakeClient(payload=ours), str(tmp_path))
+    assert res.status == "downloaded" and res.local_path != str(target)
+    assert target.read_bytes() == theirs
+    assert Path(res.local_path).read_bytes() == ours
 
 
 def test_foreign_file_in_place_is_not_overwritten(tmp_path):
