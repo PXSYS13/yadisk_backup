@@ -56,7 +56,7 @@ def test_main_maps_token_state_to_exit_code(monkeypatch, state, code):
 
 
 def test_webui_marks_unreachable_token_check(monkeypatch):
-    monkeypatch.setattr(webapp.access, "make_client", lambda token: _Client(requests.exceptions.ReadTimeout("slow")))
+    monkeypatch.setattr(webapp.access, "make_browse_client", lambda token: _Client(requests.exceptions.ReadTimeout("slow")))
     monkeypatch.setitem(webapp.access._token_check_cache, "token", None)
     data = webapp.access.check_token("y0_unique-token-for-this-test")
     assert data["ok"] is False

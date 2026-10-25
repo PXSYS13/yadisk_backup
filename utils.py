@@ -601,6 +601,10 @@ def is_safe_dir(path: str, *, must_exist: bool = False) -> tuple[bool, str]:
     """
     if not path or not path.strip():
         return False, "Пустой путь"
+    # Путь ложится в .env: управляющие символы ломают файл, а ${…} python-dotenv подставил бы
+    # при чтении — программа писала бы в другую папку, не в проверенную
+    if any(ord(ch) < 32 for ch in path) or "${" in path:
+        return False, "Недопустимые символы в пути"
     # Префикс длинных путей Windows не должен обходить проверки: \\?\C:\Windows — это C:\Windows
     p_str = _strip_long_prefix(path.strip())
     raw_norm = p_str.lower().replace("/", "\\")

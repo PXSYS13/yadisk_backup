@@ -38,6 +38,7 @@ from webapp.tasks import (
     SLOT_LINKS,
     SLOT_ORGANIZE,
     UNLIM_SLOT_PREFIX,
+    organize_moving,
     stop_and_wait,
     tm,
 )
@@ -48,6 +49,11 @@ router = APIRouter()
 
 def _resp(t: tuple[bool, str]) -> dict:
     return {"ok": t[0], "msg": t[1]}
+
+
+# Папки самой программы: скачанное с Диска легло бы поверх её файлов и баз
+PROGRAM_SUBDIRS = ("logs", "webui_assets", "webapp", "docs", "tests", "tools", ".git", ".venv")
+ORGANIZE_BUSY = "Сначала дождитесь конца сортировки: она переносит файлы, и скачивание их перепутает"
 
 
 # ── Настройки: что и как качать ──
@@ -132,13 +138,28 @@ def api_set_dir(payload: DownloadDirPayload):
         raise HTTPException(409, "Сначала остановите скачивание — потом можно сменить папку")
     if tm.any_alive(SLOT_LINKS):
         raise HTTPException(409, "Сначала остановите скачивание по ссылкам — потом можно сменить папку")
+    if organize_moving():
+        raise HTTPException(409, ORGANIZE_BUSY)
     ok, msg = is_safe_download_dir(d)
+    if ok and _inside_program(d):
+        ok, msg = False, "Это папка самой программы: файлы с Диска легли бы поверх её файлов. Выберите другую"
     if not ok:
         log.warning("папка отклонена: %r — %s", d, msg)
         raise HTTPException(400, msg)
     config.env_set("DOWNLOAD_DIR", d)
     log.info("папка скачивания сохранена: %s", d)
     return {"ok": True, "download_dir": d, "free_space": free_space(d)}
+
+
+def _inside_program(path: str) -> bool:
+    """Сама папка программы или её служебная подпапка (logs, webui_assets …)."""
+    try:
+        p = Path(path).resolve()
+    except OSError:
+        return False
+    if p == paths.PROJECT:
+        return True
+    return any(p == paths.PROJECT / sub or (paths.PROJECT / sub) in p.parents for sub in PROGRAM_SUBDIRS)
 
 
 # ── «Режим спасения»: запуск, повторы, остановка ──
@@ -156,6 +177,8 @@ def api_rescue_start():
     do_disk, do_unlim = "disk" in st["sources"], "unlim" in st["sources"]
     if rescue.is_running():
         return _resp(rescue.start())  # идёт — значит «попробовать отложенные сейчас»
+    if organize_moving():
+        return {"ok": False, "msg": ORGANIZE_BUSY}
     src = access.preflight_sources(do_disk, do_unlim)
     if src["error"]:
         return {"ok": False, "msg": src["error"]}
@@ -252,7 +275,7 @@ def unlim_preview():
 
 class OpenFolderPayload(BaseModel):
     which: str = "download"  # download | unlim | previews | links | disk_folder
-    link_id: int | None = None  # для links: папка одной ссылки
+    link_id: int | None = Field(None, ge=1, le=2 ** 63 - 1)  # для links: папка одной ссылки
     path: str | None = None  # для disk_folder: папка Диска, например disk:/Фото/2023
 
 
@@ -331,7 +354,8 @@ def safe_remove_db_files(base_file: Path) -> tuple[bool, str]:
     deadline = time.monotonic() + 3.0
     while True:
         errors = []
-        for suffix in ("", "-wal", "-shm"):
+        # Сначала журналы: оставшийся -wal без базы SQLite применил бы к новой пустой базе
+        for suffix in ("-wal", "-shm", ""):
             f = Path(str(base_file) + suffix)
             if f.exists():
                 try:
