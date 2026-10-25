@@ -121,7 +121,7 @@ global.matchMedia = () => ({ matches: false, addEventListener() {} });
 for (const f of ['core.js', 'components.js', 'screens/home.js']) require(path.join(process.env.JS_DIR, f));
 window.App.screens.home.update(JSON.parse(require('fs').readFileSync(0, 'utf8')));
 process.stdout.write(JSON.stringify({ stats: nodes['home-stats'].innerHTML, where: nodes['home-where'].innerHTML,
-  space: nodes['home-space'].innerHTML, sources: nodes['home-sources'].innerHTML }));
+  space: nodes['home-space'].innerHTML, sources: nodes['home-sources'].innerHTML, actions: nodes['home-actions'].innerHTML }));
 """
 
 
@@ -168,6 +168,21 @@ def test_home_warns_about_space_and_counts_complete_folders(monkeypatch):
     full["rescue"]["space"]["short"] = True
     assert _render_home(full)["space"] == ""  # про место уже говорит баннер «нужно действие»
     assert "Все папки скачаны целиком" in _render_home(client.get("/api/status?demo=done").json())["sources"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_home_offers_setup_even_after_a_previous_run(monkeypatch):
+    # Ключ и доступ удалили после прошлого запуска: состояние «нужно действие» или «готово»,
+    # а кнопка всё равно ведёт в настройку, а не пропадает или зовёт качать без доступа
+    monkeypatch.setenv("YADISK_DEMO", "1")
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    st = client.get("/api/status?demo=setup").json()
+    assert st["rescue"]["action"]["id"] == "setup"
+    for state in ("idle", "needs_action", "done", "stopped"):
+        st["rescue"]["state"] = state
+        actions = _render_home(st)["actions"]
+        assert 'data-action="go-setup"' in actions and "rescue-start" not in actions, state
 
 
 # «Нас поддерживают»: строка внизу главной и суммы — в node, без браузера
@@ -386,3 +401,71 @@ def test_update_banner_on_home_and_in_help(monkeypatch):
     assert "Вышла версия 99.0.0" in out["next"]
     # Хранилище недоступно — плашка работает, а скрытие помнится до перезагрузки страницы
     assert "Вышла версия 98.0.0" in out["broken"] and out["broken_hidden"] == ""
+
+
+# Ядро: перерисовка без лишних записей, склонения, демо и обновление статуса — в node, fetch подменён
+_CORE_HARNESS = r"""
+const path = require('path');
+global.window = globalThis;
+global.addEventListener = () => {};
+global.location = { search: '', hash: '', pathname: '/' };
+const el = () => ({ innerHTML: '', textContent: '', className: '', dataset: {}, style: {},
+  addEventListener() {}, setAttribute() {}, classList: { add() {}, remove() {}, toggle() {} } });
+global.document = Object.assign(el(), { documentElement: el(), body: el(), createElement: el,
+  querySelectorAll: () => [], querySelector: () => null, getElementById: () => el() });
+global.localStorage = { getItem: () => null, setItem() {} };
+global.matchMedia = () => ({ matches: false, addEventListener() {} });
+const fetches = [];
+const answers = [];
+global.fetch = (url, opts) => {
+  fetches.push(`${(opts && opts.method) || 'GET'} ${url}`);
+  return new Promise((resolve) => answers.push(resolve));
+};
+require(path.join(process.env.JS_DIR, 'core.js'));
+const App = window.App;
+const later = () => new Promise((r) => setTimeout(r, 0));
+(async () => {
+  const out = {};
+  // Браузер записывает разметку по-своему (<path/> → <path></path>): та же разметка — DOM не трогаем
+  let writes = 0;
+  const box = { set innerHTML(v) { writes++; this.v = v; }, get innerHTML() { return String(this.v).replace('/>', '></path>'); } };
+  const svg = '<svg><path d="M0 0"/></svg>';
+  App.html(box, svg);
+  App.html(box, svg);
+  out.same = writes;
+  App.forgetHtml(box);
+  App.html(box, svg);
+  out.forgotten = writes;
+  out.filesOf = [1, 2, 5, 11, 21, 0].map(App.fmt.filesOf);
+  // Демо показывает придуманные данные — кнопки не уходят в настоящую программу
+  App.state.status = { demo: 'waiting' };
+  const blocked = await App.api.post('/api/rescue/start');
+  out.demo = { ok: blocked.ok, sent: fetches.length };
+  App.state.status = null;
+  // Кнопка что-то поменяла, пока запрос статуса был в пути: его ответ не рисуем, спрашиваем снова
+  const shown = [];
+  App.render = () => shown.push(App.state.status && App.state.status.n);
+  const reply = (n) => answers.shift()({ ok: true, status: 200, json: async () => ({ n }) });
+  const first = App.refresh();
+  App.refresh();
+  reply(1);
+  await later();
+  reply(2);
+  await first;
+  out.shown = shown;
+  out.asked = fetches.length;
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_core_repaints_only_changes_and_keeps_fresh_status():
+    res = subprocess.run(["node", "-e", _CORE_HARNESS], capture_output=True, text=True, encoding="utf-8",
+                         env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert out["same"] == 1 and out["forgotten"] == 2
+    assert out["filesOf"] == ["1 файла", "2 файлов", "5 файлов", "11 файлов", "21 файла", "0 файлов"]
+    assert out["demo"] == {"ok": False, "sent": 0}
+    assert out["shown"] == [2] and out["asked"] == 2

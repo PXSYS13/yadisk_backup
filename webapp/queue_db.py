@@ -415,7 +415,7 @@ def list_problem_files(db_file: Path, table: str, id_col: str, limit: int) -> di
     """Нескачанные файлы: упавшие и отложенные, с причиной простыми словами."""
     table = validate_sql_ident(table, ALLOWED_TABLES, "table")
     id_col = validate_sql_ident(id_col, ALLOWED_COLUMNS, "column")
-    out: dict = {"items": [], "reasons": {}, "total": 0}
+    out: dict = {"items": [], "reasons": {}, "total": 0, "failed": 0}
     if not db_file.exists():
         return out
     c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
@@ -424,14 +424,18 @@ def list_problem_files(db_file: Path, table: str, id_col: str, limit: int) -> di
         cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
         preview_col = "preview_path" if "preview_path" in cols else "NULL AS preview_path"
         where = ("status='failed' OR (status='pending' AND COALESCE(error, '') LIKE ?)")
-        for r in c.execute(f"SELECT error, COUNT(*) AS n FROM {table} WHERE {where} GROUP BY substr(error, 1, 20)",
-                           (DEFERRED_MARKER + "%",)):
+        for r in c.execute(f"SELECT status, error, COUNT(*) AS n FROM {table} WHERE {where} "
+                           f"GROUP BY status, substr(error, 1, 20)", (DEFERRED_MARKER + "%",)):
             text = reason_text(r["error"])
             out["reasons"][text] = out["reasons"].get(text, 0) + r["n"]
             out["total"] += r["n"]
+            if r["status"] == "failed":
+                out["failed"] += r["n"]
+        # Сначала упавшие: их можно повторить кнопкой, а отложенных бывают тысячи, и за ними
+        # упавшие не попадали в первые limit строк
         for r in c.execute(
             f"SELECT {id_col} AS path, size, status, error, {preview_col} FROM {table} WHERE {where} "
-            f"ORDER BY status DESC, {id_col} LIMIT ?",
+            f"ORDER BY status, {id_col} LIMIT ?",
             (DEFERRED_MARKER + "%", limit),
         ):
             out["items"].append({
