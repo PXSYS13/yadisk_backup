@@ -62,4 +62,4 @@ fi
 
 echo "[*] Starting via uv (first run downloads Python and dependencies, 1-2 min)..."
 echo
-exec uv run webui.py
+exec uv run --no-dev webui.py

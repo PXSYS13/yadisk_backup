@@ -1,5 +1,7 @@
 # Локальные данные (НИКОГДА не коммитим)
 .env
+# uv.exe, который webui.bat скачивает в папку программы
+.uv/
 .env.*
 !.env.example
 cookies.json

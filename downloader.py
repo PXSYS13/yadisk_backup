@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 import requests
 import yadisk
+from urllib.parse import urlsplit
 from tenacity import (
     retry,
     retry_if_exception,
@@ -660,6 +661,15 @@ def _download_link(client: yadisk.Client, remote: str) -> str:
     return client.get_download_link(remote)
 
 
+# Ссылку на превью даёт ответ API, и к ней прикладывается ключ доступа: только Яндексу и только по https
+PREVIEW_HOSTS = (".yandex.ru", ".yandex.net")
+
+
+def _token_host_ok(url: str) -> bool:
+    parts = urlsplit(url)
+    return parts.scheme == "https" and (parts.hostname or "").lower().endswith(PREVIEW_HOSTS)
+
+
 def _save_preview(client: yadisk.Client, job: DownloadJob, local_path: str, download_dir: str) -> str:
     """Страховочное превью отложенного фото. Возвращает путь или "" — никогда не бросает.
 
@@ -675,6 +685,10 @@ def _save_preview(client: yadisk.Client, job: DownloadJob, local_path: str, down
         meta = client.get_meta(job.remote_path, preview_size="XXXL", preview_crop=False, fields=["preview"])
         url = getattr(meta, "preview", None)
         if not url:
+            return ""
+        if not _token_host_ok(url):
+            log.warning("превью %s: ссылка ведёт не на Яндекс (%s) — ключ доступа туда не отправляю",
+                        job.remote_path, urlsplit(url).hostname)
             return ""
         token = getattr(client, "token", "")
         failure = fetch_preview(_thread_http(), url, to_long_path(dst),

@@ -74,7 +74,7 @@ docs/images/          скриншоты для README и инструкции
 - Тесты не трогают настоящие `.env`, `cookies.json` и базы: `tests/conftest.py` подменяет пути в `webapp/paths.py` на временные. Новые файлы проекта добавляйте туда же. Модули `webapp` читают пути и настройки в момент вызова (`paths.DB_FILE`, `config.get_config()`), а не копируют при импорте, — иначе подмена в тестах до них не дойдёт.
 - После правок интерфейса поднимите `APP_VERSION` в `utils.py`: версия в адресах файлов — единственный способ сбросить кеш браузера.
 - `.bat`-файлы хранятся с окончаниями строк CRLF, иначе cmd.exe путает метки.
-- Версия uv закреплена в `webui.bat`, `webui.sh` и `.github/workflows/ci.yml`. Обновляя её, поменяйте и SHA-256 установщиков: `uv-installer.ps1` в `webui.bat`, `uv-installer.sh` в `webui.sh` (файлы со страницы релиза uv на GitHub). Со старой суммой установка uv у новых пользователей остановится на проверке. `uv.lock` пересоберите той же версией: `uvx --from uv==<версия> uv lock`.
+- Версия uv закреплена в `webui.bat`, `webui.sh` и `.github/workflows/ci.yml`. Обновляя её, поменяйте и SHA-256: в `webui.bat` — трёх zip-архивов для Windows (`uv-x86_64-pc-windows-msvc.zip`, `uv-aarch64-pc-windows-msvc.zip`, `uv-i686-pc-windows-msvc.zip`), в `webui.sh` — установщика `uv-installer.sh` (суммы — на странице релиза uv на GitHub). Со старой суммой установка uv у новых пользователей остановится на проверке. `webui.bat` не должен запускать скачанные скрипты (`.ps1`, `-ExecutionPolicy Bypass`): Kaspersky принимал такой лаунчер за загрузчик. `uv.lock` пересоберите той же версией: `uvx --from uv==<версия> uv lock`.
 
 ## Pull request
 

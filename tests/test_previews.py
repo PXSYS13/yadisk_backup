@@ -22,6 +22,7 @@ JPEG = b"\xff\xd8\xff\xe0" + b"preview" * 10
 ORIGINAL = b"HEIC!"  # оригинал фото: 5 байт, как size в очереди
 DEAD = "s1klg.storage.yandex.net"
 LIVE = "s2nrg.storage.yandex.net"
+PREVIEW = "downloader.disk.yandex.ru"  # сервис превью Диска: ему уходит ключ доступа
 
 
 class _Stream:
@@ -61,7 +62,7 @@ class _Http:
         self.auth[host] = bool((headers or {}).get("Authorization"))
         if host == "dl":
             return _Stream(status=302, headers={"Location": "https://" + url.split("/", 3)[3]})
-        if host == "preview":
+        if host in ("preview", PREVIEW):
             return _Stream(JPEG)
         if host == LIVE:
             return _Stream(ORIGINAL, headers={"Content-Type": "application/octet-stream",
@@ -111,7 +112,7 @@ class _DiskClient:
 
     def get_meta(self, remote, **kw):
         self.meta_calls.append(remote)
-        return type("Meta", (), {"preview": f"https://preview/{remote.split('/')[-1]}"})()
+        return type("Meta", (), {"preview": f"https://{PREVIEW}/preview/{remote.split('/')[-1]}"})()
 
 
 @pytest.fixture()
@@ -132,7 +133,7 @@ def test_disk_deferred_photo_gets_a_preview(tmp_path, disk_net):
     assert res.preview_path.endswith(os.path.join(PREVIEW_DIRNAME, "Фото", "a.HEIC.jpg"))
     assert Path(res.preview_path).read_bytes() == JPEG
     # Ключ доступа — только сервису превью; ссылки на сами файлы подписаны и без него
-    assert disk_net.auth.pop("preview") is True
+    assert disk_net.auth.pop(PREVIEW) is True
     assert disk_net.auth and not any(disk_net.auth.values())  # ни ссылке на файл, ни серверу хранения
 
     st = State(str(tmp_path / "state.db"))
@@ -141,6 +142,17 @@ def test_disk_deferred_photo_gets_a_preview(tmp_path, disk_net):
     assert st._conn().execute("SELECT preview_path FROM files").fetchone()[0] == res.preview_path
     st.close()
     assert webapp.queue_db.db_stats(tmp_path / "state.db")["previews"] == 1
+
+
+def test_disk_preview_token_goes_only_to_yandex_over_https(tmp_path, disk_net):
+    """Ссылку на превью даёт ответ API, а к ней прикладывается ключ доступа: чужому хосту
+    или по http он не уходит — превью просто не будет."""
+    cli = _DiskClient()
+    for url in ("https://evil.example.com/p.jpg", f"http://{PREVIEW}/p.jpg", "https://yandex.ru.example.com/p"):
+        cli.get_meta = lambda remote, url=url, **kw: type("Meta", (), {"preview": url})()
+        res = downloader._download_one(downloader.DownloadJob("disk:/Фото/a.HEIC", 5, None), cli, str(tmp_path))
+        assert res.status == "deferred" and res.preview_path == ""
+    assert set(disk_net.hits) <= {"dl", DEAD}  # ни одного запроса за превью
 
 
 def test_disk_no_preview_for_videos_or_when_switched_off(tmp_path, disk_net, monkeypatch):
@@ -469,7 +481,7 @@ def test_missing_preview_is_not_logged_as_a_refusal(tmp_path, disk_net, monkeypa
 
     class NoPreview(_Http):
         def get(self, url, stream=False, timeout=None, allow_redirects=True, headers=None):
-            if url.split("/")[2] == "preview":
+            if url.split("/")[2] in ("preview", PREVIEW):
                 return _Stream(status=434, headers={"Content-Type": "text/plain"})
             return super().get(url, stream, timeout, allow_redirects, headers)
 
