@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import sys
 import time
 from collections import Counter, defaultdict
@@ -94,6 +95,53 @@ def _parse_exif_date_str(val: str | bytes) -> tuple[int, int] | None:
     return None
 
 
+# Даты EXIF по старшинству: съёмка (DateTimeOriginal), оцифровка (DateTimeDigitized), последняя
+# правка файла (DateTime). Дату из GPS не берём никогда: она в UTC, и снимок сразу после полуночи
+# 1-го числа уехал бы в прошлый месяц
+EXIF_DATE_TAGS = (0x9003, 0x9004, 0x0132)
+_EXIF_IFD_POINTER = 0x8769
+_EXIF_ASCII = 2
+
+
+def _exif_tiff_dates(tiff: bytes) -> dict[int, bytes]:
+    """Даты EXIF_DATE_TAGS из TIFF-структуры EXIF: тег → сырое значение.
+
+    Читает только IFD0 и Exif IFD — туда, где их пишут камеры. GPS IFD, миниатюру (IFD1) и
+    MakerNote не трогает: даты там другие (UTC, правка миниатюры, внутренние счётчики камеры).
+    """
+    order = {b"II": "<", b"MM": ">"}.get(tiff[:2])
+    if order is None or len(tiff) < 8:
+        return {}
+    dates: dict[int, bytes] = {}
+
+    def walk(offset: int, inside_exif: bool) -> None:
+        if offset < 8 or offset + 2 > len(tiff):
+            return
+        (count,) = struct.unpack_from(order + "H", tiff, offset)
+        for i in range(count):
+            entry = offset + 2 + 12 * i
+            if entry + 12 > len(tiff):
+                return
+            tag, typ, n, value = struct.unpack_from(order + "HHII", tiff, entry)
+            if tag == _EXIF_IFD_POINTER and not inside_exif:
+                walk(value, True)
+            elif tag in EXIF_DATE_TAGS and typ == _EXIF_ASCII and n > 4:
+                dates.setdefault(tag, tiff[value:value + n])
+
+    walk(struct.unpack_from(order + "I", tiff, 4)[0], False)
+    return dates
+
+
+def _first_exif_date(values: dict) -> tuple[int, int] | None:
+    """Первая разборчивая дата по старшинству EXIF_DATE_TAGS (пустую «    :  :  » пропускает)."""
+    for tag in EXIF_DATE_TAGS:
+        if values.get(tag):
+            d = _parse_exif_date_str(values[tag])
+            if d:
+                return d
+    return None
+
+
 def _get_exif_date_jpeg(path: str) -> tuple[int, int] | None:
     """Извлекает дату съёмки из APP1 сегмента JPEG без внешних зависимостей."""
     try:
@@ -114,15 +162,7 @@ def _get_exif_date_jpeg(path: str) -> tuple[int, int] | None:
                 if marker == b"\xff\xe1":  # APP1 (Exif)
                     data = f.read(length)
                     if data.startswith(b"Exif\x00\x00"):
-                        # Дат в EXIF несколько: последней правки (DateTime — первая в файле),
-                        # съёмки и оцифровки. Самая ранняя из них — съёмка
-                        found = []
-                        for m in re.finditer(rb"(19\d{2}|20\d{2}):(\d{2}):(\d{2})", data):
-                            y, mo = int(m.group(1)), int(m.group(2))
-                            if 1970 <= y <= 2035 and 1 <= mo <= 12:
-                                found.append((y, mo))
-                        if found:
-                            return min(found)
+                        return _first_exif_date(_exif_tiff_dates(data[6:]))
                     break
                 else:
                     f.seek(length, os.SEEK_CUR)
@@ -139,15 +179,14 @@ def _get_exif_date_pil(path: str) -> tuple[int, int] | None:
             exif = img.getexif()
             if not exif:
                 return None
-            dt = exif.get(0x0132) or exif.get(306)
+            values = {0x0132: exif.get(0x0132)}
             try:
-                exif_ifd = exif.get_ifd(0x8769)
+                exif_ifd = exif.get_ifd(_EXIF_IFD_POINTER)
                 if exif_ifd:
-                    dt = exif_ifd.get(0x9003) or exif_ifd.get(0x9004) or dt
+                    values.update({tag: exif_ifd.get(tag) for tag in (0x9003, 0x9004)})
             except Exception:
                 pass
-            if dt:
-                return _parse_exif_date_str(dt)
+            return _first_exif_date(values)
     except Exception:
         pass
     return None
@@ -210,30 +249,42 @@ def unique_path(dst: str) -> str:
         i += 1
 
 
+# Бит «имя-заменитель» в теге точки повторной обработки Windows: так помечены ссылки на другое
+# место — символьные ссылки (IO_REPARSE_TAG_SYMLINK, 0xA000000C), junction и подключённые папкой
+# диски (IO_REPARSE_TAG_MOUNT_POINT, 0xA0000003)
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
+
+
 def _is_link_or_mount(path: str) -> bool:
     """Ссылка, junction Windows или другой диск, подключённый папкой: внутрь не ходим.
 
     os.walk не считает junction ссылкой: сортировка уносила бы файлы с другого диска
     (копированием, которое при нехватке места оставляет обрезанный файл) и удаляла бы там папки.
+    Прочие точки повторной обработки — не ссылки: ими помечены, например, папки OneDrive
+    («Рабочий стол» и «Документы» с резервным копированием), и в них сортировка ходит.
     """
     try:
         if os.path.islink(path) or os.path.ismount(path):
             return True
-        attrs = getattr(os.lstat(path), "st_file_attributes", 0)
+        tag = getattr(os.lstat(path), "st_reparse_tag", 0)
     except OSError:
         return True
-    return bool(attrs & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT: junction и прочие точки повторной обработки
+    return bool(tag & _REPARSE_TAG_NAME_SURROGATE)
 
 
 def scan(root: str, tree: list | None = None) -> list[dict]:
-    """Файлы для сортировки. В tree (если передан) ложится сам обход: (папка, подпапки, файлы)."""
+    """Файлы для сортировки. В tree (если передан) ложится сам обход: (папка, подпапки, файлы).
+
+    В подпапках tree — и те, куда обход не пошёл (ссылки, служебные папки): папка со ссылкой
+    внутри не опустеет, и уборка её не удалит — отчёт не должен обещать обратное.
+    """
     files = []
     skip = {os.path.join(root, d) for d in SKIP_DIRS}
     print(f"\n[1/4] Сканирую {root}...")
     for dp, dirs, fns in os.walk(root):
-        dirs[:] = [d for d in dirs if os.path.join(dp, d) not in skip and not _is_link_or_mount(os.path.join(dp, d))]
         if tree is not None:
             tree.append((dp, list(dirs), list(fns)))
+        dirs[:] = [d for d in dirs if os.path.join(dp, d) not in skip and not _is_link_or_mount(os.path.join(dp, d))]
         for fn in fns:
             if fn.lower().endswith(SKIP_SUFFIXES):
                 continue
@@ -282,8 +333,9 @@ def doomed_dirs(root: str, tree: list, moving: set[str], targets) -> list[str]:
 
     Повторяет уборку: корень и отсечённые служебные папки не трогаются; папка уходит, если в ней
     не осталось ни файла, ни уцелевшей подпапки. Файлы, которые сортировка не берёт (.part, .db),
-    держат папку; папка, куда что-то переедет (на Windows «фото» и «Фото» — одна папка),
-    остаётся. Не угадывает только сбои перемещения и удаления (файл занят, нет прав).
+    и ссылки на папки (обход в них не заходит, уборка их не удаляет) держат папку; папка, куда
+    что-то переедет (на Windows «фото» и «Фото» — одна папка), остаётся. Не угадывает только
+    сбои перемещения и удаления (файл занят, нет прав).
     """
     root_key = os.path.normcase(root)
     alive: set[str] = set()
