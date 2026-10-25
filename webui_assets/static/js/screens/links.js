@@ -102,19 +102,20 @@
   App.screens.links = {
     mount(el) {
       el.innerHTML = `<div class="page-head"><h1>По ссылке</h1>
-          <p>Прислали ссылку на папку Яндекс Диска? Программа скачает её файл за файлом — даже сейчас, когда
+          <p>Прислали ссылку на папку или альбом Яндекс Диска? Программа скачает файлы по одному — даже сейчас, когда
           «Скачать всё» в браузере не работает. Ключ доступа не нужен.</p></div>
         <div class="stack">
         <div class="card"><div class="card-head"><span class="icon-box">${icon('link')}</span>
             <div class="grow"><h2>Добавить ссылку</h2>
-            <span class="tiny">Ссылка на папку, подпапку или один файл — например, https://disk.yandex.ru/d/AbCdEf</span></div></div>
+            <span class="tiny">Ссылка на папку, подпапку, один файл или альбом — disk.yandex.ru/d/… или /a/…</span></div></div>
           <form class="link-form" id="links-form" autocomplete="off">
             <label class="sr-only" for="links-url">Публичная ссылка Яндекс Диска</label>
             <input type="text" id="links-url" spellcheck="false" inputmode="url" placeholder="https://disk.yandex.ru/d/…">
             <button class="primary" data-action="links-add" id="links-add-btn">${icon('download')}Скачать</button>
           </form>
           <p class="tiny" id="links-note" style="margin-top:10px">Файлы лягут в папку «_ссылки» внутри папки скачивания, с теми же
-            подпапками, что по ссылке. Ссылки с паролем и альбомы пока не поддерживаются.</p></div>
+            подпапками, что по ссылке. В альбомах к именам добавляется ID фото, чтобы сохранить файлы с одинаковыми именами.
+            Ссылки с паролем пока не поддерживаются.</p></div>
         <div class="card"><div class="card-head"><span class="icon-box info">${icon('list')}</span>
             <div class="grow"><h2>Ссылки</h2><span id="links-beat"></span></div>
             <div class="row" id="links-actions"></div></div>

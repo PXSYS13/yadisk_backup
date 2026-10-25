@@ -82,6 +82,19 @@ def test_gentle_mode_uses_fewer_threads_for_links(client, started, api):
     assert started[0][2] == ["--wait", "--workers", "2"]
 
 
+def test_public_album_uses_the_existing_link_queue(client, started, api):
+    api.answer = {"name": "Альбом", "type": "album"}
+    result = client.post("/api/links/add", json={"url": "https://yadi.sk/a/AbCd"})
+    assert result.status_code == 200 and result.json()["new"]
+    assert started == [("links", "public_download.py", ["--wait", "--workers", "3"])]
+    conn = _db()
+    try:
+        row = conn.execute("SELECT public_url, kind, name FROM links").fetchone()
+        assert tuple(row) == ("https://disk.yandex.ru/a/AbCd", "album", "Альбом")
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("kind,text", [("not_found", "больше не работает"), ("password", "паролем")])
 def test_dead_and_password_links_are_refused_with_plain_text(client, started, api, kind, text):
     api.answer = pd.LinkError(kind, pd._error_for(SimpleNamespace(
