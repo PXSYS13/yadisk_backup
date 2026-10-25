@@ -1,9 +1,162 @@
 {
-  "_как_заполнять": "Донаты DonationAlerts (записи с id «da-…») добавляет tools/sync_supporters.py: --from-widget со страницей виджета «Последние оповещения», сохранённой из браузера, или GitHub Actions по ключу. Записи без id можно добавлять руками: name — имя, как человек подписался (без имени — «Аноним»), amount — сумма числом, currency — RUB/USD/EUR, date — ГГГГ-ММ-ДД, message — короткие слова или null. Скрыть донат целиком — добавьте его номер в hidden (da-123 → 123), скрыть только сообщение — в no_message. Программы людей подхватят список с GitHub в течение получаса после того, как он попадёт в main.",
-  "updated": "2026-10-20",
+  "_как_заполнять": "Донаты DonationAlerts (записи с id «da-…») добавляет tools/sync_supporters.py: --from-widget со страницей виджета «Последние оповещения», сохранённой из браузера, или GitHub Actions по ключу. Записи без id можно добавлять руками: name — имя, как человек подписался (без имени — «Аноним»), amount — сумма числом, currency — RUB/USD/EUR, date — ГГГГ-ММ-ДД, message — короткие слова или null. Скрыть донат целиком — добавьте его номер в hidden (da-123 → 123), скрыть только сообщение — в no_message. top_min_rub — с какой суммы в рублях (все донаты человека вместе) имя попадает в «Больше всех помогли»; анонимы туда не попадают. Программы людей подхватят список с GitHub в течение получаса после того, как он попадёт в main.",
+  "updated": "2026-10-25",
+  "top_min_rub": 500,
   "hidden": [],
   "no_message": [],
   "supporters": [
+    {
+      "id": "da-193052636",
+      "name": "Аноним",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-25",
+      "message": null
+    },
+    {
+      "id": "da-193050788",
+      "name": "Аноним",
+      "amount": 3000,
+      "currency": "RUB",
+      "date": "2026-10-25",
+      "message": "Очень круто, и очень вовремя!"
+    },
+    {
+      "id": "da-193049047",
+      "name": "Azatxaz",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-25",
+      "message": null
+    },
+    {
+      "id": "da-193028819",
+      "name": "agapofff",
+      "amount": 1.5,
+      "currency": "USD",
+      "date": "2026-10-24",
+      "message": null
+    },
+    {
+      "id": "da-193019232",
+      "name": "Аноним",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-24",
+      "message": null
+    },
+    {
+      "id": "da-193000954",
+      "name": "Erridium",
+      "amount": 500,
+      "currency": "RUB",
+      "date": "2026-10-24",
+      "message": null
+    },
+    {
+      "id": "da-192991670",
+      "name": "Аноним",
+      "amount": 400,
+      "currency": "RUB",
+      "date": "2026-10-24",
+      "message": null
+    },
+    {
+      "id": "da-192990905",
+      "name": "Mike_kum",
+      "amount": 1000,
+      "currency": "RUB",
+      "date": "2026-10-24",
+      "message": null
+    },
+    {
+      "id": "da-192961847",
+      "name": "Ты легенда, спасибо за утилку для ЯД",
+      "amount": 200,
+      "currency": "RUB",
+      "date": "2026-10-23",
+      "message": null
+    },
+    {
+      "id": "da-192938932",
+      "name": "Аноним",
+      "amount": 300,
+      "currency": "RUB",
+      "date": "2026-10-23",
+      "message": "Спасибо огромное за ваш сервис, вы лучший"
+    },
+    {
+      "id": "da-192936159",
+      "name": "Аноним",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-23",
+      "message": "Спасибо!"
+    },
+    {
+      "id": "da-192930472",
+      "name": "K.O.T.L.E.T.A",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-23",
+      "message": null
+    },
+    {
+      "id": "da-192831769",
+      "name": "спасибо хотя бы за половину файлов",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-21",
+      "message": null
+    },
+    {
+      "id": "da-192829870",
+      "name": "Spenul",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-21",
+      "message": "Спасибо!!!"
+    },
+    {
+      "id": "da-192829314",
+      "name": "Rufus",
+      "amount": 300,
+      "currency": "RUB",
+      "date": "2026-10-21",
+      "message": null
+    },
+    {
+      "id": "da-192829297",
+      "name": "Rufus",
+      "amount": 0.75,
+      "currency": "EUR",
+      "date": "2026-10-21",
+      "message": null
+    },
+    {
+      "id": "da-192828694",
+      "name": "Ivan",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-21",
+      "message": "Спасибо за понятный UI"
+    },
+    {
+      "id": "da-192792736",
+      "name": "Аноним",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-10-20",
+      "message": null
+    },
+    {
+      "id": "da-192785439",
+      "name": "Miray",
+      "amount": 50,
+      "currency": "RUB",
+      "date": "2026-10-20",
+      "message": null
+    },
     {
       "id": "da-192776142",
       "name": "Блинчик",
