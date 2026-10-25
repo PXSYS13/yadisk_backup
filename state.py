@@ -25,6 +25,7 @@ from utils import (
     path_key,
     remote_path_is_clean,
     resolve_local_path,
+    set_aside,
     sqlite_tx,
     to_long_path,
 )
@@ -67,7 +68,8 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT
 );
 -- Что последняя проверка скачанного (main.py verify) не нашла в папке или нашла
--- испорченным: kind — missing / size / md5. «Скачать заново» возвращает их в очередь
+-- испорченным: kind — missing / size / md5. Кнопки «Скачать недостающие» и «Заменить
+-- повреждённые» возвращают их в очередь
 CREATE TABLE IF NOT EXISTS verify_problems (
     remote_path TEXT PRIMARY KEY,
     kind TEXT NOT NULL
@@ -453,21 +455,45 @@ class State:
                 "INSERT OR REPLACE INTO verify_problems (remote_path, kind) VALUES (?, ?)", problems
             )
 
-    def requeue_verify_problems(self) -> int:
-        """«Скачать заново»: файлы, которых проверка не нашла или нашла испорченными, — снова в очередь.
+    def requeue_verify_problems(self, kinds: Iterable[str] = ("missing", "size", "md5"),
+                                download_dir: str | None = None) -> tuple[int, int, int]:
+        """«Скачать недостающие» и «Заменить повреждённые»: файлы этих видов из итога проверки —
+        снова в очередь. Возвращает (вернулось в очередь, отложено старых копий, не удалось отложить).
 
-        local_path остаётся: скачивание сверит лежащий там файл и заменит испорченный новой
-        копией. Возвращает, сколько файлов вернулось в очередь; список проблем после этого пуст.
+        Испорченную копию не затираем: она уезжает в <папка скачивания>/_заменённые (utils.set_aside) —
+        вдруг это правка самого человека, — и место для новой копии свободно. Копия, которую
+        переложить не вышло (открыта в другой программе), остаётся в итоге проверки и в очередь
+        не возвращается. Виды, которых не просили, остаются в итоге как были.
         """
+        kinds = tuple(kinds)
+        marks = ",".join("?" * len(kinds))
+        downloaded = "(f.status = 'downloaded' OR (f.status = 'skipped' AND f.error IS NULL))"
+        rows = self._conn().execute(
+            f"SELECT p.remote_path, p.kind, f.local_path FROM verify_problems p "
+            f"JOIN files f ON f.remote_path = p.remote_path WHERE p.kind IN ({marks}) AND {downloaded}", kinds
+        ).fetchall()
+        back: list[tuple[str]] = []
+        moved = kept = 0
+        for r in rows:
+            local = r["local_path"]
+            if r["kind"] != "missing" and download_dir and local:
+                try:
+                    if set_aside(download_dir, local):
+                        moved += 1
+                except OSError:
+                    kept += 1
+                    continue
+            back.append((r["remote_path"],))
         with self._tx() as conn:
-            n = conn.execute(
-                "UPDATE files SET status = 'pending', error = NULL, storage_host = NULL, "
-                "downloaded_at = NULL "
-                "WHERE remote_path IN (SELECT remote_path FROM verify_problems) "
-                "AND (status = 'downloaded' OR (status = 'skipped' AND error IS NULL))"
-            ).rowcount
-            conn.execute("DELETE FROM verify_problems")
-        return n
+            conn.executemany(
+                "UPDATE files SET status = 'pending', error = NULL, storage_host = NULL, downloaded_at = NULL "
+                "WHERE remote_path = ?", back)
+            conn.executemany("DELETE FROM verify_problems WHERE remote_path = ?", back)
+            # Файлы этих видов, которые уже не скачаны (снова в очереди, сняты выбором), — из итога прочь
+            conn.execute(
+                f"DELETE FROM verify_problems WHERE kind IN ({marks}) AND remote_path NOT IN "
+                f"(SELECT f.remote_path FROM files f WHERE {downloaded})", kinds)
+        return len(back), moved, kept
 
     def get_stats(self) -> dict[str, int]:
         rows = self._conn().execute(

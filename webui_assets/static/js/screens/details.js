@@ -135,7 +135,8 @@
     ['md5', 'Содержимое не совпадает с Яндексом (MD5)', 'другое содержимое'],
     ['unreadable', 'Не удалось прочитать', 'не прочитать'],
   ];
-  // Источник → конец проверки, после которой её файлы уже вернули в очередь
+  // Источник → что из итога проверки (закончилась в at) уже вернули в очередь:
+  // { at, count, moved, left: { missing | damaged: сколько этой кнопке ещё осталось вернуть } }
   const requeued = {};
   const filesGen = (n) => `${fmt.num(n)} ${fmt.plural(n, 'файла', 'файлов', 'файлов')}`;
   const shownPath = (p) => String(p || '').replace(/^disk:/, '').replace(/^\/?photounlim[:/]\/?/, '');
@@ -147,15 +148,6 @@
       try { return JSON.parse(lines[i].slice(at + marker.length)); } catch (e) { return null; }
     }
     return null;
-  }
-
-  // App.html сравнивает разметку с innerHTML, а разметка с SVG-иконками обратно не совпадает:
-  // кнопки перерисовывались бы на каждом опросе, и нажатие могло потеряться
-  function paintOnce(el, markup) {
-    if (el && el._markup !== markup) {
-      el._markup = markup;
-      el.innerHTML = markup;
-    }
   }
 
   function verifyRunning(p) {
@@ -199,9 +191,9 @@
     if (sum.all_missing) {
       notes.push('Программа не нашла на месте ни одного скачанного файла. Скорее всего, диск с папкой отключён или папку перенесли: подключите диск и проверьте ещё раз. Если вы перенесли файлы сами, качать их заново не нужно.');
     } else if (sum.missing) {
-      notes.push('Файлов нет там, куда программа их скачала. Если вы сами перенесли или удалили их — всё в порядке, качать их заново не нужно.');
+      notes.push('Файлов нет там, куда программа их скачала. Если вы сами перенесли, удалили или разложили их «Сортировкой» — всё в порядке, качать их заново не нужно.');
     }
-    if (bad) notes.push('Повреждённые файлы отличаются от тех, что на Диске. Их лучше скачать заново: новая копия заменит испорченную.');
+    if (bad) notes.push('Повреждённые файлы отличаются от тех, что на Диске. Их лучше скачать заново; старые копии программа не удалит, а переложит в папку «_заменённые».');
     if (sum.unreadable) notes.push('Файлы, которые не удалось прочитать, могут быть открыты в другой программе. Закройте её и проверьте ещё раз.');
     return `<p class="verify-head err">${App.icon('alert')}<span>Проверено ${fmt.files(sum.checked)}. ${esc(parts.charAt(0).toUpperCase() + parts.slice(1))}</span></p>
       <ul class="reasons">${items}</ul>
@@ -213,8 +205,9 @@
   function verifyList(sum) {
     const ex = sum.examples || {};
     const rows = VERIFY_KINDS.flatMap(([k, , short]) => (ex[k] || []).map((x) => {
+      // taken: безлимит положил на место удалённого фото другое с тем же именем (verify._not_owners)
       const detail = k === 'size' ? `на диске ${fmt.bytes(x.local_size)}, у Яндекса ${fmt.bytes(x.size)}`
-        : k === 'unreadable' ? (x.error || '') : '';
+        : k === 'unreadable' ? (x.error || '') : x.taken ? 'на его месте другой файл с тем же именем' : '';
       return `<tr><td class="name">${esc(shownPath(x.path))}</td>
         <td><span class="badge ${k === 'unreadable' ? 'wait' : 'err'}">${esc(short)}</span>${
           detail ? `<div class="tiny">${esc(detail)}</div>` : ''}</td></tr>`;
@@ -250,23 +243,27 @@
     } else if (sum) {
       main = verifyResult(sum, task);
       list = verifyList(sum);
-      const fixable = (sum.missing || 0) + (sum.size || 0) + (sum.md5 || 0);
-      const back = requeued[name] && requeued[name].at === String(task.finished_at) ? requeued[name] : null;
+      const at = String(task.finished_at);
+      const back = requeued[name] && requeued[name].at === at ? requeued[name] : null;
+      // Ни одного файла на месте — диск отключён или файлы разложены «Сортировкой»: качать всё заново не предлагаем
+      const left = { missing: sum.all_missing ? 0 : sum.missing || 0, damaged: (sum.size || 0) + (sum.md5 || 0),
+        ...(back ? back.left : {}) };
+      const fix = (what, cls, icon, label) => button('verify-requeue', cls, icon, `${label} (${fmt.num(left[what])})`,
+        ` data-what="${what}" data-count="${left[what]}" data-bytes="${back && what in back.left ? 0 : sum[`${what}_bytes`] || 0}" data-at="${esc(at)}"`);
+      const fixes = (left.damaged ? fix('damaged', back ? '' : 'primary', 'refresh', 'Заменить повреждённые') : '') +
+        (left.missing ? fix('missing', back || left.damaged ? '' : 'primary', 'download', 'Скачать недостающие') : '');
       if (back) {
         // Кнопка здесь же: после «Готово» на Главной нет «Продолжить», там «Проверить новые файлы»
         const running = !!(s.pipeline && s.pipeline.running);
         const them = back.count === 1 ? 'его' : 'их';
         main += `<p class="verify-head ok">${App.icon('check')}<span>${esc(fmt.files(back.count))} снова в очереди. ${running
           ? 'Скачивание уже идёт — программа скачает ' + them + ' вместе с остальными.'
-          : 'Нажмите «Скачать сейчас», и программа скачает ' + them + ' заново.'}</span></p>`;
+          : 'Нажмите «Скачать сейчас», и программа скачает ' + them + ' заново.'}${back.moved
+          ? ' Старые копии повреждённых файлов лежат в папке «_заменённые» внутри папки скачивания.' : ''}</span></p>`;
         actions = (running ? '' : `<button class="primary" data-action="rescue-start">${App.icon('download')}Скачать сейчас</button>`) +
-          `<a class="btn" href="#/home">${App.icon('home')}На главную</a>`;
+          fixes + `<a class="btn" href="#/home">${App.icon('home')}На главную</a>`;
       } else {
-        if (fixable) {
-          actions = button('verify-requeue', 'primary', 'download', 'Скачать заново',
-            ` data-count="${fixable}" data-bytes="${sum.bad_bytes || 0}" data-at="${task.finished_at}"`);
-        }
-        if (sum.checked) actions += button('verify-start', '', 'refresh', 'Проверить ещё раз');
+        actions = fixes + (sum.checked ? button('verify-start', '', 'shield-check', 'Проверить ещё раз') : '');
       }
     } else if (task) {
       const code = typeof task.exit_code === 'number' ? ` (код ${task.exit_code})` : '';
@@ -284,9 +281,9 @@
       actions = button('verify-start', 'primary', 'shield-check', 'Проверить скачанные файлы');
     }
     if (why && actions.includes(' disabled>')) actions += `<span class="tiny">${esc(why)}</span>`;
-    paintOnce(box, main);
-    paintOnce(byId('det-verify-actions'), actions);
-    paintOnce(byId('det-verify-list'), list);
+    App.html(box, main);
+    App.html(byId('det-verify-actions'), actions);
+    App.html(byId('det-verify-list'), list);
   }
 
   function taskLog(s) {
@@ -389,17 +386,28 @@
   });
 
   App.action('verify-requeue', async (btn) => {
-    const { source: name, at } = btn.dataset;
+    const { source: name, at, what } = btn.dataset;
     const count = Number(btn.dataset.count) || 0;
     const bytes = Number(btn.dataset.bytes) || 0;
-    const yes = await App.confirm({ title: `Скачать заново ${fmt.files(count)}?`, ok: 'Вернуть в очередь',
-      text: `Они вернутся в очередь${bytes ? ` (${fmt.bytes(bytes)})` : ''}, и их можно будет сразу скачать. ` +
-        'Испорченные копии заменятся новыми. Если какие-то из этих файлов вы сами перенесли или удалили, ' +
-        'они скачаются ещё раз.' });
+    const size = bytes ? ` (${fmt.bytes(bytes)})` : '';
+    const yes = await App.confirm(what === 'damaged'
+      ? { title: `Заменить повреждённые: ${fmt.files(count)}?`, ok: 'Заменить',
+        text: `Программа скачает их с Яндекса заново${size}. Старые копии она не удалит, а переложит в папку ` +
+          '«_заменённые» внутри папки скачивания — вдруг вы сами их меняли (повернули фото, поправили документ). ' +
+          'Когда убедитесь, что новые копии в порядке, эту папку можно удалить.' }
+      : { title: `Скачать недостающие: ${fmt.files(count)}?`, ok: 'Вернуть в очередь',
+        text: `Они вернутся в очередь${size}, и их можно будет сразу скачать. Если какие-то из них вы сами ` +
+          'перенесли, удалили или разложили «Сортировкой», они скачаются ещё раз.' });
     if (!yes) return;
-    const res = await App.run(btn, () => App.api.post('/api/verify/requeue', { source: name }));
+    const res = await App.run(btn, () => App.api.post('/api/verify/requeue', { source: name, what }));
+    const data = (res && res.data) || {};
     if (res && res.ok) {
-      requeued[name] = { at, count: (res.data || {}).count || count };
+      const back = requeued[name] && requeued[name].at === at ? requeued[name] : { at, count: 0, moved: 0, left: {} };
+      back.count += data.count || 0;
+      back.moved += data.moved || 0;
+      // Не переложенные копии (открыты в другой программе) остались в итоге — кнопку можно нажать ещё раз
+      back.left[what] = data.kept || 0;
+      requeued[name] = back;
       App.render();
     }
   });

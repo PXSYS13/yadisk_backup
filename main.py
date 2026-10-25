@@ -553,8 +553,9 @@ def cmd_stats(cfg: dict, args: argparse.Namespace) -> int:
 def cmd_verify(cfg: dict, args: argparse.Namespace) -> int:
     """Проверяет, что скачанные файлы на месте и совпадают с Диском: размер, затем MD5.
 
-    Что не нашлось или испорчено, запоминается в state.db (verify_problems): в Web UI
-    кнопка «Скачать заново» вернёт эти файлы в очередь. Код 0 — всё в порядке, 1 — нет.
+    Что не нашлось или испорчено, запоминается в state.db (verify_problems): в Web UI кнопки
+    «Скачать недостающие» и «Заменить повреждённые» вернут эти файлы в очередь. Код 0 — всё
+    в порядке, 1 — нет.
     """
     with State(str(DB_FILE)) as state:
         items = [VerifyItem(r["remote_path"], r["local_path"], r["size"], r["md5"])

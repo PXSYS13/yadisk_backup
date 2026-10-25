@@ -46,6 +46,7 @@ from utils import (
     DIR_VIDEO,
     LINKS_DIRNAME,
     PREVIEW_DIRNAME,
+    SET_ASIDE_DIRNAME,
     classify_dir,
     compute_md5,
     ensure_utf8_stdio,
@@ -53,9 +54,11 @@ from utils import (
     is_safe_dir,
 )
 
-# Папки, скачанные по ссылкам, — чужие подборки: их структуру не трогаем
+# Папки, скачанные по ссылкам, — чужие подборки: их структуру не трогаем. Старые копии,
+# отложенные проверкой скачанного, человек разбирает сам
 SKIP_DIRS = {DIR_PHOTO, DIR_VIDEO, DIR_DOC, DIR_ARCHIVE, DIR_PROGRAM,
-             DIR_AUDIO, DIR_OTHER, DIR_DUP, ".sync", "_unlim_tmp_zips", PREVIEW_DIRNAME, LINKS_DIRNAME}
+             DIR_AUDIO, DIR_OTHER, DIR_DUP, ".sync", "_unlim_tmp_zips", PREVIEW_DIRNAME, LINKS_DIRNAME,
+             SET_ASIDE_DIRNAME}
 # Недокачанные файлы и БД состояния — не трогаем
 SKIP_SUFFIXES = (".part", ".db", ".db-wal", ".db-shm")
 

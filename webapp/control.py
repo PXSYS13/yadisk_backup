@@ -22,6 +22,7 @@ from utils import (
     IS_WINDOWS,
     LINKS_DIRNAME,
     PREVIEW_DIRNAME,
+    SET_ASIDE_DIRNAME,
     encode_disk_folders,
     files_text,
     is_safe_dir,
@@ -398,6 +399,14 @@ class VerifyPayload(BaseModel):
     source: str = Field(default="disk", pattern="^(disk|unlim)$")
 
 
+# «Скачать недостающие» — missing, «Заменить повреждённые» — damaged (размер или MD5 не совпали)
+REQUEUE_KINDS = {"all": ("missing", "size", "md5"), "missing": ("missing",), "damaged": ("size", "md5")}
+
+
+class RequeuePayload(VerifyPayload):
+    what: str = Field(default="all", pattern="^(all|missing|damaged)$")
+
+
 def verify_running(source: str | None = None) -> bool:
     """Идёт проверка скачанного: у источника или, без source, у любого."""
     for name, (slot, _script, _args, kind) in VERIFY_TASKS.items():
@@ -417,6 +426,9 @@ def api_verify_start(p: VerifyPayload):
     if rescue.is_running():
         raise HTTPException(409, "Проверить файлы можно, когда скачивание остановлено или закончено: "
                                  "сейчас программа сама записывает файлы в папку")
+    if organize_moving():
+        return {"ok": False, "msg": "Сначала дождитесь конца сортировки: она переносит файлы, "
+                                    "и проверка не нашла бы их на месте"}
     if verify_running(p.source):
         return {"ok": False, "msg": "Проверка уже идёт"}
     slot, script, args, _kind = VERIFY_TASKS[p.source]
@@ -438,32 +450,46 @@ def api_verify_stop(p: VerifyPayload):
 
 
 @router.post("/api/verify/requeue")
-def api_verify_requeue(p: VerifyPayload):
-    """«Скачать заново»: что проверка не нашла в папке или нашла испорченным — снова в очередь.
+def api_verify_requeue(p: RequeuePayload):
+    """«Скачать недостающие» (what=missing) и «Заменить повреждённые» (damaged): эти файлы из итога
+    проверки — снова в очередь. Повреждённые копии не затираются, а уезжают в папку «_заменённые»
+    внутри папки скачивания: вдруг это правка самого человека.
 
     Качать не начинает: это делает следующий запуск — «Скачать сейчас» в карточке проверки
     или кнопка на Главной.
     """
     if rescue.is_running():
         raise HTTPException(409, "Сначала остановите скачивание — потом можно вернуть файлы в очередь")
+    if organize_moving():
+        return {"ok": False, "msg": "Сначала дождитесь конца сортировки: она переносит файлы"}
     if verify_running(p.source):
         return {"ok": False, "msg": "Дождитесь конца проверки"}
+    kinds = REQUEUE_KINDS[p.what]
+    folder = config.get_config()["download_dir"]
     try:
         if p.source == "unlim":
-            n = requeue_verify_problems(str(paths.UNLIM_DB_FILE))
+            n, moved, kept = requeue_verify_problems(str(paths.UNLIM_DB_FILE), kinds, folder)
         elif paths.DB_FILE.exists():
             with State(str(paths.DB_FILE)) as st:
-                n = st.requeue_verify_problems()
+                n, moved, kept = st.requeue_verify_problems(kinds, folder)
         else:
-            n = 0
+            n = moved = kept = 0
     except sqlite3.Error as e:
         return {"ok": False, "msg": f"База занята ({e}) — попробуйте ещё раз через минуту"}
+    log.info("проверка скачанного (%s, %s): вернул в очередь %d файлов, отложил %d, не отложил %d",
+             p.source, p.what, n, moved, kept)
+    locked = (f"Не получилось переложить {files_text(kept)}: {'он открыт' if kept == 1 else 'они открыты'} "
+              f"в другой программе или нет прав. Закройте программу и нажмите кнопку ещё раз" if kept else "")
     if not n:
-        return {"ok": False, "count": 0,
-                "msg": "Возвращать нечего: эти файлы уже в очереди. Если сомневаетесь, проверьте файлы ещё раз"}
-    log.info("проверка скачанного (%s): вернул в очередь %d файлов", p.source, n)
-    return {"ok": True, "count": n,
-            "msg": f"{files_text(n)} снова в очереди — нажмите «Скачать сейчас»"}
+        return {"ok": False, "count": 0, "kept": kept,
+                "msg": locked or "Возвращать нечего: эти файлы уже в очереди. Если сомневаетесь, "
+                                 "проверьте файлы ещё раз"}
+    msg = f"{files_text(n)} снова в очереди — нажмите «Скачать сейчас»"
+    if moved:
+        msg += f". Старые копии лежат в папке «{SET_ASIDE_DIRNAME}» внутри папки скачивания"
+    if locked:
+        msg += f". {locked}"
+    return {"ok": True, "count": n, "moved": moved, "kept": kept, "msg": msg}
 
 
 # ── Список файлов: забыть (собрать заново — /api/rescue/relist) ──
@@ -539,6 +565,9 @@ def organize(payload: OrganizePayload):
         return {"ok": False, "msg": msg}
     if payload.action not in ("report-only", "move"):
         return {"ok": False, "msg": "Неизвестное действие"}
+    if payload.action == "move" and verify_running():
+        return {"ok": False, "msg": "Сейчас идёт проверка скачанных файлов: дождитесь её конца или "
+                                    "остановите её в «Подробнее» — потом раскладывайте"}
     # И во время ожидания раунда: следующий раунд скачал бы разложенные файлы заново
     if payload.action == "move" and (rescue.is_running() or tm.any_alive(SLOT_DISK)
                                      or tm.any_alive(UNLIM_SLOT_PREFIX) or tm.any_alive(SLOT_LINKS)):

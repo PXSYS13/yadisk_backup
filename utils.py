@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -54,6 +55,9 @@ MAX_UNLIM_BATCH = 80
 PREVIEW_DIRNAME = "_превью"
 # Папки и файлы, скачанные по публичным ссылкам: <папка скачивания>/_ссылки/<имя ссылки>
 LINKS_DIRNAME = "_ссылки"
+# Копии, которые проверка скачанного нашла испорченными: «Заменить повреждённые» не затирает их,
+# а перекладывает сюда — вдруг это правка самого человека (повёрнутое фото, исправленный документ)
+SET_ASIDE_DIRNAME = "_заменённые"
 
 
 def previews_enabled() -> bool:
@@ -70,6 +74,30 @@ def preview_path_for(download_dir: str, original_path: str) -> str:
     if rel.startswith(".."):
         rel = os.path.basename(original_path)
     return os.path.join(download_dir, PREVIEW_DIRNAME, rel + ".jpg")
+
+
+def set_aside(download_dir: str, path: str) -> str | None:
+    """Перекладывает файл в <папка скачивания>/_заменённые/<тот же путь>; занятое имя получает « (2)».
+
+    Возвращает новый путь. None — перекладывать нечего: файла нет, на его месте папка, или он лежит
+    вне папки скачивания (её сменили после скачивания — новая копия ляжет в новую папку и старую
+    не заденет). OSError — переложить не вышло (файл открыт в другой программе, нет прав).
+    """
+    try:
+        rel = os.path.relpath(path, download_dir)
+    except ValueError:  # другой диск на Windows
+        return None
+    if rel.split(os.sep, 1)[0] in (os.curdir, os.pardir) or not os.path.isfile(to_long_path(path)):
+        return None
+    target = os.path.join(download_dir, SET_ASIDE_DIRNAME, rel)
+    os.makedirs(to_long_path(os.path.dirname(target)), exist_ok=True)
+    base, ext = os.path.splitext(target)
+    cand, n = target, 1
+    while os.path.lexists(to_long_path(cand)):
+        n += 1
+        cand = f"{base} ({n}){ext}"
+    shutil.move(to_long_path(path), to_long_path(cand))
+    return cand
 
 
 def remove_preview(preview_path: str | None, download_dir: str) -> bool:

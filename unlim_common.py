@@ -13,6 +13,7 @@ import random
 import re
 import sqlite3
 import time
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -20,7 +21,7 @@ import requests
 from dotenv import load_dotenv
 
 from storage_fetch import response_trace  # noqa: F401 — заодно реэкспорт для воркера и тестов
-from utils import sqlite_tx
+from utils import path_key, set_aside, sqlite_tx
 
 log = logging.getLogger("unlim")
 
@@ -67,7 +68,8 @@ CREATE TABLE IF NOT EXISTS unlim_meta (
 );
 """
 # Что последняя проверка скачанного (unlim_download.py --verify) не нашла в папке или
-# нашла испорченным: kind — missing / size / md5. «Скачать заново» возвращает их в очередь
+# нашла испорченным: kind — missing / size / md5. Кнопки «Скачать недостающие» и «Заменить
+# повреждённые» возвращают их в очередь
 VERIFY_PROBLEMS_SCHEMA = (
     "CREATE TABLE IF NOT EXISTS unlim_verify_problems (file_id TEXT PRIMARY KEY, kind TEXT NOT NULL)"
 )
@@ -361,23 +363,57 @@ def save_verify_problems(problems: list[tuple[str, str]], db_path: str | None = 
         c.executemany("INSERT OR REPLACE INTO unlim_verify_problems (file_id, kind) VALUES (?, ?)", problems)
 
 
-def requeue_verify_problems(db_path: str | None = None) -> int:
-    """«Скачать заново»: файлы, которых проверка не нашла или нашла испорченными, — снова в очередь.
+def requeue_verify_problems(db_path: str | None = None, kinds: tuple[str, ...] = ("missing", "size", "md5"),
+                            download_dir: str | None = None) -> tuple[int, int, int]:
+    """«Скачать недостающие» и «Заменить повреждённые» для безлимита: файлы этих видов из итога
+    проверки — снова в очередь, попытки обнуляются. Возвращает (вернулось в очередь, отложено
+    старых копий, не удалось отложить).
 
-    local_path остаётся: воркер положит новую копию на место испорченной, а не рядом
-    с ней под именем «_1». Попытки обнуляются. Возвращает, сколько файлов вернулось в очередь.
+    Испорченную копию не затираем, а перекладываем в <папка скачивания>/_заменённые (utils.set_aside):
+    имя освобождается, и воркер положит новую копию туда же. Безлимит кладёт фото на первое свободное
+    имя, и по одному пути бывают записаны несколько файлов (verify._not_owners): если хоть один из них
+    проверка не назвала пропавшим, файл может быть его — не трогаем, а новая копия ляжет рядом под
+    свободным именем. Копия, которую переложить не вышло, остаётся в итоге проверки и в очередь
+    не возвращается.
     """
     db_path = db_path or UNLIM_DB_FILE
     if not os.path.exists(db_path):
-        return 0
+        return 0, 0, 0
     ensure_unlim_schema(db_path)
-    with unlim_tx(db_path) as c:
+    c = connect_unlim_db(db_path)
+    try:
         if not c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='unlim_files'").fetchone():
-            return 0
-        n = c.execute(
+            return 0, 0, 0
+        rows = c.execute(
+            "SELECT p.file_id, p.kind, f.local_path FROM unlim_verify_problems p "
+            "JOIN unlim_files f ON f.file_id = p.file_id WHERE f.status='downloaded'").fetchall()
+        lost = {fid for fid, kind, _local in rows if kind == "missing"}
+        # Сколько записей, чей файл может лежать по этому пути
+        holders = Counter(path_key(local) for fid, local in c.execute(
+            "SELECT file_id, local_path FROM unlim_files WHERE status='downloaded' AND local_path IS NOT NULL "
+            "AND local_path != ''") if fid not in lost)
+    finally:
+        c.close()
+    back: list[tuple[str]] = []
+    moved = kept = 0
+    for fid, kind, local in rows:
+        if kind not in kinds:
+            continue
+        if kind != "missing" and download_dir and local and holders[path_key(local)] == 1:
+            try:
+                if set_aside(download_dir, local):
+                    moved += 1
+            except OSError:
+                kept += 1
+                continue
+        back.append((fid,))
+    with unlim_tx(db_path) as c:
+        c.executemany(
             "UPDATE unlim_files SET status='pending', attempts=0, error=NULL, worker_id=NULL, "
-            "storage_host=NULL, downloaded_at=NULL WHERE status='downloaded' "
-            "AND file_id IN (SELECT file_id FROM unlim_verify_problems)"
-        ).rowcount
-        c.execute("DELETE FROM unlim_verify_problems")
-        return n
+            "storage_host=NULL, downloaded_at=NULL WHERE file_id = ? AND status='downloaded'", back)
+        c.executemany("DELETE FROM unlim_verify_problems WHERE file_id = ?", back)
+        # Файлы этих видов, которые уже не скачаны, — из итога прочь
+        marks = ",".join("?" * len(kinds))
+        c.execute(f"DELETE FROM unlim_verify_problems WHERE kind IN ({marks}) AND file_id NOT IN "
+                  f"(SELECT file_id FROM unlim_files WHERE status='downloaded')", kinds)
+    return len(back), moved, kept

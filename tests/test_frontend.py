@@ -711,10 +711,12 @@ global.localStorage = { getItem: () => null, setItem() {} };
 global.matchMedia = () => ({ matches: false, addEventListener() {} });
 const inp = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const posted = [];
+const confirms = [];
 global.fetch = async (url, opts) => {
-  if (opts && opts.method === 'POST') posted.push([url, JSON.parse(opts.body)]);
-  const data = url.startsWith('/api/verify/requeue') ? { ok: true, count: 5, msg: 'ok' }
-    : url.startsWith('/api/status') ? null : { items: [], reasons: {}, total: 0 };
+  const body = opts && opts.method === 'POST' ? JSON.parse(opts.body) : null;
+  if (body) posted.push([url, body]);
+  const data = !url.startsWith('/api/verify/requeue') ? (url.startsWith('/api/status') ? null : { items: [], reasons: {}, total: 0 })
+    : body.what === 'damaged' ? { ok: true, count: 2, moved: 2, kept: 0, msg: 'ok' } : { ok: true, count: 3, moved: 0, kept: 0, msg: 'ok' };
   return { ok: true, status: 200, json: async () => data };
 };
 for (const f of ['core.js', 'components.js', 'screens/details.js']) require(path.join(process.env.JS_DIR, f));
@@ -739,12 +741,16 @@ const snap = () => ({ main: nodes['det-verify'].innerHTML, actions: nodes['det-v
   d.update(S(verifyTask([], false, { was_stopped: true, exit_code: null }))); out.stopped = snap();
   d.update(S({ disk: { kind: 'disk_scan', running: true, log_tail: [] } })); out.listing = snap();
   d.update(S(verifyTask([inp.unchecked], false))); out.unchecked = snap();
-  App.confirm = async () => true;
+  d.update(S(verifyTask([inp.allgone], false))); out.allgone = snap();
+  App.confirm = async (o) => { confirms.push(`${o.title} ${o.text}`); return true; };
   d.update(S(verifyTask([inp.summary], false)));
-  await App.actions['verify-requeue']({ dataset: { source: 'disk', count: '5', bytes: '10200327', at: String(inp.at) } });
+  await App.actions['verify-requeue']({ dataset: { source: 'disk', what: 'damaged', count: '2', bytes: '8640000', at: String(inp.at) } });
+  d.update(S(verifyTask([inp.summary], false))); out.replaced = snap();
+  await App.actions['verify-requeue']({ dataset: { source: 'disk', what: 'missing', count: '3', bytes: '1560327', at: String(inp.at) } });
   d.update(S(verifyTask([inp.summary], false))); out.requeued = snap();
   d.update(S(verifyTask([inp.summary], false), true)); out.requeued_busy = snap();
   out.posted = posted.filter(([url]) => url.startsWith('/api/verify'));
+  out.confirms = confirms;
   process.stdout.write(JSON.stringify(out));
 })();
 """
@@ -755,8 +761,10 @@ def test_details_verify_card_states():
     import verify
 
     summary = {"checked": 32, "ok": 27, "missing": 3, "size": 1, "md5": 1, "unreadable": 0, "no_md5": 1,
-               "unchecked": 0, "bytes": 32_101_855, "bad_bytes": 10_200_327, "all_missing": False, "seconds": 3,
-               "examples": {"missing": [{"path": "disk:/Фото/нет.jpg", "size": 700}],
+               "unchecked": 0, "bytes": 32_101_855, "bad_bytes": 10_200_327, "missing_bytes": 1_560_327,
+               "damaged_bytes": 8_640_000, "all_missing": False, "seconds": 3,
+               "examples": {"missing": [{"path": "disk:/Фото/нет.jpg", "size": 700},
+                                        {"path": "disk:/Фото/IMG_0001.JPG", "size": 21_000, "taken": True}],
                             "size": [{"path": "disk:/Видео/Свадьба.mp4", "size": 8_000_000, "local_size": 3_100_000}],
                             "md5": [{"path": "disk:/Фото/IMG_1102.JPG", "size": 640_000}]}}
     ok = dict(summary, checked=28, ok=28, missing=0, size=0, md5=0, bad_bytes=0, examples={})
@@ -766,7 +774,8 @@ def test_details_verify_card_states():
                     "disk": {"db": {"recent": []}}},
            "at": 1760891234.5, "summary": verify.summary_line(summary), "ok": verify.summary_line(ok),
            "progress": verify.progress_line(progress),
-           "unchecked": verify.summary_line(dict(ok, checked=0, ok=0, unchecked=1200))}
+           "unchecked": verify.summary_line(dict(ok, checked=0, ok=0, unchecked=1200)),
+           "allgone": verify.summary_line(dict(summary, ok=0, missing=32, size=0, md5=0, all_missing=True))}
     res = subprocess.run(["node", "-e", _VERIFY_HARNESS], input=json.dumps(inp), capture_output=True, text=True,
                          encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
     assert res.returncode == 0, res.stderr
@@ -787,11 +796,18 @@ def test_details_verify_card_states():
     result = out["result"]
     assert "Проверено 32 файла. Не хватает 3 файлов, повреждено 2" in result["main"]
     assert "У 1 файла Яндекс не сообщил контрольную сумму" in result["main"]
-    assert 'data-action="verify-requeue"' in result["actions"] and 'data-count="5"' in result["actions"]
+    # Повреждённые и недостающие — разные кнопки: недостающие человек мог убрать сам
+    assert 'data-what="damaged" data-count="2" data-bytes="8640000"' in result["actions"]
+    assert 'data-what="missing" data-count="3" data-bytes="1560327"' in result["actions"]
+    assert "Заменить повреждённые (2)" in result["actions"] and "Скачать недостающие (3)" in result["actions"]
+    primary = result["actions"].split('class="primary"', 1)[1].split("</button>", 1)[0]
+    assert result["actions"].count('class="primary"') == 1 and 'data-what="damaged"' in primary
     assert "Проверить ещё раз" in result["actions"]
+    assert "«_заменённые»" in result["main"] and "«Сортировкой»" in result["main"]
     assert "/Фото/нет.jpg" in result["list"] and "disk:/" not in result["list"]
     assert "на диске 3,0 МБ, у Яндекса 7,6 МБ" in result["list"]
-    assert result["actions"].count(" disabled>") == 0 and out["result_busy"]["actions"].count(" disabled>") == 2
+    assert result["list"].count("на его месте другой файл с тем же именем") == 1
+    assert result["actions"].count(" disabled>") == 0 and out["result_busy"]["actions"].count(" disabled>") == 3
 
     assert "Проверено 28 файлов — всё в порядке" in out["ok"]["main"] and out["ok"]["list"] == ""
     assert "verify-requeue" not in out["ok"]["actions"]
@@ -800,9 +816,20 @@ def test_details_verify_card_states():
     # Безлимит старых версий: файлы скачаны, но где лежат — не записано
     assert "У 1 200 файлов программа старой версии не записала" in out["unchecked"]["main"]
     assert "verify-start" not in out["unchecked"]["actions"]
+    # Ни одного файла на месте — диск отключён или файлы разложены: качать всё заново не предлагаем
+    assert "диск с папкой отключён" in out["allgone"]["main"]
+    assert 'data-what="missing"' not in out["allgone"]["actions"] and "Проверить ещё раз" in out["allgone"]["actions"]
 
-    # «Скачать заново» → файлы в очереди
-    assert out["posted"] == [["/api/verify/requeue", {"source": "disk"}]]
+    # «Заменить повреждённые» → в очереди, старые копии в «_заменённые», недостающие — своей кнопкой
+    assert out["posted"] == [["/api/verify/requeue", {"source": "disk", "what": "damaged"}],
+                             ["/api/verify/requeue", {"source": "disk", "what": "missing"}]]
+    damaged, missing = out["confirms"]
+    assert damaged.startswith("Заменить повреждённые: 2 файла?") and "«_заменённые»" in damaged and "8,2 МБ" in damaged
+    assert missing.startswith("Скачать недостающие: 3 файла?") and "«Сортировкой»" in missing
+    replaced = out["replaced"]
+    assert "2 файла снова в очереди" in replaced["main"] and "в папке «_заменённые»" in replaced["main"]
+    assert 'data-what="missing"' in replaced["actions"] and 'data-what="damaged"' not in replaced["actions"]
+    assert 'data-action="rescue-start"' in replaced["actions"]
     # «Скачать сейчас» — здесь же: после «Готово» на Главной нет «Продолжить»
     assert "5 файлов снова в очереди. Нажмите «Скачать сейчас»" in out["requeued"]["main"]
     assert 'data-action="rescue-start"' in out["requeued"]["actions"] and 'href="#/home"' in out["requeued"]["actions"]
@@ -819,7 +846,8 @@ def test_help_answers_deleted_files_with_real_buttons():
     for text in (help_js, readme):
         assert "Случайно удалил файлы, пока шло скачивание" in text
         assert "30 дней" in text and "Корзин" in text and "«Восстановить»" in text
-        for label in ("Подробнее", "Проверить скачанные файлы", "Скачать заново", "Скачать сейчас",
-                      "Повторить не скачавшиеся"):
+        for label in ("Подробнее", "Проверить скачанные файлы", "Скачать недостающие", "Скачать сейчас",
+                      "Повторить не скачавшиеся", "Заменить повреждённые"):
             assert f"«{label}»" in text and label in ui, label
+        assert "_заменённые" in text
         assert "«Файла больше нет на Диске»" in text and "Файла больше нет на Диске" in reasons

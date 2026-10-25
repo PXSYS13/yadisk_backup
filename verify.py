@@ -8,7 +8,7 @@
 Для Web UI печатаются строки `verify_progress | {json}` (не чаще раза в 2 секунды) и в
 самом конце `verify_summary | {json}` — экран «Подробнее» читает их из журнала задачи.
 Проблемные файлы (нет в папке, другой размер, другой MD5) вызывающий запоминает в базе:
-кнопка «Скачать заново» возвращает их в очередь.
+кнопки «Скачать недостающие» и «Заменить повреждённые» возвращают их в очередь.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from typing import NamedTuple
 from tqdm import tqdm
 
 from storage_fetch import is_md5
-from utils import files_text, human_bytes, human_duration_ru, keep_awake, to_long_path, under_webui
+from utils import files_text, human_bytes, human_duration_ru, keep_awake, path_key, to_long_path, under_webui
 
 # Примеров каждого вида в строке verify_summary: интерфейс показывает их списком
 EXAMPLES_PER_KIND = 50
@@ -62,6 +62,38 @@ def _md5(path: str, on_chunk: Callable[[int], None]) -> str:
     return h.hexdigest()
 
 
+def _not_owners(todo: list[Item]) -> set[int]:
+    """Номера строк, чей путь занят файлом другой строки.
+
+    Безлимит кладёт фото на первое свободное имя: если человек удалил «IMG_0001.JPG», туда ляжет
+    другое фото с тем же именем, и сюда будут указывать обе записи. Файл принадлежит той, с которой
+    совпали размер (и MD5, когда размер не решает), остальным его «нет в папке». Иначе «Заменить
+    повреждённые» отложило бы чужое фото, а новая копия легла бы на его место.
+    """
+    groups: dict[str, list[int]] = {}
+    for i, it in enumerate(todo):
+        groups.setdefault(path_key(it.local_path), []).append(i)
+    out: set[int] = set()
+    for idx in groups.values():
+        if len(idx) < 2:
+            continue
+        path = todo[idx[0]].local_path
+        try:
+            got = os.stat(to_long_path(path)).st_size
+        except OSError:
+            continue  # файла нет или его не прочитать — это каждой строке скажет общий проход
+        fits = [i for i in idx if todo[i].size is None or todo[i].size == got]
+        owner = fits[0] if len(fits) == 1 else None
+        if len(fits) > 1:
+            try:
+                actual = _md5(path, lambda _n: None)
+            except OSError:
+                actual = None
+            owner = next((i for i in fits if actual and is_md5(todo[i].md5) and todo[i].md5.lower() == actual), None)
+        out.update(i for i in idx if i != owner)
+    return out
+
+
 def check_files(items: Iterable[Item],
                 on_progress: Callable[[dict], None] | None = None) -> tuple[dict, list[tuple[str, str]]]:
     """Проверяет скачанные файлы. Возвращает (сводку для verify_summary, проблемы [(ключ, вид)]).
@@ -75,15 +107,14 @@ def check_files(items: Iterable[Item],
     counts = dict.fromkeys((*KINDS, "ok", "no_md5"), 0)
     examples: dict[str, list[dict]] = {k: [] for k in KINDS}
     problems: list[tuple[str, str]] = []
-    bad_bytes = 0
+    kind_bytes = dict.fromkeys(REQUEUE_KINDS, 0)
     reachable = 0
 
     def found(kind: str, it: Item, **extra) -> None:
-        nonlocal bad_bytes
         counts[kind] += 1
         if kind in REQUEUE_KINDS:
             problems.append((it.key, kind))
-            bad_bytes += it.size or 0
+            kind_bytes[kind] += it.size or 0
         if len(examples[kind]) < EXAMPLES_PER_KIND:
             examples[kind].append({"path": it.key, "size": it.size, **extra})
 
@@ -93,7 +124,12 @@ def check_files(items: Iterable[Item],
 
     # 1. Размеры: по одному обращению к диску на файл
     to_hash: list[tuple[Item, int]] = []
+    taken = _not_owners(todo)
     for i, it in enumerate(todo, 1):
+        if i - 1 in taken:
+            found("missing", it, taken=True)  # на его месте файл другой записи
+            report(stage="size", done=i, total=len(todo))
+            continue
         try:
             got = os.stat(to_long_path(it.local_path)).st_size
         except (FileNotFoundError, NotADirectoryError):
@@ -153,7 +189,10 @@ def check_files(items: Iterable[Item],
         # У строк безлимита из старых версий не записано, где лежит файл: проверить нечем
         "unchecked": len(items) - len(todo),
         "bytes": sum(it.size or 0 for it in todo),
-        "bad_bytes": bad_bytes,
+        "bad_bytes": sum(kind_bytes.values()),
+        # Сколько скачают кнопки «Скачать недостающие» и «Заменить повреждённые»
+        "missing_bytes": kind_bytes["missing"],
+        "damaged_bytes": kind_bytes["size"] + kind_bytes["md5"],
         # Ни одного файла не нашлось: отключён диск с папкой или папку перенесли целиком
         "all_missing": bool(todo) and not reachable,
         "seconds": round(time.monotonic() - t0),
@@ -241,7 +280,7 @@ def print_report(summary: dict) -> None:
 def run_check(items: list[Item], save_problems: Callable[[list[tuple[str, str]]], None]) -> int:
     """Проверка для CLI: прогресс, запись проблем в базу, итог. 0 — всё в порядке, 1 — есть проблемы.
 
-    save_problems(пары (ключ, вид)) заменяет в базе список для «Скачать заново».
+    save_problems(пары (ключ, вид)) заменяет в базе список для «Скачать недостающие» и «Заменить повреждённые».
     """
     if items:
         total = sum(it.size or 0 for it in items)
@@ -258,7 +297,7 @@ def run_check(items: list[Item], save_problems: Callable[[list[tuple[str, str]]]
             summary, problems = check_files(items, progress)
         finally:
             progress.close()
-    # Сначала база, потом итог: «Скачать заново» в интерфейсе появляется по строке итога
+    # Сначала база, потом итог: кнопки возврата в очередь появляются в интерфейсе по строке итога
     save_problems(problems)
     print_report(summary)
     return 0 if not any(summary[k] for k in KINDS) else 1
