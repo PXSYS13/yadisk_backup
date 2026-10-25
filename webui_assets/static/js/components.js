@@ -354,9 +354,10 @@
 
   // ── «Нас поддерживают» ──
   const CURRENCY = { RUB: '₽', USD: '$', EUR: '€', KZT: '₸', UAH: '₴', BYN: 'Br' };
+  // Неразрывный пробел: «500 ₽» не разрывается на две строки
   App.money = (amount, currency) => (amount == null ? '' : `${String(amount).includes('.')
     ? Number(amount).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-    : fmt.num(amount)} ${CURRENCY[currency] || currency || '₽'}`);
+    : fmt.num(amount)} ${CURRENCY[currency] || currency || '₽'}`);
   App.initials = (name) => String(name || '?').replace(/\./g, '').split(/\s+/).filter(Boolean).slice(0, 2)
     .map((p) => p.charAt(0).toUpperCase()).join('') || '?';
   App.avatar = (name, i, small = false) =>
