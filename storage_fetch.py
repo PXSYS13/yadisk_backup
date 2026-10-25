@@ -183,7 +183,12 @@ def fetch_to_file(
                     if md5 is not None:
                         md5.update(chunk)
                     if on_progress:
-                        on_progress(written, total)
+                        try:
+                            on_progress(written, total)
+                        except Exception:  # noqa: BLE001 — строка прогресса только для глаз
+                            # print в закрытый вывод (Web UI закрыли) бросает OSError, на Windows —
+                            # с EINVAL: это не ошибка записи файла, и файл из-за неё не бросаем
+                            pass
     except requests.exceptions.HTTPError as e:
         resp = getattr(e, "response", None)
         code = getattr(resp, "status_code", None)

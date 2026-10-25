@@ -159,6 +159,34 @@ def test_write_errors_are_local_never_yandex(tmp_path, monkeypatch, err, kind):
     assert failure.kind == kind
 
 
+@pytest.mark.parametrize("windows,kind", [(True, "local_disk"), (False, "local_file")])
+def test_einval_while_writing_is_the_disk_on_windows(tmp_path, monkeypatch, windows, kind):
+    """write() на отвалившийся NAS или выдернутую флешку Windows отвечает EINVAL без кода Win32:
+    это диск, а не файл. На Linux EINVAL при записи — имя, которое не принимает FAT или SMB."""
+    import builtins
+
+    import utils
+
+    monkeypatch.setattr(utils, "IS_WINDOWS", windows)
+    err = OSError(errno.EINVAL, "Invalid argument")
+    real_open = builtins.open
+    monkeypatch.setattr(builtins, "open",
+                        lambda path, mode="r", *a, **k: _BrokenFile(err) if "w" in mode else real_open(path, mode, *a, **k))
+    *_, failure = _fetch(tmp_path, {"s1klg.storage.yandex.net": _Stream(b"data")}, expected_size=4)
+    assert failure.kind == kind
+
+
+def test_progress_errors_never_fail_the_file(tmp_path):
+    """print в закрытый вывод (Web UI закрыли) бросает OSError, на Windows — с EINVAL: файл от этого
+    не портится, и считать это ошибкой записи файла нельзя."""
+    def progress(written, total):
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+    _, tmp, written, _, failure = _fetch(tmp_path, {"s1klg.storage.yandex.net": _Stream(b"data")},
+                                         expected_size=4, on_progress=progress)
+    assert failure is None and written == 4 and tmp.read_bytes() == b"data"
+
+
 def test_network_errors_inside_the_body_stay_network(tmp_path):
     class Chunked(_Stream):
         def iter_content(self, chunk_size):

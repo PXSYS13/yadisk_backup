@@ -500,6 +500,32 @@ def test_files_that_cannot_be_written_do_not_stop_the_links(db, net, tmp_path, m
     assert all(r["error"].startswith("local_file |") for r in rows.values())
 
 
+def test_dropped_network_drive_stops_the_links_round_with_code_4(db, net, tmp_path, monkeypatch):
+    """Сетевой диск отвалился: Windows отвечает на запись EINVAL с кодом Win32 64. Виноват диск —
+    раунд останавливается с кодом 4, а не записывает в ошибки все файлы ссылки."""
+    import errno
+
+    import utils
+
+    monkeypatch.setattr(utils, "IS_WINDOWS", True)
+    net(FakeYandex({f"/{i}.jpg": b"x" for i in range(12)}))
+    _add(db)
+    dl = tmp_path / "dl"
+    real_replace = pd.os.replace
+
+    def dropped(src, dst):
+        if str(dl) not in str(dst):
+            return real_replace(src, dst)
+        err = OSError(errno.EINVAL, "Указанное сетевое имя более недоступно")
+        err.winerror = 64  # ERROR_NETNAME_DELETED
+        raise err
+
+    monkeypatch.setattr(pd.os, "replace", dropped)
+    assert pd.run(db, str(dl), workers=1) == EXIT_DISK_FULL
+    errors = [r["error"] for r in _files(db).values() if r["status"] == "failed"]
+    assert errors and all(e.startswith("local_disk |") for e in errors)
+
+
 def test_full_disk_under_the_links_database_is_exit_4(db, net, tmp_path, monkeypatch, capsys):
     import sqlite3
 

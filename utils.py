@@ -809,9 +809,15 @@ def remove_quiet(path: str) -> None:
 
 
 # Ошибки записи, в которых виноват сам файл, а не диск: имя длиннее, чем разрешает файловая
-# система, недопустимое для неё имя (Windows отвечает EINVAL) или файл больше 4 ГБ для FAT32.
-# Такой файл не запишется в эту папку никогда, а остальные пишутся — качать дальше
+# система, недопустимое для неё имя (Linux на FAT и SMB отвечает EINVAL) или файл больше 4 ГБ
+# для FAT32. Такой файл не запишется в эту папку никогда, а остальные пишутся — качать дальше
 LOCAL_FILE_ERRNOS = frozenset({errno.ENAMETOOLONG, errno.EINVAL, errno.EFBIG})
+# На Windows виноват файл только при этих кодах Win32: недопустимое имя (123), слишком длинное
+# имя или путь (206), файл больше, чем принимает диск (223). В EINVAL Python превращает любой код
+# Win32 без своего errno: выдернутую флешку (1167), отвалившийся сетевой диск (64, 59, 121), сбой
+# устройства (1117), print в закрытый вывод. Если считать их ошибкой файла, вся живая очередь
+# уходит в ошибки, а не останавливается с «диск не принимает файлы»
+WIN_FILE_ERRORS = frozenset({123, 206, 223})
 # Ошибки локального диска: кончилось место или квота, нет прав, путь занят файлом, диск
 # отключён или сбоит. Сколько ни повторяй запрос к Яндексу — они не пройдут.
 LOCAL_DISK_ERRNOS = frozenset({
@@ -831,8 +837,19 @@ def is_local_disk_error(exc: BaseException) -> bool:
 
 
 def is_local_file_error(exc: BaseException) -> bool:
-    """Локальная ошибка из-за самого файла (LOCAL_FILE_ERRNOS): диск тут ни при чём."""
-    return is_local_disk_error(exc) and getattr(exc, "errno", None) in LOCAL_FILE_ERRNOS
+    """Локальная ошибка из-за самого файла: диск тут ни при чём, остальные файлы запишутся.
+
+    На Windows решает код Win32 (WIN_FILE_ERRORS), а не errno: EINVAL там значит что угодно.
+    Ошибка без кода Win32 (open и write идут через библиотеку C) с EINVAL — тоже диск.
+    """
+    if not is_local_disk_error(exc):
+        return False
+    code = getattr(exc, "errno", None)
+    if IS_WINDOWS:
+        if getattr(exc, "winerror", None) in WIN_FILE_ERRORS:
+            return True
+        return code != errno.EINVAL and code in LOCAL_FILE_ERRNOS
+    return code in LOCAL_FILE_ERRNOS
 
 
 def local_error_kind(exc: BaseException) -> str:

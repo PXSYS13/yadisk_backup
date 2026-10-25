@@ -1,5 +1,6 @@
 """Обычный Диск: файлы на молчащих серверах хранения откладываются, а не висят по 35 минут."""
 
+import errno
 import re
 
 import pytest
@@ -258,6 +259,38 @@ def test_file_too_big_for_the_folder_fails_alone_without_download(tmp_path, net,
     res = downloader._download_one(downloader.DownloadJob("disk:/big.mkv", 5 * 1024 ** 3, None), cli, str(tmp_path))
     assert res.status == "failed" and res.error.startswith("local_file | ")
     assert cli.calls == [] and net.hits == []  # гигабайты не качались впустую
+
+
+class _DroppedShare:
+    """Файл на отвалившемся сетевом диске: write() на Windows отвечает EINVAL без кода Win32."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def write(self, data):
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+
+def test_dropped_network_drive_stops_the_queue_instead_of_failing_it(tmp_path, net, monkeypatch):
+    """NAS отвалился посреди скачивания: виноват диск, а не файлы. Очередь останавливается с кодом 4
+    («Не получается записать файлы в папку»), а не уходит целиком в ошибки."""
+    import storage_fetch
+    import utils
+
+    monkeypatch.setattr(utils, "IS_WINDOWS", True)
+    monkeypatch.setattr(storage_fetch, "open", lambda *a, **k: _DroppedShare(), raising=False)
+    rows = [(f"disk:/f{i}.jpg", 5) for i in range(15)]
+    st = _state_with(tmp_path, rows)
+    monkeypatch.setattr(downloader, "_get_thread_client", lambda token: _Client({r: ALIVE for r, _ in rows}))
+
+    counters = downloader.download_all("t", st, str(tmp_path / "dl"), workers=1)
+    assert counters["aborted"] == "local_disk"
+    assert downloader.LOCAL_DISK_GIVE_UP <= counters["failed"] < len(rows)
+    assert main._download_exit_code(counters) == EXIT_DISK_FULL
+    st.close()
 
 
 def test_files_that_cannot_be_written_do_not_stop_the_queue(tmp_path, net, monkeypatch):

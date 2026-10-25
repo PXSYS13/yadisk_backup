@@ -514,16 +514,64 @@ def test_file_too_big_for_fat32_is_caught_before_download(monkeypatch, tmp_path)
     assert utils.too_big_for_folder(str(tmp_path), 5 * 1024 ** 3) is None
 
 
-def test_file_specific_write_errors_are_told_from_disk_problems():
+def test_file_specific_write_errors_are_told_from_disk_problems(monkeypatch):
     import errno
 
+    import utils
     from utils import is_local_disk_error, local_error_kind
 
-    for code in (errno.ENAMETOOLONG, errno.EFBIG, errno.EINVAL):
+    monkeypatch.setattr(utils, "IS_WINDOWS", False)  # Linux и macOS: решает errno
+    for code in (errno.ENAMETOOLONG, errno.EFBIG, errno.EINVAL):  # EINVAL — имя, которое FAT не примет
         assert local_error_kind(OSError(code, "x")) == "local_file"
     for code in (errno.ENOSPC, errno.EIO, errno.EACCES, errno.ENOENT):
         err = OSError(code, "x")
         assert is_local_disk_error(err) and local_error_kind(err) == "local_disk"
+
+
+def _windows_error(code, winerror=None):
+    """OSError, каким его делает Python на Windows: errno по таблице, код Win32 — в winerror.
+
+    open() и write() идут через библиотеку C, у их ошибок кода Win32 нет (winerror None).
+    """
+    err = OSError(code, "x")
+    err.winerror = winerror
+    return err
+
+
+@pytest.mark.parametrize("winerror,code,kind", [
+    (123, "EINVAL", "local_file"),   # ERROR_INVALID_NAME: недопустимое имя
+    (206, "ENOENT", "local_file"),   # ERROR_FILENAME_EXCED_RANGE: слишком длинное имя
+    (223, "EINVAL", "local_file"),   # ERROR_FILE_TOO_LARGE
+    (1167, "EINVAL", "local_disk"),  # ERROR_DEVICE_NOT_CONNECTED: выдернули флешку
+    (64, "EINVAL", "local_disk"),    # ERROR_NETNAME_DELETED: отвалился сетевой диск
+    (59, "EINVAL", "local_disk"),    # ERROR_UNEXP_NET_ERR
+    (121, "EINVAL", "local_disk"),   # ERROR_SEM_TIMEOUT: NAS не ответил
+    (1117, "EINVAL", "local_disk"),  # ERROR_IO_DEVICE
+    (None, "EINVAL", "local_disk"),  # write() на пропавший диск или print в закрытый вывод
+    (112, "ENOSPC", "local_disk"),   # ERROR_DISK_FULL
+    (None, "ENAMETOOLONG", "local_file"),
+])
+def test_windows_einval_blames_the_disk_unless_win32_names_the_file(monkeypatch, winerror, code, kind):
+    """На Windows EINVAL — это любой код Win32 без своего errno. Если считать его ошибкой файла,
+    отвалившийся NAS переводит всю живую очередь в ошибки вместо остановки с кодом 4."""
+    import errno
+
+    import utils
+
+    monkeypatch.setattr(utils, "IS_WINDOWS", True)
+    err = _windows_error(getattr(errno, code), winerror)
+    assert utils.is_local_disk_error(err)
+    assert utils.local_error_kind(err) == kind
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="коды Win32 в errno переводит только Python на Windows")
+def test_real_windows_errors_are_classified_by_win32_code():
+    from utils import local_error_kind
+
+    assert local_error_kind(OSError(None, "x", None, 123)) == "local_file"
+    assert local_error_kind(OSError(None, "x", None, 206)) == "local_file"
+    assert local_error_kind(OSError(None, "x", None, 1167)) == "local_disk"
+    assert local_error_kind(OSError(None, "x", None, 64)) == "local_disk"
 
 
 def test_path_key_joins_nfc_and_nfd_on_macos(monkeypatch):
