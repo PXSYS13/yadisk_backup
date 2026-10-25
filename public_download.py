@@ -53,8 +53,13 @@ from utils import (
     files_text,
     hhmm,
     human_bytes,
+    is_sqlite_disk_error,
     keep_awake,
     local_copy_matches,
+    local_error_kind,
+    name_with_tag,
+    part_path_for,
+    path_key,
     preview_path_for,
     previews_enabled,
     remove_preview,
@@ -62,8 +67,10 @@ from utils import (
     resolve_local_path,
     retry_every_sec,
     sanitize_component,
+    short_hash,
     sqlite_tx,
     to_long_path,
+    too_big_for_folder,
     under_webui,
 )
 
@@ -421,7 +428,9 @@ def list_link(api: PublicApi, conn: sqlite3.Connection, link, on_found=None) -> 
     kind = first.get("type") or "dir"
     name = first.get("name") or link["name"]
     if kind == "file":
-        batch.append(("/", first.get("size"), first.get("md5")))
+        # Ссылка на файл внутри папки (…/d/KEY/Папка/файл.jpg) хранит путь файла: с «/»
+        # Яндекс отдал бы всю папку по ссылке, а не этот файл
+        batch.append((root, first.get("size"), first.get("md5")))
         found = 1
     else:
         queue: deque[str] = deque([root])
@@ -478,6 +487,7 @@ class Job:
     public_url: str
     local_dir: str
     kind: str | None
+    local: str = ""  # место на диске на этот проход (Round._assign_targets)
 
 
 @dataclass
@@ -562,17 +572,20 @@ def _download_file(job: Job, download_dir: str, dead: DeadHosts) -> Result:
     local = ""
     part = ""
     try:
-        local = avoid_case_collision(local_target(download_dir, job))
+        local = avoid_case_collision(job.local or local_target(download_dir, job))
         parent = os.path.dirname(local)
         if parent:
             ensure_dir(to_long_path(parent))
         if local_copy_matches(local, job.size, job.md5):
             return Result(job, "downloaded", local)
+        if why := too_big_for_folder(parent or download_dir, job.size):
+            return Result(job, "failed", error=f"local_file | {why}")
         if job.storage_host and dead.is_dead(job.storage_host):
             # Сервер этого файла недавно молчал — не беспокоим Яндекс до следующего раунда
             return Result(job, "deferred", error=f"{DEFERRED_MARKER}сервер хранения {job.storage_host} недавно не отвечал",
                           storage_host=job.storage_host)
-        part = to_long_path(local + ".part")
+        # Не «имя.part»: в чужой папке такое имя бывает у настоящего файла, и его затёрло бы
+        part = to_long_path(part_path_for(local))
         remove_quiet(part)
         was_deferred = (job.error or "").startswith(DEFERRED_MARKER)
         tries = 1 if was_deferred else FILE_TRIES
@@ -607,7 +620,7 @@ def _download_file(job: Job, download_dir: str, dead: DeadHosts) -> Result:
                 res = Result(job, "deferred", error=str(failure), storage_host=failure.host, api_ok=True)
                 res.preview_path = _save_preview(api, job, local, download_dir)
                 return res
-            if failure.is_local or attempt + 1 >= tries:
+            if failure.is_local or failure.is_local_file or attempt + 1 >= tries:
                 break
             time.sleep(10 if failure.kind == "rate_limit" else 2 * (attempt + 1))
         remove_quiet(part)
@@ -615,8 +628,8 @@ def _download_file(job: Job, download_dir: str, dead: DeadHosts) -> Result:
             # Яндекс не выдал ссылку на файл — это сбой Яндекса, а не файла: ждём раунда
             return Result(job, "deferred", error=f"{DEFERRED_MARKER}{api_error.text}",
                           api_ok=api_ok, api_failed=not api_ok)
-        if failure is not None and failure.is_local:
-            return Result(job, "failed", error=f"local_disk | {failure.text}", api_ok=api_ok)
+        if failure is not None and (failure.is_local or failure.is_local_file):
+            return Result(job, "failed", error=f"{failure.kind} | {failure.text}", api_ok=api_ok)
         if failure is not None and failure.kind in ("server_50x", "timeout", "connection", "rate_limit"):
             return Result(job, "deferred", error=f"{DEFERRED_MARKER}Яндекс не отдал файл после {tries} попыток: {failure.text}",
                           storage_host=failure.host, api_ok=api_ok)
@@ -633,7 +646,7 @@ def _download_file(job: Job, download_dir: str, dead: DeadHosts) -> Result:
     except OSError as e:
         if part:
             remove_quiet(part)
-        return Result(job, "failed", error=f"local_disk | {type(e).__name__}: {e}")
+        return Result(job, "failed", error=f"{local_error_kind(e)} | {type(e).__name__}: {e}")
     except Exception as e:  # noqa: BLE001 — один файл не должен ронять весь раунд
         if part:
             remove_quiet(part)
@@ -802,8 +815,22 @@ class Round:
     def _changed(self) -> bool:
         return meta_get(self.conn, "changed") is not None
 
+    def _assign_targets(self, jobs: list[Job]) -> None:
+        """Каждому файлу — своё место на диске. «Docs/a.txt» и «docs/a.txt» в чужой папке на
+        Windows и macOS — один и тот же файл: второй затёр бы первый. Он получает хеш в имени."""
+        claimed = {path_key(r[0]) for r in self.conn.execute(
+            "SELECT local_path FROM link_files WHERE status='downloaded' AND local_path IS NOT NULL")}
+        for job in sorted(jobs, key=lambda j: (j.link_id, j.path)):
+            local = local_target(self.download_dir, job)
+            if path_key(local) in claimed:
+                folder, name = os.path.split(local)
+                local = os.path.join(folder, name_with_tag(name, f"_{short_hash(f'{job.link_id}:{job.path}')}"))
+            claimed.add(path_key(local))
+            job.local = local
+
     def download(self, jobs: list[Job]) -> bool:
         """Проходит очередь. True — по ходу добавили или убрали ссылки: нужен новый проход."""
+        self._assign_targets(jobs)
         self.total += len(jobs)
         pending = deque(jobs)
         futures: dict = {}
@@ -998,6 +1025,13 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("Прервано. Уже скачанное сохранено.", flush=True)
         return EXIT_INTERRUPTED
+    except sqlite3.OperationalError as e:
+        if not is_sqlite_disk_error(e):
+            raise
+        # База лежит на том же диске, что и файлы: он кончился — это код 4, а не падение
+        print(f"local_disk | Не получается записать базу links_state.db: {e}. Освободите место "
+              f"или проверьте, что диск подключён.", flush=True)
+        return EXIT_DISK_FULL
     finally:
         try:
             meta_set(conn, "state", None)

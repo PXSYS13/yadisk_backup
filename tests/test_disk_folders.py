@@ -168,7 +168,7 @@ class FakeState:
         self.rows = []
 
     def mark_pending_batch(self, items):
-        self.rows += [path for path, _s, _m in items]
+        self.rows += [item[0] for item in items]
 
 
 def test_selected_root_is_walked_alone():

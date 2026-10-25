@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -24,6 +25,8 @@ import requests
 
 PROBE_INTERVAL_SEC = 60
 HISTORY_SEC = 24 * 3600
+# Журнал обрезается до суток истории при запуске и раз в столько секунд работы
+TRIM_EVERY_SEC = 6 * 3600
 BUCKET_SEC = 600  # полоска таймлайна: 144 ведра по 10 минут
 # Ответ медленнее этого — «деградация», даже если код успешный
 DEGRADED_LATENCY_MS = 5000
@@ -68,6 +71,21 @@ class Sample:
         if self.latency_ms >= DEGRADED_LATENCY_MS:
             return STATE_DEGRADED
         return STATE_OK
+
+
+def sample_from_log(rec) -> tuple[str, Sample] | None:
+    """Строка журнала → (проба, замер); None — строка испорчена (не объект, ts не число…)."""
+    if not isinstance(rec, dict) or not isinstance(rec.get("probe"), str):
+        return None
+    try:
+        ts = float(rec["ts"])
+        status = rec.get("status")
+        error = rec.get("error")
+        sample = Sample(ts, bool(rec["ok"]), None if status is None else int(status),
+                        int(rec["latency_ms"]), None if error is None else str(error))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    return (rec["probe"], sample) if math.isfinite(ts) else None
 
 
 def run_probe(probe: Probe, token: str | None = None, session: requests.Session | None = None) -> Sample:
@@ -175,27 +193,64 @@ class HealthMonitor:
         self._thread: threading.Thread | None = None
         self._session = requests.Session()
         self.started_at: float | None = None
+        self._trimmed_at = time.monotonic()
         self._load_history()
 
     # ── история на диске ──
 
-    def _load_history(self) -> None:
+    def _fresh_log(self) -> list[tuple[str, Sample, str]] | None:
+        """Замеры журнала за последние сутки: (проба, замер, строка). None — журнал не прочитать.
+
+        Испорченная строка (не объект, ts не число) пропускается: из-за неё интерфейс не
+        запустился бы вовсе, пока человек не удалит журнал.
+        """
         if not self._log_path or not os.path.exists(self._log_path):
-            return
+            return None
         cutoff = time.time() - HISTORY_SEC
+        out = []
         try:
-            with open(self._log_path, encoding="utf-8") as f:
+            with open(self._log_path, encoding="utf-8", errors="replace") as f:
                 for line in f:
                     try:
-                        rec = json.loads(line)
-                        key = rec.pop("probe")
-                        sample = Sample(**rec)
-                    except (ValueError, TypeError, KeyError):
+                        parsed = sample_from_log(json.loads(line))
+                    except ValueError:
                         continue
-                    if key in self._history and sample.ts >= cutoff:
-                        self._history[key].append(sample)
+                    if parsed and parsed[1].ts >= cutoff:
+                        out.append((*parsed, line if line.endswith("\n") else line + "\n"))
         except OSError:
-            pass
+            return None
+        return out
+
+    def _load_history(self) -> None:
+        fresh = self._fresh_log()
+        if fresh is None:
+            return
+        for key, sample, _line in fresh:
+            if key in self._history:
+                self._history[key].append(sample)
+        self._rewrite_log([line for _k, _s, line in fresh])
+
+    def _rewrite_log(self, lines: list[str]) -> None:
+        """Журнал — только последние сутки: два замера в минуту иначе копились бы годами
+        (сотни мегабайт), а журнал читается при каждом запуске и уходит в отчёт для поддержки."""
+        tmp = f"{self._log_path}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            os.replace(tmp, self._log_path)
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    def _trim_log(self) -> None:
+        if time.monotonic() - self._trimmed_at < TRIM_EVERY_SEC:
+            return
+        self._trimmed_at = time.monotonic()
+        fresh = self._fresh_log()
+        if fresh is not None:
+            self._rewrite_log([line for _k, _s, line in fresh])
 
     def _append_log(self, key: str, sample: Sample) -> None:
         if not self._log_path:
@@ -227,6 +282,7 @@ class HealthMonitor:
     def _loop(self) -> None:
         while not self._stop.is_set():
             self.probe_once()
+            self._trim_log()
             self._stop.wait(self._interval)
 
     def start(self) -> None:

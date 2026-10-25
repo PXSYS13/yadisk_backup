@@ -234,3 +234,20 @@ def test_mark_pending_batch(st):
     assert stats["bytes_total"] == 600
 
 
+
+
+def test_disk_modification_time_is_kept_for_the_copy(st):
+    """Время изменения на Диске доходит до задачи скачивания; повторный сбор без него его не стирает."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    import downloader
+
+    entry = SimpleNamespace(path="disk:/a.jpg", size=5, md5=None,
+                            modified=datetime(2020, 9, 13, 12, 26, 40, tzinfo=timezone.utc))
+    batch: list = []
+    downloader._register_file(entry, batch, None)
+    st.mark_pending_batch(batch)
+    st.mark_pending("disk:/a.jpg", 5, None)  # старый формат — без времени
+    job = next(downloader._jobs_from_state(st))
+    assert job.modified == 1_600_000_000.0 and job.downloaded_at is None

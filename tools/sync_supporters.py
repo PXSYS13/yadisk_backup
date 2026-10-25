@@ -42,6 +42,7 @@ import re
 import secrets
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -89,10 +90,14 @@ HOWTO = (
 # Ссылки и @упоминания вырезаем: список видят все пользователи программы, рекламе там не место
 _URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
 _DOMAIN_RE = re.compile(
-    r"(?i)\b[\w-]+(?:\.[\w-]+)*\.(?:ru|su|com|net|org|me|io|gg|tv|cc|ly|link|xyz|top|info|site|online|shop)"
+    r"(?i)\b[\w-]+(?:\.[\w-]+)*\.(?:ru|su|рф|com|net|org|me|io|gg|tv|cc|ly|link|xyz|top|info|site|online|shop"
+    r"|by|kz|ua|uz|pro|biz|app|dev|bet|live|store|club|space|fun|art|news|tech|vip|win|click|website|icu"
+    r"|fm|to|co|ai|uk|us|eu|de|pw|ws|cn|tk|games|moscow)"
     r"\b(?:/\S*)?"
 )
-_MENTION_RE = re.compile(r"(?<![\w.])@\w{2,}")
+# Упоминание — и сразу после слова («Подписывайтесь@канал»): адрес почты к этому времени уже
+# вырезан по домену
+_MENTION_RE = re.compile(r"@\w{2,}")
 
 
 class SyncError(Exception):
@@ -111,6 +116,10 @@ def clean_text(value, limit: int, keep_mentions: bool = False) -> str:
     """
     if not isinstance(value, str):
         return ""
+    # Широкие «＠» и буквы — обычными, невидимые знаки (нулевой ширины, разворот текста) — прочь:
+    # иначе «t\u200b.me/канал» проходил бы фильтр, а на экране выглядел бы ссылкой
+    value = "".join(" " if unicodedata.category(ch) == "Cc" else ch for ch in unicodedata.normalize("NFKC", value)
+                    if unicodedata.category(ch) not in ("Cf", "Co", "Cs", "Cn"))
     text = _URL_RE.sub(" ", value)
     text = _DOMAIN_RE.sub(" ", text)
     text = _MENTION_RE.sub((lambda m: m.group(0)[1:]) if keep_mentions else " ", text)
@@ -400,12 +409,19 @@ def fetch_donations(token: str, opener=None, pause: float = PAGE_PAUSE_SEC) -> l
         out.extend(x for x in data if isinstance(x, dict))
         meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
         last = meta.get("last_page")
-        if not data or not isinstance(last, int) or page >= last:
-            break
+        # Без номера последней страницы или с пустой страницей посреди списка он неполный, а
+        # список донатов переписывается целиком — пропали бы все донаты дальше этой страницы
+        if not isinstance(last, int) or isinstance(last, bool):
+            raise SyncError(f"DonationAlerts не сообщил, сколько всего страниц (страница {page})")
+        if page >= last:
+            return out
+        if not data:
+            raise SyncError(f"DonationAlerts прислал пустую страницу {page} из {last}")
         page += 1
         if pause:
             time.sleep(pause)
-    return out
+    raise SyncError(f"Донатов больше, чем {MAX_PAGES} страниц: поднимите MAX_PAGES в tools/sync_supporters.py",
+                    fatal=True)
 
 
 def load_current(path: Path = SUPPORTERS_FILE) -> dict:
@@ -431,6 +447,11 @@ def sync(token: str, path: Path = SUPPORTERS_FILE, dry_run: bool = False, opener
     except ValueError as e:
         raise SyncError(f"{path.name} — не JSON ({e}): исправьте файл руками", fatal=True) from e
     donations = fetch_donations(token, opener=opener, pause=pause)
+    had = any(str(x.get("id", "")).startswith(ID_PREFIX) for x in current.get("supporters") or []
+              if isinstance(x, dict))
+    if not donations and had:
+        # Сбой DonationAlerts стёр бы из списка всех, кто поддержал проект: ждём следующего запуска
+        raise SyncError("DonationAlerts вернул пустой список донатов — список не трогаю")
     new = merge(current, donations, today=today)
     text = dump(new)
     try:

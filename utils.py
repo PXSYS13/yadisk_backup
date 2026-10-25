@@ -497,8 +497,12 @@ def _strip_long_prefix(path: str) -> str:
     return path
 
 
-def _short_hash(remote_path: str, n: int = 6) -> str:
+def short_hash(remote_path: str, n: int = 6) -> str:
+    """Короткий устойчивый хеш пути — хвост имени, когда имя пришлось чистить или оно занято."""
     return hashlib.sha256(remote_path.encode("utf-8", errors="replace")).hexdigest()[:n]
+
+
+_short_hash = short_hash  # прежнее имя
 
 
 def path_key(path: str) -> str:

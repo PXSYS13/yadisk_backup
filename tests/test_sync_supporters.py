@@ -274,3 +274,44 @@ def test_widget_import_refuses_a_page_without_donations(tmp_path, capsys, monkey
     assert ss.main(["--from-widget", str(page)]) == 1
     assert "На странице нет донатов" in capsys.readouterr().out
     assert path.read_text(encoding="utf-8") == '{"supporters": []}'
+
+
+@pytest.mark.parametrize("text", [
+    "Пишите t​.me/spamchan",       # нулевая ширина внутри ссылки
+    "Пишите @​spamchan",           # и после @
+    "Подписывайтесь@spamchan",          # @ сразу после слова
+    "Спасибо...@spamchan",
+    "Пишите ＠spamchan",                # широкий @
+    "Бонусы на casino.bet",
+    "Скидки на магазин.рф",
+])
+def test_links_and_mentions_cannot_sneak_through(text):
+    cleaned = ss.clean_text(text, 160)
+    assert "spamchan" not in cleaned and ".bet" not in cleaned and ".рф" not in cleaned
+
+
+def test_incomplete_pages_never_shrink_the_list():
+    """Пустая страница посреди списка или ответ без номера последней — список неполный: ошибка,
+    иначе merge выкинул бы всех, кто дальше этой страницы."""
+    def gap(url, token):
+        page = int(url.rsplit("=", 1)[1])
+        data = [donation(1)] if page == 1 else []
+        return FakeResp(json.dumps({"data": data, "meta": {"last_page": 3}}).encode())
+
+    with pytest.raises(ss.SyncError):
+        ss.fetch_donations("t", opener=gap, pause=0)
+
+    def no_meta(url, token):
+        return FakeResp(json.dumps({"data": [donation(1)]}).encode())
+
+    with pytest.raises(ss.SyncError):
+        ss.fetch_donations("t", opener=no_meta, pause=0)
+
+
+def test_empty_answer_does_not_wipe_the_supporters(tmp_path):
+    path = tmp_path / "supporters.json"
+    path.write_text(json.dumps({"supporters": [{"id": "da-1", "name": "Анна"}]}), encoding="utf-8")
+    opener, _ = pages([])
+    with pytest.raises(ss.SyncError):
+        ss.sync("t", path=path, opener=opener, pause=0)
+    assert json.loads(path.read_text(encoding="utf-8"))["supporters"][0]["name"] == "Анна"
