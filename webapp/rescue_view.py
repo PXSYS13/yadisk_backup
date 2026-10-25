@@ -273,13 +273,24 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
 
     # Что нужно от человека
     action_id, action_source = None, None
+    key_renewed = False
     for name in ("disk", "unlim"):
         a = sources[name].get("action")
         if a and sources[name]["state"] in ("needs_action", "error"):
+            if a == "token" and not running and token.get("ok"):
+                # Запуск закончился на отклонённом ключе, а человек уже ввёл рабочий: дальше —
+                # «Продолжить», а не снова «Получить новый ключ». Доступ к Безлимиту так не узнать:
+                # его проверка смотрит только на файл, а не на то, пускает ли Яндекс
+                key_renewed = True
+                sources[name].update(state="stopped", action=None, reason="Ключ обновлён — можно продолжать")
+                continue
             action_id, action_source = a, name
             break
     if action_id is None and state == "needs_action":
-        action_id, action_source = "send_logs", "all"
+        if key_renewed:
+            state = "stopped"
+        else:
+            action_id, action_source = "send_logs", "all"
     # Первая настройка — только когда не подключено ничего: часть, на которой запуск
     # остановился, считается подключённой, и её действие не заменяется рассказом о настройке
     if not running and not (disk_on or unlim_on):
@@ -362,6 +373,9 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
             headline = "Скачано почти всё"
             subline = (f"Сохранено {files_text(totals['done'])}. Не скачались: {files_text(totals['failed'])}"
                        + (f", ждут Яндекса: {files_text(totals['deferred'])}" if totals["deferred"] else ""))
+    elif state == "stopped" and key_renewed:
+        headline = "Ключ обновлён — можно продолжать"
+        subline = "Нажмите «Продолжить»: программа докачает остальное с того же места. Уже скачанное сохранено."
     elif state == "stopped":
         headline = "Скачивание на паузе"
         subline = "Уже скачанное сохранено. «Продолжить» докачает остальное без повторов."

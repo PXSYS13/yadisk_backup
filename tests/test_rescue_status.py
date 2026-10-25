@@ -193,6 +193,21 @@ def test_rejected_key_while_unlim_still_downloads_needs_the_person():
     assert r["action"]["id"] == "token" and "Безлимит" not in r["action"]["text"]
 
 
+def test_new_key_after_a_finished_run_offers_to_continue():
+    # Запуск закончился на отклонённом ключе, человек ввёл новый, и он работает: Главная зовёт
+    # «Продолжить», а не снова «Получить новый ключ»
+    disk = db(total=6000, downloaded=3000, pending=3000)
+    r = build(rescue_st(state="failed", disk={"state": "needs_action", "action": "token"}),
+              disk_db=disk, token={"ok": True, "login": "t"}, cookies=NO)
+    assert r["state"] == "stopped" and r["action"] is None
+    assert r["headline"] == "Ключ обновлён — можно продолжать" and "«Продолжить»" in r["subline"]
+    assert r["sources"]["disk"]["state"] == "stopped" and r["sources"]["disk"]["action"] is None
+    # Пока запуск идёт, решает он сам (resume_access), а доступ к Безлимиту по файлу не проверить
+    r = build(rescue_st(state="failed", unlim={"state": "needs_action", "action": "cookies"}),
+              unlim_db=db(total=10, downloaded=5, pending=5), cookies={"ok": True})
+    assert r["state"] == "needs_action" and r["action"]["id"] == "cookies"
+
+
 def test_run_with_nothing_to_download_still_asks_for_setup():
     # Запуск не нашёл, что качать: ни одна часть не начинала — это по-прежнему первая настройка
     r = build(rescue_st(state="failed"), token=NO, cookies=NO)
