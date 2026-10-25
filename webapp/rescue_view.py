@@ -409,8 +409,9 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
         "notice": notice,
         "space": space,
         "sources": sources,
-        # Лента «Что происходит» — новые сверху; признаки жизни — по всем источникам
-        "events": list(reversed(rescue_st.get("events") or []))[:12] if started else [],
+        # Лента «Что происходит» — новые сверху; признаки жизни — по всем источникам. До запуска в ней
+        # бывает одна строка: почему не получилось продолжить скачивание после перезапуска
+        "events": list(reversed(rescue_st.get("events") or []))[:12],
         "last_activity_at": max((s.get("last_activity_at") or 0 for s in active), default=0) or None,
         "recent": recent,
         "summary": {

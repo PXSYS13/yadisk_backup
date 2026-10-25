@@ -103,8 +103,13 @@ def test_live_signs_events_and_recent_files():
     assert src["recent_files"] == [{"name": "IMG_1.JPG", "size": 2048, "at": 990.0}]
     assert src["tasks_running"] == 1 and src["last_activity_at"] == 998.0
     assert r["sources"]["unlim"]["listing_found"] == 5000
-    # До запуска лента пуста, даже если в сводке что-то осталось
-    assert build(dict(st, started_at=None, running=False), disk_db=disk, live=live)["events"] == []
+    # До запуска в ленте только то, что записали без запуска, — например, почему программа не
+    # продолжила скачивание после перезапуска (Rescue.note): строки прошлых запусков там не бывает,
+    # start() очищает ленту
+    idle = dict(st, started_at=None, running=False,
+                events=[{"at": 990.0, "source": None, "kind": "warn", "text": "Не получилось продолжить"}])
+    assert [e["text"] for e in build(idle, disk_db=disk, live=live)["events"]] == ["Не получилось продолжить"]
+    assert build(dict(idle, events=[]), disk_db=disk, live=live)["events"] == []
 
 
 def test_progress_meter_counts_recent_work():
