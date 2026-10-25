@@ -1,5 +1,6 @@
 """storage_fetch: скачивание одного файла и реестр молчащих серверов хранения."""
 
+import errno
 import hashlib
 
 import pytest
@@ -140,10 +141,11 @@ class _BrokenFile:
 
 
 @pytest.mark.parametrize("err,kind", [
-    (OSError(27, "File too large"), "local_file"),     # FAT32 и файл больше 4 ГБ (Linux, macOS)
-    (OSError(36, "File name too long"), "local_file"),
-    (OSError(28, "No space left on device"), "local_disk"),
-    (OSError(5, "Input/output error"), "local_disk"),  # флешка отвалилась
+    # Номера errno разные в Linux, macOS и Windows (ENAMETOOLONG — 36, 63 и 38): только константы
+    (OSError(errno.EFBIG, "File too large"), "local_file"),     # FAT32 и файл больше 4 ГБ (Linux, macOS)
+    (OSError(errno.ENAMETOOLONG, "File name too long"), "local_file"),
+    (OSError(errno.ENOSPC, "No space left on device"), "local_disk"),
+    (OSError(errno.EIO, "Input/output error"), "local_disk"),  # флешка отвалилась
     (OSError("без errno"), "local_disk"),
 ])
 def test_write_errors_are_local_never_yandex(tmp_path, monkeypatch, err, kind):
