@@ -19,7 +19,9 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from utils import (
+    MAX_NAME_LEN,
     legacy_local_path,
+    name_len,
     path_key,
     remote_path_is_clean,
     resolve_local_path,
@@ -31,6 +33,20 @@ from utils import (
 def _utc_now() -> str:
     """Текущее время UTC в том же формате, что писали раньше (utcnow() устарел)."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _never_writable(path: str) -> bool:
+    """В пути есть имя длиннее MAX_NAME_LEN, и файла по нему нет.
+
+    Такие пути назначали версии до 2.8: имя больше 255 байт (Linux, macOS) или 255 знаков
+    (Windows) не создать, и файл падал при каждом запуске. Раз файла нет, новое имя ничего
+    не сдвигает. Если же файловая система такое имя приняла и файл лежит, назначение остаётся.
+    """
+    # Знак — не больше 4 байт UTF-8 и 2 знаков UTF-16: короткие имена не кодируем (250 000 строк)
+    if all(len(part) * 4 <= MAX_NAME_LEN or name_len(part) <= MAX_NAME_LEN
+           for part in os.path.normpath(path).split(os.sep)):
+        return False
+    return not os.path.lexists(to_long_path(path))
 
 
 SCHEMA = """
@@ -322,8 +338,10 @@ class State:
         Учитывает существующие пути, санитизацию и коллизии регистра (Windows, macOS).
         Если пользователь сменил DOWNLOAD_DIR, старые назначения вне новой папки
         пересчитываются — иначе остаток очереди молча уехал бы в прежнюю папку.
-        Назначенные пути внутри папки не пересчитываются; новые строки получают имена
-        по правилу 2.3.1 (см. resolve_local_path).
+        Пересчитываются и пути версий до 2.8 с именем длиннее, чем принимает файловая
+        система (_never_writable): такой файл ни разу не записался и падал при каждом запуске.
+        Остальные назначенные пути внутри папки не пересчитываются; новые строки получают
+        имена по правилу 2.3.1 (см. resolve_local_path).
         """
         root = os.path.normcase(os.path.abspath(download_dir)).rstrip("\\/")
 
@@ -352,7 +370,7 @@ class State:
             to_assign: list[str] = []
             for r in rows:
                 lp = r["local_path"]
-                if lp and under_root(lp):
+                if lp and under_root(lp) and not _never_writable(lp):
                     existing_paths.add(path_key(lp))
                 else:
                     to_assign.append(r["remote_path"])

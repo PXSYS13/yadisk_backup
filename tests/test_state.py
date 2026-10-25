@@ -222,6 +222,46 @@ def test_assign_reuses_file_saved_under_old_name(st, tmp_path):
     assert rows[fresh] == os.path.join(out, "Встреча_ итоги", "New.docx")  # файла нет — новое имя
 
 
+def test_too_long_names_from_old_versions_are_reassigned(st, tmp_path):
+    """2.7.4 и раньше назначали имя длиннее, чем принимает файловая система (255 байт на Linux
+    и macOS): такой файл не записывался и падал при каждом запуске. Пока его нет, имя
+    пересчитывается; обычные назначения остаются на месте."""
+    from utils import MAX_NAME_LEN, name_len
+
+    out = str(tmp_path / "out")
+    long_file = "disk:/" + "a" * 300 + ".jpg"
+    long_folder = "disk:/" + "b" * 300 + "/x.jpg"
+    ok = "disk:/ok.jpg"
+    st.mark_pending_batch([(long_file, 1, None), (long_folder, 1, None), (ok, 1, None)])
+    old = {long_file: os.path.join(out, "a" * 300 + ".jpg"),
+           long_folder: os.path.join(out, "b" * 300, "x.jpg"),
+           ok: os.path.join(out, "ok (старое назначение).jpg")}
+    for rp, lp in old.items():
+        st._conn().execute("UPDATE files SET local_path=? WHERE remote_path=?", (lp, rp))
+    st.assign_local_paths(out)
+    rows = _local_paths(st)
+    assert rows[ok] == old[ok]
+    for rp in (long_file, long_folder):
+        assert rows[rp] != old[rp] and rows[rp].startswith(out)
+        assert all(name_len(part) <= MAX_NAME_LEN for part in os.path.relpath(rows[rp], out).split(os.sep))
+
+
+def test_long_name_that_the_filesystem_took_is_kept(st, tmp_path, monkeypatch):
+    """Файловая система приняла длинное имя, и файл лежит — назначение остаётся, файл не переедет."""
+    import state as state_module
+
+    monkeypatch.setattr(state_module, "MAX_NAME_LEN", 10)  # «длинное» имя, которое ФС всё же приняла
+    out = tmp_path / "out"
+    out.mkdir()
+    saved = out / "длинное имя файла.jpg"
+    saved.write_bytes(b"x")
+    rp = "disk:/длинное имя файла.jpg"
+    st.mark_pending(rp, 1, None)
+    st._conn().execute("UPDATE files SET local_path=? WHERE remote_path=?", (str(saved), rp))
+    st.assign_local_paths(str(out))
+    assert _local_paths(st)[rp] == str(saved)
+
+
 def test_mark_pending_batch(st):
     items = [
         ("disk:/1.jpg", 100, "md1"),
