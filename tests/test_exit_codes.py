@@ -285,3 +285,38 @@ def test_worker_exits_1_when_files_failed_and_nothing_waits(tmp_path, monkeypatc
     monkeypatch.setattr(uw.time, "sleep", lambda s: None)
     uw.ensure_attempts_column()
     assert uw.Worker(1).run() == EXIT_PARTIAL
+
+
+@pytest.mark.parametrize("exc,code", [
+    (yadisk.exceptions.InternalServerError("500"), EXIT_OUTAGE),
+    (downloader.RootNotFound("disk:/Нет такой"), EXIT_PARTIAL),
+])
+def test_console_download_reports_a_broken_auto_scan(tmp_path, monkeypatch, capsys, exc, code):
+    """`main.py download` с пустой базой сам собирает список: сбой сбора — код выхода, а не трейсбек."""
+    monkeypatch.setattr(main, "DB_FILE", tmp_path / "state.db")
+    monkeypatch.setattr(main, "token_state", lambda token: ("ok", "OK"))
+    monkeypatch.setattr(main, "make_client", lambda token: _Client(True))
+
+    def scan(client, state, root, on_note):
+        raise exc
+
+    monkeypatch.setattr(main, "scan_tree", scan)
+    args = argparse.Namespace(workers=1, wait=False, no_scan=False, root="/Нет такой")
+    assert main.cmd_download({"token": "t", "max_workers": 1, "download_dir": str(tmp_path)}, args) == code
+    assert "Traceback" not in capsys.readouterr().out
+
+
+def test_verify_checks_only_files_that_should_be_in_the_folder(tmp_path, monkeypatch, capsys):
+    """Снятый выбором файл с прежним local_path — не «отсутствует локально»."""
+    from state import FOLDER_SKIP_MARKER, State
+
+    monkeypatch.setattr(main, "DB_FILE", tmp_path / "state.db")
+    kept = tmp_path / "kept.txt"
+    kept.write_bytes(b"x")
+    with State(str(main.DB_FILE)) as st:
+        st.mark_pending_batch([("disk:/kept.txt", 1, None), ("disk:/off/gone.txt", 1, None)])
+        st.mark_downloaded("disk:/kept.txt", str(kept))
+        st.mark_skipped("disk:/off/gone.txt", str(tmp_path / "off" / "gone.txt"))
+        st._conn().execute("UPDATE files SET error=? WHERE remote_path='disk:/off/gone.txt'", (FOLDER_SKIP_MARKER,))
+    assert main.cmd_verify({}, argparse.Namespace()) == 0
+    assert "Проверено: 1" in capsys.readouterr().out

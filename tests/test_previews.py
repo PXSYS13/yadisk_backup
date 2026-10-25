@@ -53,10 +53,12 @@ class _Http:
 
     def __init__(self):
         self.hits = []
+        self.auth = {}  # сервер → был ли у запроса ключ доступа
 
-    def get(self, url, stream=False, timeout=None, allow_redirects=True):
+    def get(self, url, stream=False, timeout=None, allow_redirects=True, headers=None):
         host = url.split("/")[2]
         self.hits.append(host)
+        self.auth[host] = bool((headers or {}).get("Authorization"))
         if host == "dl":
             return _Stream(status=302, headers={"Location": "https://" + url.split("/", 3)[3]})
         if host == "preview":
@@ -117,7 +119,6 @@ def disk_net(monkeypatch):
     downloader.DEAD_HOSTS.clear()
     http = _Http()
     monkeypatch.setattr(downloader, "_thread_http", lambda: http)
-    monkeypatch.setattr(downloader, "_thread_preview_http", lambda token: http)
     monkeypatch.setattr(downloader.time, "sleep", lambda s: None)
     monkeypatch.delenv("YADISK_PREVIEWS", raising=False)
     yield http
@@ -130,6 +131,9 @@ def test_disk_deferred_photo_gets_a_preview(tmp_path, disk_net):
     assert res.status == "deferred"
     assert res.preview_path.endswith(os.path.join(PREVIEW_DIRNAME, "Фото", "a.HEIC.jpg"))
     assert Path(res.preview_path).read_bytes() == JPEG
+    # Ключ доступа — только сервису превью; ссылки на сами файлы подписаны и без него
+    assert disk_net.auth.pop("preview") is True
+    assert disk_net.auth and not any(disk_net.auth.values())  # ни ссылке на файл, ни серверу хранения
 
     st = State(str(tmp_path / "state.db"))
     st.mark_pending_batch([("disk:/Фото/a.HEIC", 5, None)])
@@ -464,13 +468,13 @@ def test_missing_preview_is_not_logged_as_a_refusal(tmp_path, disk_net, monkeypa
     import logging
 
     class NoPreview(_Http):
-        def get(self, url, stream=False, timeout=None, allow_redirects=True):
+        def get(self, url, stream=False, timeout=None, allow_redirects=True, headers=None):
             if url.split("/")[2] == "preview":
                 return _Stream(status=434, headers={"Content-Type": "text/plain"})
-            return super().get(url, stream, timeout, allow_redirects)
+            return super().get(url, stream, timeout, allow_redirects, headers)
 
     http = NoPreview()
-    monkeypatch.setattr(downloader, "_thread_preview_http", lambda token: http)
+    monkeypatch.setattr(downloader, "_thread_http", lambda: http)
     with caplog.at_level(logging.INFO, logger="yadisk_backup"):
         res = downloader._download_one(downloader.DownloadJob("disk:/Фото/a.HEIC", 5, None), _DiskClient(), str(tmp_path))
     assert res.status == "deferred" and not res.preview_path

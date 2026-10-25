@@ -43,6 +43,8 @@ from utils import (
     SKIP_PATH_PREFIXES,  # noqa: F401 — реэкспорт: корзину никогда не качаем
     categorize,
     in_trash,
+    local_error_kind,
+    part_path_for,
     preview_path_for,
     previews_enabled,
     TELEGRAM_CHANNEL,
@@ -59,6 +61,7 @@ from utils import (
     resolve_local_path,
     to_disk_path,
     to_long_path,
+    too_big_for_folder,
 )
 
 log = logging.getLogger("yadisk_backup")
@@ -83,12 +86,16 @@ OnFile = Callable[[str, int], None]
 # ── клиент и retry-политика ─────────────────────────────────────────────────
 
 
-# Ошибки, повторять которые бессмысленно: токен не станет валидным,
-# а удалённый файл не появится, сколько ни жди.
+# Ошибки, повторять которые бессмысленно: токен не станет валидным, удалённый файл
+# не появится, папка не станет файлом, а исчерпанный лимит скачиваний файла не вернётся
+# через минуту, сколько ни жди.
 NON_RETRYABLE = (
     yadisk.exceptions.UnauthorizedError,
     yadisk.exceptions.ForbiddenError,
-    yadisk.exceptions.PathNotFoundError,
+    yadisk.exceptions.NotFoundError,
+    yadisk.exceptions.WrongResourceTypeError,
+    yadisk.exceptions.BadRequestError,
+    yadisk.exceptions.ResourceDownloadLimitExceededError,
 )
 # Сбои на стороне Яндекса (50x) — короткая фиксированная пауза
 SERVER_ERRORS = (
@@ -103,13 +110,17 @@ TIMEOUT_ERRORS = (TimeoutError, yadisk.exceptions.RequestTimeoutError)
 # Пауза при 429 — Яндекс просит подождать, экспонента с 1 секунды тут не поможет
 RATE_LIMIT_WAIT_SEC = 60.0
 SERVER_ERROR_WAIT_SEC = 5.0
-# (connect 30s, read 300s — защита от Read timed out на медленной сети и больших файлах)
-DEFAULT_TIMEOUT = (30.0, 300.0)
+# Через клиент идут только запросы к API (ссылки, списки, сведения о файле), сами файлы
+# качает storage_fetch. Ответ API дольше минуты — уже сбой: ждать по 5 минут и повторять
+# его 4 раза внутри yadisk, да ещё 7 раз через tenacity, значило висеть часами
+DEFAULT_TIMEOUT = (15.0, 60.0)
+# Свои повторы yadisk: один — чтобы сбой на середине большого списка не начинал его заново
+DEFAULT_N_RETRIES = 1
 
 
 def make_client(token: str) -> yadisk.Client:
     """Клиент REST API с единым таймаутом. Закрывать через .close() или contextlib.closing."""
-    return yadisk.Client(token=token, default_args={"timeout": DEFAULT_TIMEOUT})
+    return yadisk.Client(token=token, default_args={"timeout": DEFAULT_TIMEOUT, "n_retries": DEFAULT_N_RETRIES})
 
 
 # Дерево папок в Настройках: человек ждёт ответа, долгие таймауты и повторы ему не нужны
@@ -645,7 +656,9 @@ def _save_preview(client: yadisk.Client, job: DownloadJob, local_path: str, down
         url = getattr(meta, "preview", None)
         if not url:
             return ""
-        failure = fetch_preview(_thread_preview_http(getattr(client, "token", "")), url, to_long_path(dst))
+        token = getattr(client, "token", "")
+        failure = fetch_preview(_thread_http(), url, to_long_path(dst),
+                                headers={"Authorization": f"OAuth {token}"} if token else None)
     except Exception as e:  # noqa: BLE001 — превью — бонус, скачивание не должно падать из-за него
         log.warning("превью %s: %s", job.remote_path, e)
         return ""
@@ -689,20 +702,6 @@ def _sweep_previews(state: State, download_dir: str) -> None:
         log.warning("уборка превью: %s", e)
 
 
-def _thread_preview_http(token: str) -> requests.Session:
-    """Сессия потока для превью: им, в отличие от ссылок на файлы, нужен токен."""
-    http = getattr(_thread_local, "preview_http", None)
-    if http is None:
-        http = requests.Session()
-        http.headers["User-Agent"] = f"yadisk-backup/{APP_VERSION}"
-        _thread_local.preview_http = http
-        with _all_clients_lock:
-            _all_clients.append(http)
-    if token:
-        http.headers["Authorization"] = f"OAuth {token}"
-    return http
-
-
 def _thread_http() -> requests.Session:
     """HTTP-сессия потока для самих файлов (ссылки подписаны, токен не нужен)."""
     http = getattr(_thread_local, "http", None)
@@ -742,7 +741,7 @@ def _download_with_retry(client: yadisk.Client, remote: str, local: str,
             if failure.kind == "storage_down":
                 DEAD_HOSTS.mark(failure.host)
             raise StorageUnavailable(failure)
-        if failure.is_local:
+        if failure.is_local or failure.is_local_file:
             break
         if attempt + 1 >= tries:
             break
@@ -771,6 +770,7 @@ _FETCH_ERROR_PREFIX = {
     "timeout": "download_timeout",
     "connection": "download_timeout",
     "local_disk": "local_disk",
+    "local_file": "local_file",
     "bad_file": "bad_file",
     "refused": "http_error",
 }
@@ -782,6 +782,9 @@ def _describe_download_error(e: BaseException) -> str:
     api = api_error_details(e)
     if is_local_disk_error(e):
         # Проверяем ПЕРВЫМ: текст OSError содержит путь, а в пути бывает «500» или «notfound»
+        if local_error_kind(e) == "local_file":
+            return (f"local_file | {name}: {e} [ЭТОТ ФАЙЛ НЕ ЗАПИСАТЬ В ПАПКУ: слишком длинное "
+                    f"или недопустимое имя, или файл слишком большой для диска]")
         return f"local_disk | {name}: {e} [ПРОБЛЕМА ЛОКАЛЬНОГО ДИСКА: место, права или отключённый диск]"
     if isinstance(e, FetchError):
         prefix = _FETCH_ERROR_PREFIX.get(e.failure.kind, e.failure.kind)
@@ -820,6 +823,12 @@ def _already_downloaded(job: DownloadJob, local_path: str) -> bool:
     return False
 
 
+# Сбои API, после которых повторы кончились, а Яндекс так и не выдал ссылку: он недоступен
+# или перегружен, файл не виноват — откладываем до следующего раунда, а не пишем «ошибка»
+_API_UNAVAILABLE = (yadisk.exceptions.RequestError, yadisk.exceptions.TooManyRequestsError,
+                    *SERVER_ERRORS, *TIMEOUT_ERRORS, requests.RequestException)
+
+
 def _download_one(
     job: DownloadJob,
     client: yadisk.Client,
@@ -840,10 +849,12 @@ def _download_one(
 
         if _already_downloaded(job, local_path):
             return finish("skipped", local_path)
+        if why := too_big_for_folder(os.path.dirname(local_path), job.size):
+            return finish("failed", error=f"local_file | {why}")
 
-        # Качаем во временный .part и атомарно переименовываем — недокачанный файл
+        # Качаем во временный файл и атомарно переименовываем — недокачанный файл
         # никогда не выглядит как готовый.
-        part_path = to_long_path(local_path + ".part")
+        part_path = to_long_path(part_path_for(local_path))
         remove_quiet(part_path)
         _download_with_retry(client, job.remote_path, part_path, job)
         os.replace(part_path, to_long_path(local_path))
@@ -853,6 +864,11 @@ def _download_one(
         res = finish("deferred", error=str(e.failure), storage_host=e.failure.host)
         res.preview_path = _save_preview(client, job, local_path, download_dir)
         return res
+    except _API_UNAVAILABLE as e:
+        if part_path:
+            remove_quiet(part_path)
+        return finish("deferred", error=f"{DEFERRED_MARKER}Яндекс не выдал ссылку на файл: "
+                                        f"{_describe_download_error(e)}")
     except Exception as e:
         # Любая ошибка (сеть, Яндекс, локальный диск, makedirs) — это failed-результат,
         # а не исключение: один битый файл не должен ронять весь download_all.
@@ -987,7 +1003,7 @@ def download_all(
         done_n = (counters["downloaded"] + counters["skipped"] + counters["failed"]
                   + counters["deferred"])
         total_str = f"/{total_files}" if total_files is not None else ""
-        # «ошибок k» должно идти раньше «отложено» — по этому порядку строку читает Web UI
+        # Строку видит человек в журнале задачи; порядок полей прежний
         print(
             f"Прогресс: {done_n}{total_str} файлов | скачано {counters['downloaded']} "
             f"| пропущено {counters['skipped']} | ошибок {counters['failed']} "
@@ -1067,6 +1083,16 @@ def download_all(
                     submit_next()
                 if counters.get("aborted"):
                     pool.shutdown(wait=True, cancel_futures=True)
+                    # Файлы, которые успели докачаться, пока пул останавливался, — в базу:
+                    # иначе они остались бы pending, а их превью — навсегда в «_превью»
+                    for fut, job in futures.items():
+                        if fut.cancelled():
+                            continue
+                        try:
+                            res = fut.result()
+                        except Exception as e:  # noqa: BLE001 — защитный барьер, как выше
+                            res = DownloadResult(job, "failed", None, 0, _describe_download_error(e), 0)
+                        _apply_result(state, res, counters, file_bar, byte_bar, download_dir)
                     futures.clear()
                     break
                 plain_report()
