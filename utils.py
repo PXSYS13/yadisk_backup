@@ -702,8 +702,11 @@ def sqlite_tx(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 
 
 def compute_md5(local_path: str, chunk: int = 1024 * 1024) -> str:
-    """Считает MD5 локального файла стримом — не грузит файл целиком в память."""
-    h = hashlib.md5()
+    """Считает MD5 локального файла стримом — не грузит файл целиком в память.
+
+    MD5 здесь — контрольная сумма для сверки с Яндексом и поиска дубликатов, не защита.
+    """
+    h = hashlib.md5(usedforsecurity=False)
     path = to_long_path(local_path)
     with open(path, "rb") as f:
         for block in iter(lambda: f.read(chunk), b""):

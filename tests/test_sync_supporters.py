@@ -3,6 +3,7 @@
 import io
 import json
 import urllib.error
+import urllib.request
 
 import pytest
 
@@ -118,6 +119,31 @@ def test_fetch_errors_are_fatal_only_for_a_bad_key():
 
     with pytest.raises(ss.SyncError):
         ss.fetch_donations("t", opener=html, pause=0)
+
+
+def test_key_goes_only_to_donationalerts_over_https():
+    assert ss._check_url(ss.API_URL + "?page=2") and ss._check_url(ss.TOKEN_URL)
+    for url in ("http://www.donationalerts.com/api/v1/alerts/donations",
+                "https://evil.example/api",
+                "https://www.donationalerts.com.evil.example/api",
+                "https://www.donationalerts.com@evil.example/api",
+                "file:///etc/passwd"):
+        with pytest.raises(ss.SyncError) as e:
+            ss._request(url, "секрет")
+        assert e.value.fatal and "секрет" not in str(e.value)
+
+
+def test_redirects_stay_inside_donationalerts():
+    handler = ss._DonationAlertsOnly()
+    req = urllib.request.Request(ss.API_URL, headers={"Authorization": "Bearer t"})
+    # Обычный urllib унёс бы заголовок с ключом на любой адрес
+    for target in ("https://evil.example/steal", "http://www.donationalerts.com/api/v1/alerts/donations"):
+        with pytest.raises(ss.SyncError) as e:
+            handler.redirect_request(req, None, 302, "Found", {}, target)
+        assert e.value.fatal
+    moved = handler.redirect_request(req, None, 301, "Moved", {}, "https://donationalerts.com/api/v1/alerts/donations")
+    assert moved.full_url.startswith("https://donationalerts.com/")
+    assert moved.get_header("Authorization") == "Bearer t"
 
 
 def test_sync_writes_only_on_change(tmp_path, capsys):

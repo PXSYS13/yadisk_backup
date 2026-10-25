@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import html
 import http.server
 import json
 import os
@@ -61,6 +62,8 @@ SCOPE = "oauth-donation-index"
 REDIRECT_PORT = 8765
 REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}/callback"
 TOKEN_ENV = "DONATIONALERTS_TOKEN"
+# Ключ и секрет приложения уходят только сюда — по https и без переходов на чужие адреса
+ALLOWED_HOSTS = frozenset({"www.donationalerts.com", "donationalerts.com"})
 
 ID_PREFIX = "da-"
 ANONYMOUS = "Аноним"
@@ -93,7 +96,8 @@ _MENTION_RE = re.compile(r"(?<![\w.])@\w{2,}")
 
 
 class SyncError(Exception):
-    """Ошибка, после которой список обновлять нельзя. fatal — ключ не подходит (нужен человек)."""
+    """Ошибка, после которой список обновлять нельзя. fatal — нужен человек: ключ не подходит
+    или DonationAlerts уводит на чужой адрес."""
 
     def __init__(self, text: str, fatal: bool = False):
         super().__init__(text)
@@ -339,10 +343,38 @@ def import_widget(html_path: Path, path: Path = SUPPORTERS_FILE, dry_run: bool =
     return changed
 
 
+def _check_url(url: str) -> str:
+    """Адрес DonationAlerts по https — или SyncError: ключ на чужой адрес не отправляем."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or (parts.hostname or "").lower() not in ALLOWED_HOSTS:
+        raise SyncError(f"{url} — не адрес DonationAlerts по https: ключ туда не отправляю", fatal=True)
+    return url
+
+
+class _DonationAlertsOnly(urllib.request.HTTPRedirectHandler):
+    """Переадресация только по https внутри DonationAlerts.
+
+    Обычный urllib переносит на новый адрес все заголовки, Authorization с ключом тоже, —
+    даже на чужой сайт и по http.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _check_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_DonationAlertsOnly)
+
+
+def _urlopen(req: urllib.request.Request):
+    _check_url(req.full_url)
+    return _OPENER.open(req, timeout=TIMEOUT_SEC)
+
+
 def _request(url: str, token: str):
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}", "Accept": "application/json", "User-Agent": USER_AGENT})
-    return urllib.request.urlopen(req, timeout=TIMEOUT_SEC)
+    return _urlopen(req)
 
 
 def fetch_donations(token: str, opener=None, pause: float = PAGE_PAUSE_SEC) -> list[dict]:
@@ -439,7 +471,7 @@ def get_token() -> int:
                 text = "Готово. Вернитесь в окно терминала — ключ уже там."
             else:
                 got["error"] = query.get("error", ["нет кода авторизации"])[0]
-                text = "Не получилось: " + got["error"]
+                text = "Не получилось: " + html.escape(got["error"])
             body = f"<meta charset='utf-8'><p style='font:18px sans-serif;margin:40px'>{text}</p>".encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -469,9 +501,9 @@ def get_token() -> int:
     req = urllib.request.Request(TOKEN_URL, data=form, headers={
         "Content-Type": "application/x-www-form-urlencoded", "User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SEC) as resp:
+        with _urlopen(req) as resp:
             answer = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (SyncError, urllib.error.URLError, OSError, ValueError) as e:
         print(f"DonationAlerts не выдал ключ: {e}")
         return 1
     token = answer.get("access_token") if isinstance(answer, dict) else None

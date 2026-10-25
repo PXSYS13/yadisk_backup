@@ -163,7 +163,8 @@ def fetch_to_file(
                 )
             content_len = int(headers.get("Content-Length", 0) or 0)
             total = expected_size or content_len
-            md5 = hashlib.md5() if is_md5(expected_md5) else None
+            # MD5 — контрольная сумма, которую отдаёт Яндекс: ловит битые файлы, а не подмену
+            md5 = hashlib.md5(usedforsecurity=False) if is_md5(expected_md5) else None
             with open(tmp_path, "wb") as f:
                 for chunk in r.iter_content(1024 * 1024):
                     if not chunk:
