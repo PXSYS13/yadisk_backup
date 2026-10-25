@@ -338,3 +338,63 @@ def test_collect_drops_old_rows_only_after_a_full_list(unlim_db, monkeypatch, ca
     assert not ud.cmd_collect()
     assert ud.db().execute("SELECT COUNT(*) FROM unlim_files").fetchone()[0] == 0
     assert "их скачивает Диск" in capsys.readouterr().out
+
+
+def test_changed_photo_goes_back_to_the_queue(unlim_db):
+    """Фото изменили на Диске (другой MD5): скачанная копия устарела — качаем новую версию."""
+    ud = unlim_db
+    item = _unlim_item("a.jpg", 10)
+    ud.save_listed_files([item])
+    ud.db().execute("UPDATE unlim_files SET status='downloaded'")
+    ud.save_listed_files([item])  # без изменений — остаётся скачанным
+    assert ud.status_counts() == {"downloaded": 1}
+    changed = dict(item, meta=dict(item["meta"], md5="b" * 32, size=12))
+    ud.save_listed_files([changed])
+    row = ud.db().execute("SELECT status, size, md5 FROM unlim_files").fetchone()
+    assert tuple(row) == ("pending", 12, "b" * 32)
+
+
+def test_collect_reports_a_full_disk_not_a_yandex_outage(unlim_db, monkeypatch, capsys):
+    """База не записалась посреди списка (место кончилось): код 4 и «local_disk», а не «Яндекс не отвечает»."""
+    import sqlite3
+
+    ud = unlim_db
+    monkeypatch.setattr(ud, "LIST_PAGE", 2)
+    monkeypatch.setattr(ud, "load_cookies", lambda: {})
+    monkeypatch.setattr(ud, "make_session", lambda cookies: type("S", (), {"close": lambda self: None})())
+    monkeypatch.setattr(ud, "get_sk_uid", lambda s: ("sk", "uid"))
+    root = {"type": "dir", "path": "/photounlim"}
+    pages = {0: [root, _unlim_item("a.jpg", 10), _unlim_item("b.jpg", 20)], 2: [root, _unlim_item("c.jpg", 30)]}
+    monkeypatch.setattr(ud, "api_call", lambda s, sk, uid, method, params=None, retries=3: pages[params["offset"]])
+    real_save = ud.save_listed_files
+
+    def save(items):
+        if any(i["name"] == "c.jpg" for i in items):
+            raise sqlite3.OperationalError("database or disk is full")
+        return real_save(items)
+
+    monkeypatch.setattr(ud, "save_listed_files", save)
+    assert ud.cmd_collect() == ud.EXIT_DISK_FULL
+    out = capsys.readouterr().out
+    assert "local_disk |" in out and "server_50x" not in out and "фотосрез" not in out
+
+
+def test_queue_knows_rows_from_the_old_photoslice_list(tmp_path):
+    """Строки старого списка не из безлимита: сбор списка до скачивания уберёт их, иначе они
+    ушли бы второй копией в _unlim."""
+    import sqlite3
+
+    from webapp.queue_db import unlim_has_rows_outside
+
+    db = tmp_path / "unlim_state.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE unlim_files (file_id TEXT PRIMARY KEY, status TEXT)")
+    con.executemany("INSERT INTO unlim_files VALUES (?, ?)",
+                    [("/photounlim/a.jpg", "pending"), ("photounlim:/b.jpg", "pending"),
+                     ("disk:/Фото/c.jpg", "downloaded")])
+    con.commit()
+    assert not unlim_has_rows_outside(db)
+    con.execute("INSERT INTO unlim_files VALUES ('/disk/Фото/d.jpg', 'pending')")
+    con.commit()
+    con.close()
+    assert unlim_has_rows_outside(db)

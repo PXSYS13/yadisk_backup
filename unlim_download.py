@@ -46,6 +46,7 @@ from utils import (
     EXIT_AUTH,
     EXIT_DISK_FULL,
     EXIT_OUTAGE,
+    TELEGRAM_CHANNEL,
     ensure_utf8_stdio,
     files_text,
     human_bytes,
@@ -140,7 +141,8 @@ def save_listed_files(items: list[dict]) -> int:
     """Добавляет файлы из mpfs/list, возвращает число новых.
 
     Уже известный файл (в том числе собранный фотосрезом как 'photounlim:/имя') не
-    дублируется — ему только записываются размер и MD5 из mpfs, они точнее.
+    дублируется — ему только записываются размер и MD5 из mpfs, они точнее. Скачанный файл,
+    чей MD5 на Диске изменился, возвращается в очередь: бэкап догоняет новую версию.
     """
     added = 0
     with sqlite_tx(db()) as c:
@@ -154,9 +156,12 @@ def save_listed_files(items: list[dict]) -> int:
             mime = meta.get("mimetype") or meta.get("mediatype")
             alt = unlim_twin(path)
             known = c.execute(
-                "UPDATE unlim_files SET size = COALESCE(NULLIF(?, 0), size), md5 = COALESCE(?, md5), "
+                "UPDATE unlim_files SET "
+                "status = CASE WHEN status = 'downloaded' AND ? IS NOT NULL AND md5 IS NOT NULL "
+                "AND md5 <> ? THEN 'pending' ELSE status END, "
+                "size = COALESCE(NULLIF(?, 0), size), md5 = COALESCE(?, md5), "
                 "mime = COALESCE(mime, ?) WHERE file_id IN (?, ?)",
-                (size, md5, mime, path, alt),
+                (md5, md5, size, md5, mime, path, alt),
             ).rowcount
             if known:
                 continue
@@ -237,20 +242,26 @@ def collect_via_list(s, sk, uid) -> int:
             if x.get("path") not in known:
                 known.add(x.get("path"))
                 fresh.append(x)
-        if len(children) >= LIST_PAGE and not fresh:
+        full = len(children) >= LIST_PAGE
+        if full and not fresh:
             raise ListBroken(seen, RuntimeError(
                 f"Яндекс повторяет уже присланные страницы списка (с {offset}-го файла)"))
         files = [x for x in fresh if x.get("type") == "file"]
         dirs += len(fresh) - len(files)
-        added += save_listed_files(files)
+        try:
+            added += save_listed_files(files)
+        except Exception as e:  # база не записалась (место?) — прочитанное раньше уже в ней
+            raise ListBroken(seen, e) from e
         seen += len(files)
         total_bytes += sum(int((x.get("meta") or {}).get("size") or 0) for x in files)
         print(f"  Найдено: {seen} файлов ({human_bytes(total_bytes)}), новых {added}", flush=True)
-        if len(children) < LIST_PAGE:
+        if not full:
             break
         offset += len(children)
     if dirs:
         log.warning("mpfs/list: в %s есть вложенные папки (%d) — их содержимое не собрано", UNLIM_ROOT, dirs)
+        print(f"  ⚠️ В безлимите есть вложенные папки ({dirs}): файлы внутри них программа пока не "
+              f"скачивает. Если они вам нужны, напишите нам: {TELEGRAM_CHANNEL}", flush=True)
     log.info("mpfs/list: %d файлов, %s, новых %d", seen, human_bytes(total_bytes), added)
     return seen
 
@@ -368,6 +379,8 @@ def collect_via_photoslice(s, sk, uid) -> int | None:
                 print("   Обновите cookies.json в Web UI или браузере и запустите сбор заново.")
                 return 2
             except Exception as e:
+                if is_sqlite_disk_error(e):
+                    raise  # база не пишется — следующие пачки не запишутся тоже
                 log.error(f"batch {i}: {e}")
                 time.sleep(2)
             bar.update(len(batch))
@@ -388,15 +401,24 @@ def _session_alive(s) -> bool:
         return True
 
 
+def _db_disk_full(e: BaseException) -> int:
+    """База не записалась: место кончилось или диск отключён — это код 4, а не «Яндекс не отвечает»."""
+    print(f"❌ local_disk | Не получается записать базу unlim_state.db: {e}. "
+          f"Освободите место или проверьте, что диск подключён.")
+    return EXIT_DISK_FULL
+
+
 def cmd_collect():
     try:
-        db_init()
+        return _collect()
     except sqlite3.OperationalError as e:
         if not is_sqlite_disk_error(e):
             raise
-        print(f"❌ local_disk | Не получается записать базу unlim_state.db: {e}. "
-              f"Освободите место или проверьте, что диск подключён.")
-        return EXIT_DISK_FULL
+        return _db_disk_full(e)
+
+
+def _collect():
+    db_init()
     try:
         s = make_session(load_cookies())
     except CookiesFormatError as e:
@@ -429,6 +451,8 @@ def cmd_collect():
         except Exception as e:  # noqa: BLE001 — разбираем ниже
             listed = e.seen if isinstance(e, ListBroken) else 0
             cause = e.cause if isinstance(e, ListBroken) else e
+            if is_sqlite_disk_error(cause):
+                return _db_disk_full(cause)
             if isinstance(cause, AuthExpiredError):
                 # 401/403 на внутренний метод бывает и при живых куках — перепроверяем вход
                 if not _session_alive(s):
@@ -449,6 +473,8 @@ def cmd_collect():
             try:
                 code = collect_via_photoslice(s, sk, uid)
             except Exception as e:  # noqa: BLE001 — запасной путь не должен ронять сбор
+                if is_sqlite_disk_error(e):
+                    return _db_disk_full(e)
                 log.error(f"photoslice: {e}")
                 list_error = list_error or str(e)
                 code = None
