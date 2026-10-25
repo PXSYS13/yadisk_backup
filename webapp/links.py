@@ -89,18 +89,22 @@ def build_links_status(rows: list[dict], meta: dict, task: dict | None, now: flo
         pending, deferred, limited = int(r["pending"] or 0), int(r["deferred"] or 0), int(r["limited"] or 0)
         queue = max(0, pending - deferred - limited)
         limit_until = r["limit_until"] if r["limit_until"] and r["limit_until"] > now else None
+        # error без error_kind — ссылка исправна, но в этом раунде стоит: причина простыми словами
+        # («Яндекс попросил проверку на робота», «Нет связи с Яндексом»)
+        note = None if r["error_kind"] else r["error"]
         if r["error_kind"]:
             state, text = "error", r["error"] or LINK_ERROR_TEXT.get(r["error_kind"], "Ссылка не работает")
         elif r["listed_at"] is None:
-            state, text = ("listing", "Получаю список файлов") if running and not waiting_round else (
-                "paused", "Список файлов ещё не получен")
+            state, text = ("listing", "Получаю список файлов") if running and not waiting_round and not note else (
+                "paused", "Список файлов ещё не получен" + (f". {note}" if note else ""))
         elif limit_until and pending:
             state, text = "limited", f"Яндекс ограничил скачивание по этой ссылке — продолжу в {hhmm(limit_until)}"
-        elif pending and running and queue and not waiting_round:
+        elif pending and running and queue and not waiting_round and not note:
             state, text = "downloading", "Скачиваю"
         elif pending and running:
             state = "waiting"
             text = f"Ждут Яндекса: {files_text(pending)}" + (f", повтор в {hhmm(next_retry)}" if next_retry else "")
+            text += f". {note}" if note else ""
         elif pending:
             state, text = "paused", f"На паузе — осталось {files_text(pending)}"
         elif failed:

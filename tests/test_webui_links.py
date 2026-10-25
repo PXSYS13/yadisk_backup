@@ -209,6 +209,12 @@ def _row(**kw):
     (_row(pending=3, done=7), None, {}, "paused", "На паузе"),
     (_row(done=8, failed=2), None, {}, "done_partial", "не скачались: 2"),
     (_row(done=10), None, {}, "done", "все файлы скачаны"),
+    # error без error_kind — ссылка исправна, но стоит: карточка называет причину
+    (_row(listed_at=None, error="Нет связи с Яндексом"), None, {}, "paused",
+     "Список файлов ещё не получен. Нет связи с Яндексом"),
+    (_row(listed_at=None, error="Нет связи с Яндексом"), {"running": True}, {}, "paused", "Нет связи с Яндексом"),
+    (_row(pending=5, done=5, error="Яндекс попросил проверку на робота"), {"running": True}, {}, "waiting",
+     "Ждут Яндекса: 5 файлов. Яндекс попросил проверку на робота"),
 ])
 def test_link_states_are_told_in_plain_words(row, task, meta, state, words):
     st = webapp.links.build_links_status([row], meta, task, 1000.0, "/dl/_ссылки")
