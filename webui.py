@@ -51,6 +51,11 @@ def _setup_logging() -> None:
         lg = logging.getLogger(name)
         lg.setLevel(logging.INFO)
         lg.addHandler(handler)
+    # Ошибки сервера (HTTP 500) видно и в чёрном окне — как до log_config=None, а не только в webui.log
+    console = logging.StreamHandler()
+    console.setLevel(logging.WARNING)
+    console.setFormatter(fmt)
+    logging.getLogger("uvicorn.error").addHandler(console)
 
 
 def main():
@@ -107,6 +112,8 @@ def main():
     # Открыть браузер в фоне когда сервер готов (YADISK_NO_BROWSER=1 — не открывать: dev/CI)
     if os.getenv("YADISK_NO_BROWSER") != "1":
         threading.Thread(target=ports.open_browser_when_ready, args=(ports.HOST, port), daemon=True).start()
+    # Скачивание шло, когда программу закрыли (окно, перезагрузка, пропал свет), — продолжаем без кнопки
+    threading.Thread(target=control.resume_after_restart, daemon=True).start()
 
     # Порт уже занят нами в choose_port: uvicorn получает готовый сокет, и между
     # проверкой и запуском его никто не перехватит

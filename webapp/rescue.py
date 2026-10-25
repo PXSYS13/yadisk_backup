@@ -145,6 +145,8 @@ class Branch:
         # Список устарел, но по нему ещё есть что качать: сначала качаем, после шага собираем заново
         self.list_after = False
         self.requeued = False  # «Повторить ошибки» во время шага: после него сразу новый раунд
+        # Список в этом запуске уже готов: «checking» дальше — подсчёт перед скачиванием после ожидания
+        self.prepared = False
         self.wake.clear()
 
     @property
@@ -268,9 +270,10 @@ class Rescue:
             b = self.branches[source]
             if b.state == "off":
                 return False, f"{b.label} сейчас не скачивается — проверьте доступ в «Настройках»"
-            if b.state in ("checking", "listing"):
+            if b.state == "listing" or (b.state == "checking" and not b.prepared):
                 return True, "Список и так собирается прямо сейчас"
-            if b.state == "downloading":
+            # «checking» после ожидания: ветка вот-вот качает, список соберём после этого шага
+            if b.state in ("downloading", "checking"):
                 b.relist = True
                 self._event(source, "info", "Обновлю список файлов, как только закончится текущее скачивание")
                 return True, "Обновлю список, как только закончится текущее скачивание"
@@ -434,6 +437,10 @@ class Rescue:
                 text += f" до {hhmm(b.next_retry_at)}"
             parts.append(f"{b.label}: {text}")
         return " · ".join(parts) or "—"
+
+    def note(self, kind: str, text: str) -> None:
+        """Строка в ленту «Что происходит» снаружи спасения — например, о продолжении после перезапуска."""
+        self._event(None, kind, text)
 
     # ── внутреннее ──
 
@@ -635,6 +642,7 @@ class Rescue:
                 for b in self.branches.values():
                     b.state = "off"
                 self.state = "failed"
+                config.set_resume_pending(False)
                 return
             self.partial = bool(src["notes"])
 
@@ -649,6 +657,9 @@ class Rescue:
                 b.thread.start()
             self._join_branches()
             self.state = self._final_state()
+            if self.state in ("done", "failed"):
+                # Всё скачано или нужно действие человека: после перезапуска сама не продолжает
+                config.set_resume_pending(False)
             self._log({
                 "done": "🏁 Готово, но часть источников пропущена (см. выше)" if self.partial else "🏆 ВСЁ ГОТОВО!",
                 "failed": "⚠️ Нужно ваше действие — подробности выше",
@@ -726,6 +737,7 @@ class Rescue:
                         return
                     continue
                 ready = True
+                b.prepared = True
             before = db_stats(*db)
             code = download(b)
             if code == -1:

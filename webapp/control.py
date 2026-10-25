@@ -67,6 +67,7 @@ class SettingsPayload(BaseModel):
     all_folders: bool = False
     gentle: bool | None = None
     previews: bool | None = None
+    resume: bool | None = None
 
 
 @router.get("/api/settings")
@@ -111,6 +112,8 @@ def api_set_settings(p: SettingsPayload):
         updates["GENTLE_MODE"] = "1" if p.gentle else "0"
     if p.previews is not None:
         updates["YADISK_PREVIEWS"] = "1" if p.previews else "0"
+    if p.resume is not None:
+        updates["BACKUP_RESUME_ON_START"] = "1" if p.resume else "0"
     config.ensure_env_file()
     for key, value in updates.items():
         config.env_set_verified(key, value)
@@ -186,7 +189,28 @@ def api_rescue_start():
     ok, msg = rescue.start(workers=workers, batch=batch, do_disk=do_disk, do_unlim=do_unlim,
                            disk_categories=st["categories"], unlim_categories=st["categories"],
                            disk_folders=st["disk_folders"])
+    if ok:
+        config.set_resume_pending(True)
     return {"ok": ok, "msg": msg, "notes": src["notes"] if ok else []}
+
+
+def resume_after_restart() -> bool:
+    """Программу закрыли посреди скачивания (окно, перезагрузка, пропал свет) — продолжаем сами,
+    как просили в сообществе. Только если человек не нажимал «Остановить» и не выключил это
+    в «Настройках». True — скачивание запущено."""
+    if os.environ.get("YADISK_DEMO") == "1" or rescue.is_running():
+        return False
+    if not config.resume_pending() or not config.get_settings()["resume"]:
+        return False
+    res = api_rescue_start()
+    if res.get("ok"):
+        log.info("продолжаю скачивание после перезапуска программы")
+        print("  Скачивание шло, когда программу закрыли, — продолжаю его сам.")
+        rescue.note("run", "Программу закрыли посреди скачивания — продолжаю с того же места")
+        return True
+    log.info("после перезапуска скачивание не продолжил: %s", res.get("msg"))
+    rescue.note("warn", f"Не получилось продолжить скачивание после перезапуска: {res.get('msg')}")
+    return False
 
 
 class RetryFailedPayload(BaseModel):
@@ -247,6 +271,8 @@ def api_rescue_relist(p: RelistPayload):
 
 @router.post("/api/start/stop")
 def api_start_stop():
+    # «Остановить» — воля человека: после перезапуска программа сама не продолжит
+    config.set_resume_pending(False)
     return _resp(rescue.stop())
 
 
@@ -373,6 +399,7 @@ def safe_remove_db_files(base_file: Path) -> tuple[bool, str]:
 @router.post("/api/disk/clear")
 def disk_clear():
     """«Забыть список файлов» Диска: очистка БД + надёжная остановка задач."""
+    config.set_resume_pending(False)
     if rescue.is_running():
         rescue.stop()
     stop_and_wait(tm.stop_matching(SLOT_DISK))
@@ -382,6 +409,7 @@ def disk_clear():
 @router.post("/api/unlim/clear")
 def unlim_clear():
     """«Забыть список файлов» Безлимита: очистка БД + надёжная остановка воркеров."""
+    config.set_resume_pending(False)
     if rescue.is_running():
         rescue.stop()
     stop_and_wait(tm.stop_matching(UNLIM_SLOT_PREFIX))

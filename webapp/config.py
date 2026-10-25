@@ -70,8 +70,30 @@ def get_settings() -> dict:
         "max_disk_folders": MAX_DISK_FOLDERS,
         "gentle": env_flag("GENTLE_MODE", False),
         "previews": previews_enabled(),
+        # Закрыли программу посреди скачивания — при следующем запуске продолжить самой
+        "resume": env_flag("BACKUP_RESUME_ON_START", True),
         "category_labels": dict(CATEGORY_LABELS),
     }
+
+
+# Скачивание шло, когда программу закрыли: стоит с запуска до «Остановить» или «Готово»
+RESUME_PENDING = "BACKUP_RESUME_PENDING"
+
+
+def resume_pending() -> bool:
+    get_config()
+    return env_flag(RESUME_PENDING, False)
+
+
+def set_resume_pending(on: bool) -> None:
+    """Запоминает в .env, продолжать ли скачивание после перезапуска. Ошибка записи не мешает
+    скачиванию: продолжить само не получится, только и всего."""
+    if resume_pending() == on:
+        return
+    try:
+        env_set_verified(RESUME_PENDING, "1" if on else "")
+    except (HTTPException, OSError):
+        pass
 
 
 def owner_only(path) -> None:

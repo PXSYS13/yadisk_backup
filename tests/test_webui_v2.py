@@ -24,7 +24,7 @@ def test_settings_default_to_everything(client):
     st = client.get("/api/settings").json()
     assert st["sources"] == ["disk", "unlim"]
     assert st["categories"] is None
-    assert st["gentle"] is False and st["previews"] is True
+    assert st["gentle"] is False and st["previews"] is True and st["resume"] is True
     assert "photos" in st["category_labels"]
 
 
@@ -63,6 +63,54 @@ def test_rescue_start_uses_saved_settings(client, monkeypatch):
     assert r["ok"] is True
     assert calls["do_disk"] is True and calls["do_unlim"] is False
     assert calls["disk_categories"] == ["photos"] and calls["workers"] == 2
+
+
+def _fake_start(monkeypatch, started):
+    monkeypatch.setattr(webapp.access, "preflight_sources", lambda d, u: {"error": None, "notes": [], "run_disk": d, "run_unlim": u})
+    monkeypatch.setattr(webapp.rescue.rescue, "start", lambda **kw: (started.append(kw), (True, "Спасение запущено"))[1])
+    monkeypatch.setattr(webapp.rescue.rescue, "is_running", lambda: False)
+    monkeypatch.setattr(webapp.rescue.rescue, "stop", lambda: (True, "Остановлено"))
+    webapp.rescue.rescue.events.clear()
+
+
+def test_resume_after_restart_continues_an_unstopped_download(client, monkeypatch):
+    """Программу закрыли посреди скачивания (окно, перезагрузка) — при запуске она продолжает сама."""
+    started = []
+    _fake_start(monkeypatch, started)
+    # Ничего не запускали — продолжать нечего
+    assert webapp.control.resume_after_restart() is False and not started
+    assert client.post("/api/rescue/start").json()["ok"] is True
+    assert webapp.config.resume_pending() is True
+    assert webapp.control.resume_after_restart() is True and len(started) == 2
+    assert any("продолжаю с того же места" in e["text"] for e in webapp.rescue.rescue.events)
+    # «Остановить» — воля человека: после перезапуска программа ждёт команды
+    client.post("/api/start/stop")
+    assert webapp.config.resume_pending() is False
+    assert webapp.control.resume_after_restart() is False and len(started) == 2
+
+
+def test_resume_after_restart_can_be_switched_off(client, monkeypatch):
+    started = []
+    _fake_start(monkeypatch, started)
+    client.post("/api/rescue/start")
+    assert client.post("/api/settings", json={"resume": False}).json()["settings"]["resume"] is False
+    assert webapp.control.resume_after_restart() is False and len(started) == 1
+    client.post("/api/settings", json={"resume": True})
+    assert webapp.control.resume_after_restart() is True and len(started) == 2
+    # В демо-режиме ничего не запускаем
+    monkeypatch.setenv("YADISK_DEMO", "1")
+    assert webapp.control.resume_after_restart() is False
+
+
+def test_resume_after_restart_says_why_it_could_not(client, monkeypatch):
+    started = []
+    _fake_start(monkeypatch, started)
+    webapp.config.set_resume_pending(True)
+    monkeypatch.setattr(webapp.access, "preflight_sources",
+                        lambda d, u: {"error": "Подключите Диск", "notes": [], "run_disk": False, "run_unlim": False})
+    assert webapp.control.resume_after_restart() is False and not started
+    assert any("Не получилось продолжить скачивание после перезапуска: Подключите Диск" in e["text"]
+               for e in webapp.rescue.rescue.events)
 
 
 def _disk_db(path, rows):

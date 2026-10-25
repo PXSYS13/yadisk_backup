@@ -141,7 +141,10 @@ def _add_scrubbed(zf: zipfile.ZipFile, path: Path, name: str) -> None:
     Подписанная ссылка на файл Яндекса — сама по себе доступ к нему; журналы прежних версий
     их ещё содержат, а отчёт люди выкладывают в чат и на GitHub.
     """
-    with open(path, "rb") as src, zf.open(name, "w") as dst:
+    # ZipInfo из файла — со временем изменения журнала: иначе в архиве у всех стоит 1980-01-01
+    entry = zipfile.ZipInfo.from_file(path, name)
+    entry.compress_type = zf.compression
+    with open(path, "rb") as src, zf.open(entry, "w") as dst:
         for line in src:
             dst.write(scrub_urls(line.decode("utf-8", errors="replace")).encode("utf-8"))
 

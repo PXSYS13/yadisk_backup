@@ -9,6 +9,7 @@ import pytest
 import state
 import unlim_common
 import webapp.access
+import webapp.config
 import webapp.listing
 import webapp.paths
 import webapp.queue_db
@@ -63,12 +64,22 @@ def rescue(monkeypatch):
 
 def test_both_branches_run_and_finish(rescue, monkeypatch):
     sc = Script(monkeypatch, rescue, {"disk": [0, 0], "unlim_collect": [0]})
+    webapp.config.set_resume_pending(True)
     rescue._run()
     assert rescue.state == "done"
     assert sc.steps("disk") == [("disk", "scan"), ("disk", "download")]
     assert ("unlim_collect", "--collect") in sc.steps()
     assert any(s.startswith("unlim_w") for s, _ in sc.steps())
     assert {b["state"] for b in rescue.status()["branches"].values()} == {"done"}
+    # Всё скачано: после перезапуска программы продолжать нечего
+    assert webapp.config.resume_pending() is False
+
+
+def test_action_needed_does_not_resume_after_restart(rescue, monkeypatch):
+    Script(monkeypatch, rescue, {"disk": [0, EXIT_AUTH]}, worker_codes=[EXIT_AUTH])
+    webapp.config.set_resume_pending(True)
+    rescue._run()
+    assert rescue.state == "failed" and webapp.config.resume_pending() is False
 
 
 def test_deferred_files_get_another_round_without_relisting(rescue, monkeypatch):

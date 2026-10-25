@@ -44,7 +44,7 @@ def _isolate_project_files(tmp_path, monkeypatch):
     # Пустое значение = «по умолчанию» (всё качать, превью включены, демо выключено)
     for key in ("BACKUP_SOURCES", "BACKUP_CATEGORIES", "BACKUP_DISK_FOLDERS", "GENTLE_MODE",
                 "YADISK_PREVIEWS", "YADISK_DEMO", "YADISK_RETRY_EVERY_SEC", "YA_DISK_TOKEN",
-                "YADISK_WEBUI"):
+                "YADISK_WEBUI", "BACKUP_RESUME_ON_START", "BACKUP_RESUME_PENDING"):
         monkeypatch.setenv(key, "")
     monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path / "downloads"))
     yield

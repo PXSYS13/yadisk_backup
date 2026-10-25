@@ -45,6 +45,29 @@ def test_support_bundle_has_no_signed_links(client, monkeypatch):
         text = "".join(zf.read(n).decode("utf-8") for n in zf.namelist())
     assert "SECRET" not in text and "uid=42" not in text
     assert "downloader.disk.yandex.ru" in text and "disk:/a.jpg" in text
+    # Журналы в архиве — со своим временем изменения, а не 1980-01-01: по нему ищут, когда что было
+    with zipfile.ZipFile(bundle) as zf:
+        assert zf.getinfo("backup.log").date_time[0] >= 2024
+
+
+def test_relist_right_after_a_wait_round_is_kept():
+    """«Обновить список» в ту секунду, когда ветка проснулась после ожидания и считает базу перед
+    скачиванием: просьба не теряется, а исполняется после шага — как во время скачивания."""
+    r = webapp.rescue.Rescue()
+    hold = threading.Event()
+    r._thread = threading.Thread(target=hold.wait, daemon=True)
+    b = r.branches["disk"]
+    b.thread = threading.Thread(target=hold.wait, daemon=True)
+    r._thread.start()
+    b.thread.start()
+    try:
+        b.state, b.prepared = "checking", False  # первый подсчёт: prepare соберёт список сам
+        assert r.relist("disk") == (True, "Список и так собирается прямо сейчас") and not b.relist
+        b.prepared = True  # после ожидания: prepare уже не запустится
+        ok, _ = r.relist("disk")
+        assert ok is True and b.relist is True
+    finally:
+        hold.set()
 
 
 def test_nothing_starts_after_stop():

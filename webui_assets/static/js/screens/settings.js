@@ -212,7 +212,7 @@
 
   function paintExtra(s) {
     const st = s.settings || {};
-    for (const [field, value] of [['gentle', st.gentle], ['previews', st.previews]]) {
+    for (const [field, value] of [['gentle', st.gentle], ['previews', st.previews], ['resume', st.resume]]) {
       const input = byId('set-root').querySelector(`[data-field="opt-${field}"]`);
       if (input && document.activeElement !== input) input.checked = !!value;
     }
@@ -317,6 +317,10 @@
                     <p>Копия до 1280 пикселей ляжет в папку «_превью». Оригинал докачается сам, когда Яндекс его отдаст, —
                     тогда копия удалится.</p></div>
                   <input type="checkbox" data-field="opt-previews" data-action="settings-toggle" data-option="previews" aria-label="Страховочные превью фото"></div>
+                <div class="switch"><div><b>Продолжать скачивание после перезапуска</b>
+                    <p>Если программу закрыли посреди скачивания или компьютер перезагрузился, при следующем запуске
+                    она продолжит сама, без кнопки «Продолжить». После «Остановить» программа ждёт вашей команды.</p></div>
+                  <input type="checkbox" data-field="opt-resume" data-action="settings-toggle" data-option="resume" aria-label="Продолжать скачивание после перезапуска"></div>
               </div></section>
             <section id="set-sec-danger">${head('Если что-то пошло не так', 'Нужно редко. Скачанные файлы в папке не удаляются.')}
               <div class="card"><details><summary>Забыть список файлов</summary><div class="body">
