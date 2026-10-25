@@ -389,8 +389,10 @@
         <p>Программа бесплатная и живёт на поддержке тех, кому она помогла. Имена поддержавших появляются здесь.</p></div>
         <a href="#/support">${icon('heart')}Поддержать</a></aside>`;
     }
+    // Сначала те, кто помог больше всех, потом последние по времени
     const seen = new Set();
-    const first = list.filter((x) => x.name !== 'Аноним' && !seen.has(x.name) && seen.add(x.name)).slice(0, 3);
+    const first = [...(sp.top || []), ...list]
+      .filter((x) => x.name !== 'Аноним' && !seen.has(x.name) && seen.add(x.name)).slice(0, 3);
     const rest = Math.max(0, (sp.people || list.length) - first.length);
     const names = first.length ? first.map((x) => esc(x.name)).join(', ') : '';
     const text = names

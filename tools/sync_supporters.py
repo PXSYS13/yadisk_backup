@@ -83,8 +83,9 @@ HOWTO = (
     "Записи без id можно добавлять руками: name — имя, как человек подписался (без имени — «Аноним»), "
     "amount — сумма числом, currency — RUB/USD/EUR, date — ГГГГ-ММ-ДД, message — короткие слова или null. "
     "Скрыть донат целиком — добавьте его номер в hidden (da-123 → 123), скрыть только сообщение — "
-    "в no_message. Программы людей подхватят список с GitHub в течение получаса после того, как он попадёт "
-    "в main."
+    "в no_message. top_min_rub — с какой суммы в рублях (все донаты человека вместе) имя попадает в «Больше "
+    "всех помогли»; анонимы туда не попадают. Программы людей подхватят список с GitHub в течение получаса "
+    "после того, как он попадёт в main."
 )
 
 # Ссылки и @упоминания вырезаем: список видят все пользователи программы, рекламе там не место
@@ -219,13 +220,19 @@ def merge(current: dict, donations: list[dict], today: str | None = None,
     auto = sorted(fresh.values(), key=_sort_key, reverse=True)
     supporters = auto + manual
     changed = supporters != old
-    return {
+    out = {
         "_как_заполнять": HOWTO,
         "updated": (today or date.today().isoformat()) if changed else current.get("updated"),
+    }
+    # Порог «Больше всех помогли» автор ставит руками — переносим как есть
+    if "top_min_rub" in current:
+        out["top_min_rub"] = current["top_min_rub"]
+    out.update({
         "hidden": sorted(hidden, key=int),
         "no_message": sorted(no_message, key=int),
         "supporters": supporters,
-    }
+    })
+    return out
 
 
 # ── Страница виджета «Последние оповещения», сохранённая из браузера ─────────

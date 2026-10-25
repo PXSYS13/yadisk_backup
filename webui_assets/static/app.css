@@ -463,6 +463,13 @@ button.small .i,.btn.small .i{width:16px;height:16px}
 .supporter-when{font-size:14px;color:var(--text-3)}
 .supporter-sum{font-size:18px;font-weight:600;white-space:nowrap;font-variant-numeric:tabular-nums}
 .supporter blockquote{margin-top:16px;font-size:15px;line-height:1.55;color:var(--text-2);overflow-wrap:anywhere}
+.top-supporters{list-style:none;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.top-supporter{display:flex;align-items:center;gap:12px;padding:16px 20px;border-radius:var(--radius);border:1px solid var(--border);background:var(--surface);box-shadow:var(--shadow);min-width:0}
+.top-supporter .grow{flex:1;min-width:0}
+.top-rank{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;flex:none;font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;background:var(--surface-2);color:var(--text-2)}
+.top-rank .i{width:16px;height:16px}
+.top-rank.r1{background:var(--warn-soft);color:var(--warn)}
+.top-rank.r2,.top-rank.r3{background:var(--accent-soft);color:var(--accent-text)}
 .empty-box{display:flex;flex-direction:column;align-items:center;text-align:center;padding:48px 24px;border:1px dashed var(--border-strong);border-radius:var(--radius)}
 .empty-box .icon-box{width:48px;height:48px;border-radius:50%}
 .empty-box p{margin-top:16px;font-size:17px;font-weight:500}
@@ -707,7 +714,7 @@ details>.body{padding:12px 0 2px 23px;color:var(--text-2)}
   .stat:first-child .s-value{font-size:32px}
   .s-value{font-size:24px}
   .steps li{font-size:12px}
-  .checks.two,.checks.types,.supporters{grid-template-columns:minmax(0,1fr)}
+  .checks.two,.checks.types,.supporters,.top-supporters{grid-template-columns:minmax(0,1fr)}
   .support-hero{padding:24px}
   .support-hero h1{font-size:28px}
   .banner{flex-direction:column;align-items:flex-start}

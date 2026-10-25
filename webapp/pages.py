@@ -44,5 +44,7 @@ def api_supporters(demo: str | None = None):
     Синхронная функция — опрос /api/status не ждёт GitHub; список кешируется.
     """
     data = supporters.demo() if demo and os.environ.get("YADISK_DEMO") == "1" else supporters.get_supporters()
+    top_min = data.get("top_min_rub", supporters.TOP_MIN_RUB)
     return {"ok": True, **data, "people": supporters.count_people(data["supporters"]),
+            "top": supporters.top_supporters(data["supporters"], top_min), "top_min_rub": top_min,
             "donation_url": DONATION_URL}

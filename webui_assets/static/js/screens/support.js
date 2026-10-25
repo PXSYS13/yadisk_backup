@@ -17,7 +17,31 @@
       ${x.message ? `<blockquote>«${esc(x.message)}»</blockquote>` : ''}</li>`;
   }
 
+  // «Больше всех помогли»: все донаты человека вместе, суммы в своих валютах
+  function topCard(x, i) {
+    const sums = (x.sums || []).map((s) => esc(App.money(s.amount, s.currency))).join(' + ');
+    const when = x.donations > 1
+      ? `${fmt.num(x.donations)} ${fmt.plural(x.donations, 'донат', 'доната', 'донатов')}, первый — ${esc(App.dayAgo(x.since))}`
+      : esc(App.dayAgo(x.since));
+    return `<li class="top-supporter"><span class="top-rank r${i + 1}">${i ? i + 1 : App.icon('award')}</span>
+      ${App.avatar(x.name, i)}<div class="grow"><div class="supporter-name" title="${esc(x.name)}">${esc(x.name)}</div>
+        <div class="supporter-when">${when}</div></div><div class="supporter-sum">${sums}</div></li>`;
+  }
+
+  function paintTop() {
+    const wrap = byId('support-top-wrap');
+    if (!wrap) return;
+    const sp = App.supporters;
+    const top = (sp && sp.top) || [];
+    wrap.classList.toggle('hidden', !top.length);
+    if (!top.length) return;
+    App.text(byId('support-top-note'),
+      `Все донаты одного человека складываются. Здесь те, кто поддержал проект на ${App.money(sp.top_min_rub || 500, 'RUB')} и больше`);
+    App.html(byId('support-top'), top.map(topCard).join(''));
+  }
+
   function paintList() {
+    paintTop();
     const sp = App.supporters;
     const box = byId('support-list');
     if (!box) return;
@@ -56,6 +80,11 @@
             <a class="btn big" id="support-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">${I('send')}Канал в Telegram</a>
             <a class="btn big" href="https://github.com/PXSYS13/yadisk_backup" target="_blank" rel="noopener">${I('code')}Проект на GitHub</a>
           </div>
+        </section>
+        <section class="hidden" id="support-top-wrap" aria-labelledby="support-top-title">
+          <div class="supporters-head"><div><h2 id="support-top-title">Больше всех помогли</h2>
+            <p id="support-top-note"></p></div></div>
+          <ol class="top-supporters" id="support-top"></ol>
         </section>
         <section aria-labelledby="support-title">
           <div class="supporters-head"><div><h2 id="support-title">Нас поддерживают</h2>

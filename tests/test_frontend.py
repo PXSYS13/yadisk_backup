@@ -234,6 +234,17 @@ def test_thanks_strip_names_and_money():
     assert out["initials"] == ["АП", "С"]
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_thanks_strip_puts_top_supporters_first():
+    sp = {"people": 4, "top": [{"name": "Мария К.", "sums": [{"amount": 1000, "currency": "RUB"}], "donations": 1}],
+          "supporters": [{"name": "Анна П.", "amount": 100, "currency": "RUB"}, {"name": "Сергей", "amount": 50, "currency": "RUB"},
+                         {"name": "Мария К.", "amount": 1000, "currency": "RUB"}, {"name": "Олег", "amount": 10, "currency": "RUB"}]}
+    res = subprocess.run(["node", "-e", _THANKS_HARNESS], input=json.dumps(sp), capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    assert "Мария К., Анна П., Сергей и ещё 1" in json.loads(res.stdout)["strip"]
+
+
 # «Помогло? Поддержите»: когда карточка появляется и когда молчит — в node, без браузера
 _DONATE_HARNESS = _THANKS_HARNESS.split("App.supporters = JSON.parse")[0] + r"""
 const r = (state, files, extra) => Object.assign({ state, summary: { downloaded_files: files, downloaded_bytes: files * 1e6 } }, extra || {});

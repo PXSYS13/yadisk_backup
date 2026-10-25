@@ -55,6 +55,48 @@ def test_repository_file_is_valid():
     data = supporters.normalize(raw)
     assert len(data["supporters"]) == len(raw["supporters"]), "в supporters.json есть записи, которые программа отбросит"
     assert data["updated"]
+    if "top_min_rub" in raw:
+        assert data.get("top_min_rub") == raw["top_min_rub"], "top_min_rub — целое число рублей"
+
+
+def test_top_adds_up_one_person_and_skips_anonymous():
+    items = supporters.normalize({"supporters": [
+        {"name": "Rufus", "amount": 300, "currency": "RUB", "date": "2026-10-21"},
+        {"name": "rufus", "amount": 3, "currency": "EUR", "date": "2026-10-20"},
+        {"name": "Аноним", "amount": 3000, "currency": "RUB", "date": "2026-10-25"},
+        {"name": "Анна", "amount": 400, "currency": "RUB", "date": "2026-10-19"},
+        {"name": "Анна", "amount": 200, "currency": "RUB", "date": "2026-10-22"},
+        {"name": "Сергей", "amount": 450, "currency": "RUB", "date": "2026-10-18"},
+        {"name": "Без суммы", "date": "2026-10-18"},
+    ]})["supporters"]
+    top = supporters.top_supporters(items, min_rub=500)
+    # Анна 600 ₽; Rufus 300 ₽ + 3 € ≈ 600 ₽, но поддержал позже; Сергей до порога не дотянул
+    assert [x["name"] for x in top] == ["Анна", "Rufus"]
+    anna, rufus = top
+    assert anna["donations"] == 2 and anna["since"] == "2026-10-19" and anna["sums"] == [{"amount": 600, "currency": "RUB"}]
+    # Имя — как в последнем донате, суммы — в своих валютах, крупная первой
+    assert rufus["sums"] == [{"amount": 300, "currency": "RUB"}, {"amount": 3, "currency": "EUR"}]
+    assert supporters.top_supporters(items, min_rub=0, limit=1) == [anna]
+    assert supporters.top_supporters([], min_rub=500) == []
+
+
+def test_top_equal_sums_same_day_keep_who_was_first():
+    # Дата без времени: из двух донатов одного дня раньше тот, что ниже в списке (новые сверху)
+    items = supporters.normalize({"supporters": [
+        {"name": "Batl", "amount": 1000, "currency": "RUB", "date": "2026-10-14"},
+        {"name": "GhostVento", "amount": 1000, "currency": "RUB", "date": "2026-10-14"},
+        {"name": "Mike", "amount": 1000, "currency": "RUB", "date": "2026-10-24"},
+    ]})["supporters"]
+    assert [x["name"] for x in supporters.top_supporters(items)] == ["GhostVento", "Batl", "Mike"]
+
+
+def test_top_threshold_comes_from_the_file():
+    raw = {"top_min_rub": 1000, "supporters": [{"name": "Анна", "amount": 500, "currency": "RUB"}]}
+    data = supporters.normalize(raw)
+    assert data["top_min_rub"] == 1000
+    assert supporters.top_supporters(data["supporters"], data["top_min_rub"]) == []
+    for bad in ("500", -1, True, 1.5):
+        assert "top_min_rub" not in supporters.normalize({"top_min_rub": bad, "supporters": []})
 
 
 def test_github_first_then_cache_then_local(monkeypatch, tmp_path):
@@ -125,12 +167,14 @@ def test_endpoint_and_demo(monkeypatch):
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     res = client.get("/api/supporters").json()
     assert res["ok"] is True and res["supporters"] == [] and res["people"] == 0
+    assert res["top"] == [] and res["top_min_rub"] == supporters.TOP_MIN_RUB
     assert res["donation_url"] == utils.DONATION_URL
     # Демо-список — только с YADISK_DEMO=1
     assert client.get("/api/supporters?demo=1").json()["supporters"] == []
     monkeypatch.setenv("YADISK_DEMO", "1")
     demo = client.get("/api/supporters?demo=1").json()
     assert demo["source"] == "demo" and demo["people"] == len(demo["supporters"]) == 12
+    assert [x["name"] for x in demo["top"]][:3] == ["Алексей Н.", "Мария К.", "Елена В."]
 
 
 def test_remote_answer_must_be_a_supporters_list(monkeypatch):

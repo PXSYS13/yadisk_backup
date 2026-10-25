@@ -70,6 +70,14 @@ def test_merge_keeps_updated_when_nothing_changed():
     first = ss.merge({}, [donation(1)], today="2026-10-15")
     again = ss.merge(json.loads(ss.dump(first)), [donation(1)], today="2026-10-20")
     assert again == first and again["updated"] == "2026-10-15"
+    assert "top_min_rub" not in first
+
+
+def test_merge_keeps_the_top_threshold_set_by_hand():
+    new = ss.merge({"top_min_rub": 1000, "supporters": []}, [donation(1)], today="2026-10-15")
+    assert new["top_min_rub"] == 1000
+    assert list(new)[:3] == ["_как_заполнять", "updated", "top_min_rub"]
+    assert supporters.normalize(new)["top_min_rub"] == 1000
 
 
 class FakeResp(io.BytesIO):

@@ -36,6 +36,12 @@ MAX_ITEMS = 500
 MAX_NAME = 40
 MAX_MESSAGE = 160
 ANONYMOUS = "Аноним"
+# «Больше всех помогли»: все донаты человека вместе от этой суммы (supporters.json → top_min_rub)
+TOP_MIN_RUB = 500
+TOP_LIMIT = 10
+# Только чтобы расставить людей по местам: суммы в разных валютах сравниваются в рублях по
+# округлённому курсу. На экране каждая сумма остаётся в своей валюте
+RUB_RATE = {"RUB": 1, "USD": 90, "EUR": 100, "KZT": 0.18, "UAH": 2.2, "BYN": 28}
 
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _CURRENCY_RE = re.compile(r"[A-Z]{3}")
@@ -77,6 +83,7 @@ def _clean_amount(value) -> int | float | None:
 def normalize(raw) -> dict:
     """Проверенный список {"updated", "supporters"}: мусор отброшен, новые сверху.
 
+    Порог «Больше всех помогли» (top_min_rub) попадает в ответ, только если он задан числом.
     Файл правит человек руками, поэтому ошибка в одной записи не должна прятать остальные.
     """
     items = raw.get("supporters") if isinstance(raw, dict) else None
@@ -95,8 +102,12 @@ def normalize(raw) -> dict:
     # Сортировка устойчивая: записи одного дня остаются в порядке файла. Обрезаем после неё:
     # донаты в файле идут первыми, и при 500+ донатах обрезка до сортировки теряла записи вручную
     out.sort(key=lambda x: x["date"] or "", reverse=True)
-    return {"updated": _clean_date(raw.get("updated")) if isinstance(raw, dict) else None,
-            "supporters": out[:MAX_ITEMS]}
+    result = {"updated": _clean_date(raw.get("updated")) if isinstance(raw, dict) else None,
+              "supporters": out[:MAX_ITEMS]}
+    top_min = raw.get("top_min_rub") if isinstance(raw, dict) else None
+    if isinstance(top_min, int) and not isinstance(top_min, bool) and 0 <= top_min < 10 ** 9:
+        result["top_min_rub"] = top_min
+    return result
 
 
 def count_people(items: list[dict]) -> int:
@@ -109,6 +120,39 @@ def count_people(items: list[dict]) -> int:
         else:
             names.add(item["name"].casefold())
     return len(names) + anonymous
+
+
+def top_supporters(items: list[dict], min_rub: int | None = None, limit: int = TOP_LIMIT) -> list[dict]:
+    """«Больше всех помогли»: люди, которые поддержали проект в сумме от min_rub рублей.
+
+    Донаты под одним именем складываются, как в count_people. «Аноним» каждый раз другой
+    человек и просил имя не показывать, поэтому в топ не попадает. Места — по сумме в рублях,
+    при равной сумме выше тот, кто поддержал раньше. sums — суммы в своих валютах, крупная первой.
+    """
+    min_rub = TOP_MIN_RUB if min_rub is None else min_rub
+    people: dict[str, dict] = {}
+    for i, item in enumerate(items):
+        if item["name"] == ANONYMOUS or item["amount"] is None:
+            continue
+        # Список отсортирован от новых к старым: имя остаётся таким, как человек подписался в последний раз
+        p = people.setdefault(item["name"].casefold(),
+                              {"name": item["name"], "sums": {}, "donations": 0, "since": None, "rub": 0.0})
+        p["sums"][item["currency"]] = p["sums"].get(item["currency"], 0) + item["amount"]
+        p["donations"] += 1
+        p["rub"] += item["amount"] * RUB_RATE.get(item["currency"], 0)
+        # Дата без времени: внутри дня раньше тот, кто ниже в списке
+        p["oldest"] = i
+        if item["date"] and (p["since"] is None or item["date"] < p["since"]):
+            p["since"] = item["date"]
+    ranked = sorted((p for p in people.values() if p["rub"] > 0 and p["rub"] >= min_rub),
+                    key=lambda p: (-p["rub"], p["since"] or "9999-12-31", -p["oldest"]))
+    return [{
+        "name": p["name"],
+        "donations": p["donations"],
+        "since": p["since"],
+        "sums": [{"amount": _clean_amount(amount), "currency": currency} for currency, amount
+                 in sorted(p["sums"].items(), key=lambda kv: -kv[1] * RUB_RATE.get(kv[0], 0))],
+    } for p in ranked[:limit]]
 
 
 def load_local(path: Path | None = None) -> dict | None:
