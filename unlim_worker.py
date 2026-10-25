@@ -135,6 +135,9 @@ OUTAGE_GIVE_UP_SEC = 3600
 # 429 от Яндекса: пауза растёт 45 → 90 → 180 … до 10 минут и действует на ВСЕ воркеры
 RATE_LIMIT_BASE_PAUSE_SEC = 45
 RATE_LIMIT_MAX_PAUSE_SEC = 600
+# Дольше общая пауза не бывает (пауза отказа или 429). Запись в базе с более поздним концом
+# испорчена: её оставили прежние версии, верившие любому Retry-After
+MAX_SHARED_COOLDOWN_SEC = max(OUTAGE_PAUSES_SEC[-1], RATE_LIMIT_MAX_PAUSE_SEC)
 # Сервер хранения, не ответивший за STORAGE_READ_TIMEOUT_SEC, считается недоступным
 # столько секунд (для всех воркеров); потом его файлы пробуются снова.
 # Живые серверы отвечают меньше чем за секунду, молчащие — не отвечают никогда
@@ -452,6 +455,25 @@ def reset_failed() -> int:
     return reset_failed_files(DB_FILE)
 
 
+def last_downloaded_file(exclude: str = "") -> str | None:
+    """Последний скачанный файл (кроме exclude): он только что был на Диске.
+
+    По нему проверяется ответ «такого файла нет» — см. Worker._confirm_gone.
+    """
+    c = connect_unlim_db(DB_FILE)
+    try:
+        order = "downloaded_at DESC, rowid DESC" if "downloaded_at" in _columns(c) else "rowid DESC"
+        row = c.execute(
+            f"SELECT file_id FROM unlim_files WHERE status='downloaded' AND file_id<>? ORDER BY {order} LIMIT 1",
+            (exclude,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        c.close()
+    return str(row[0]) if row else None
+
+
 # ── Общая пауза по лимиту запросов (429) ────────────────────────────────────
 # Воркеры — отдельные процессы. Если пауза только у того, кто получил 429,
 # остальные продолжают долбить Яндекс и тоже получают 429. Поэтому момент
@@ -462,24 +484,45 @@ def _ensure_meta(c) -> None:
     c.execute("CREATE TABLE IF NOT EXISTS unlim_meta (key TEXT PRIMARY KEY, value TEXT)")
 
 
+def _cooldown_until(value) -> float | None:
+    """Конец общей паузы из unlim_meta (epoch) или None, если запись испорчена.
+
+    Испорчена — не число, «inf»/«nan» или конец дальше MAX_SHARED_COOLDOWN_SEC от «сейчас»
+    (минута запаса — если часы компьютера перевели назад). Такую запись оставляли версии до 2.8,
+    верившие любому Retry-After: «через сутки» держало бы воркеры без дела сутки, а «inf» вдобавок
+    никогда не уступил бы новой паузе — общая пауза по 429 для этой базы перестала бы работать.
+    """
+    try:
+        until = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(until) or until - time.time() > MAX_SHARED_COOLDOWN_SEC + 60:
+        return None
+    return until
+
+
 def set_shared_cooldown(seconds: float) -> float:
-    """Продлевает общую паузу минимум на seconds. Возвращает момент её окончания (epoch)."""
-    until = time.time() + seconds
+    """Продлевает общую паузу минимум на seconds. Возвращает момент её окончания (epoch).
+
+    Испорченную запись (см. _cooldown_until) не продлевает, а перезаписывает.
+    """
+    until = time.time() + min(seconds, MAX_SHARED_COOLDOWN_SEC)
     with _tx() as c:
         _ensure_meta(c)
         row = c.execute("SELECT value FROM unlim_meta WHERE key='cooldown_until'").fetchone()
-        current = float(row[0]) if row else 0.0
-        if until > current:
-            c.execute(
-                "INSERT INTO unlim_meta (key, value) VALUES ('cooldown_until', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (repr(until),),
-            )
-        return max(until, current)
+        current = _cooldown_until(row[0]) if row else None
+        if current is not None and current >= until:
+            return current
+        c.execute(
+            "INSERT INTO unlim_meta (key, value) VALUES ('cooldown_until', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (repr(until),),
+        )
+        return until
 
 
 def shared_cooldown_remaining() -> float:
-    """Сколько секунд ещё действует общая пауза (0 — паузы нет)."""
+    """Сколько секунд ещё действует общая пауза (0 — паузы нет). Испорченную запись стирает."""
     c = connect_unlim_db(DB_FILE)
     try:
         row = c.execute("SELECT value FROM unlim_meta WHERE key='cooldown_until'").fetchone()
@@ -487,10 +530,16 @@ def shared_cooldown_remaining() -> float:
         return 0.0
     finally:
         c.close()
-    until = float(row[0]) if row else 0.0
-    if not math.isfinite(until):  # испорченная запись (прежние версии верили любому Retry-After)
+    if not row:
         return 0.0
-    return min(max(0.0, until - time.time()), float(OUTAGE_PAUSES_SEC[-1]))
+    until = _cooldown_until(row[0])
+    if until is None:
+        # Стираем ровно прочитанное: свежую паузу, которую тем временем назначил другой воркер,
+        # не трогаем
+        with _tx() as c:
+            c.execute("DELETE FROM unlim_meta WHERE key='cooldown_until' AND value IS ?", (row[0],))
+        return 0.0
+    return max(0.0, until - time.time())
 
 
 # ── Недоступные серверы хранения ────────────────────────────────────────────
@@ -652,6 +701,8 @@ def get_file_url(s, sk, uid, path: str) -> tuple[str | None, PrepareError | None
     в веб-версии. Массовое скачивание Яндекс отключил, одиночное — нет.
 
     Возвращает (ссылка, None) или (None, ошибка). Ссылка живёт недолго — качать сразу.
+    Ошибка gone («такого файла нет») — только слова Яндекса: воркер верит им, лишь когда
+    ссылки на другие файлы Яндекс в это же время выдаёт (Worker._confirm_gone).
     """
     body = {"sk": sk,
             "connection_id": make_cid(uid),
@@ -674,8 +725,9 @@ def get_file_url(s, sk, uid, path: str) -> tuple[str | None, PrepareError | None
 
     trace = response_trace(r)
     if r.status_code == 404:
-        # Файл удалили или перенесли после сбора списка — это не отказ Яндекса
-        err = PrepareError("gone", f"HTTP 404: файла больше нет на Диске — его удалили или перенесли{trace}", 404)
+        # Файл удалили или перенесли после сбора списка — или Яндекс отвечает 404 на всё подряд
+        err = PrepareError("gone", f"HTTP 404: Яндекс отвечает, что такого файла нет (удалён или "
+                                   f"перенесён после сбора списка){trace}", 404)
         log.warning(f"url {err}")
         return None, err
     # На частые запросы Яндекс отвечает капчей — это лимит, а не протухшие куки
@@ -1206,6 +1258,9 @@ class Worker:
         self._rate_limit_streak = 0
         self._cooldown_said_at = 0.0
         self._last_success_at = time.monotonic()
+        # На какой файл последний запрос ссылки (mpfs/url) вернул ссылку; None — последний запрос
+        # не удался. Пока Яндекс выдаёт ссылки, его «файла нет» про другой файл — правда (_confirm_gone)
+        self._last_link: str | None = None
         self._disk_full_streak = 0
         self._deferred_streak = 0  # пачки подряд, целиком отложенные (direct)
         self.previews = 0  # сохранено страховочных превью за запуск
@@ -1393,6 +1448,10 @@ class Worker:
 
         for attempt in range(2):
             url, err = get_file_url(self.session, self.sk, self.uid, fid)
+            if err is not None and err.kind == "gone":
+                err = self._confirm_gone(fid, err)
+            else:
+                self._last_link = fid if err is None else None
             if err is not None:
                 _release_to_pending(rest, self.id)
                 self._on_prepare_failed([item], err, f"batch {self.batch_idx}: ⚠️ Яндекс не выдал ссылку на файл {name}")
@@ -1437,6 +1496,32 @@ class Worker:
         mark_done([fid], {fid: path})
         self._on_file_done(fid, size)
         return "done"
+
+    def _confirm_gone(self, fid: str, err: PrepareError) -> PrepareError:
+        """Яндекс ответил «такого файла нет». Файл правда удалён — или так отвечается всё подряд?
+
+        Удалённым файл считается, только если ссылки на другие файлы Яндекс сейчас выдаёт: на
+        прошлый запрос или на последний скачанный файл (он только что был на Диске). Иначе 404 на
+        всё подряд (переехал адрес, заглушка на время работ) за три прохода сожгла бы попытки
+        всей очереди. Без подтверждения это отказ Яндекса: попытка не сжигается, серия сбоев
+        растёт, паузы — как у отказов. Если сама проверка упёрлась в 429 или 50x, причина — она.
+        """
+        proven = self._last_link not in (None, fid)
+        self._last_link = None
+        known = None if proven else last_downloaded_file(exclude=fid)
+        if known:
+            _url, check = get_file_url(self.session, self.sk, self.uid, known)
+            if check is None:
+                proven, self._last_link = True, known
+            elif check.is_server_issue:
+                return check
+        if proven:
+            return err
+        why = ("ссылку на уже скачанный файл он тоже не выдал" if known
+               else "проверить не на чем: ни один файл ещё не скачан")
+        log.warning("w%d: «файла нет» про %s не подтвердилось: %s", self.id, fid, why)
+        return PrepareError("refused", f"Яндекс отвечает, что файла нет, но {why} — похоже на сбой Яндекса, "
+                                       f"а не на удалённый файл. Ответ: {err.text}", err.status)
 
     def _save_preview(self, item: dict, name: str) -> None:
         """Страховочное превью отложенного фото (до 1280 px) в <папка>/_превью/_unlim/.
@@ -1590,8 +1675,9 @@ class Worker:
         """Пачка не дала ни одного файла. Решает, кто виноват, и что делать дальше."""
         ids = [it["file_id"] for it in batch]
         if kind == "gone" and len(batch) == 1:
-            # Файла больше нет на Диске: это не отказ Яндекса и не повод для общей паузы.
-            # Иначе несколько удалённых файлов в конце очереди держали бы её «в отказе» часами
+            # Файла больше нет на Диске (_confirm_gone проверил, что ссылки на другие файлы Яндекс
+            # выдаёт): это не отказ Яндекса и не повод для общей паузы. Иначе несколько удалённых
+            # файлов в конце очереди держали бы её «в отказе» часами
             self._burn_attempt(batch[0], reason)
             return
         self._fail_streak += 1

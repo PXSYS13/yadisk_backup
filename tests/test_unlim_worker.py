@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+import time
 import zipfile
 
 import pytest
@@ -1289,11 +1290,13 @@ def test_too_big_for_fat32_is_not_downloaded(db, quiet_worker, dirs, monkeypatch
 
 
 def test_files_deleted_from_disk_do_not_look_like_an_outage(db, quiet_worker, dirs):
-    """404 на ссылку — файла больше нет. Пять таких подряд — не «Яндекс отказывает»: попытки
-    сгорают, и через MAX_ATTEMPTS файлы в ошибках, а не держат очередь часами."""
+    """404 на ссылку, а на уже скачанный файл ссылку Яндекс выдаёт — файла правда больше нет.
+    Пять таких подряд — не «Яндекс отказывает»: попытки сгорают, и через MAX_ATTEMPTS файлы
+    в ошибках, а не держат очередь часами."""
     con = sqlite3.connect(db)
     con.executemany("INSERT INTO unlim_files (file_id, name, size) VALUES (?, ?, 5)",
                     [(str(i), f"gone{i}.jpg") for i in range(3, 10)])
+    con.execute("INSERT INTO unlim_files (file_id, name, size, status) VALUES ('0', 'old.jpg', 5, 'downloaded')")
     con.commit()
     con.close()
     w = quiet_worker
@@ -1305,6 +1308,47 @@ def test_files_deleted_from_disk_do_not_look_like_an_outage(db, quiet_worker, di
         w._process(batch)
     assert {status_of(db, str(i)) for i in range(1, 10)} == {("failed", uw.MAX_ATTEMPTS)}
     assert w._fail_streak == 0
+
+
+def test_404_on_every_file_is_an_outage_not_deleted_files(db, quiet_worker, dirs, sleeps, capsys):
+    """Яндекс отвечает 404 на всё подряд (переехал адрес, заглушка на время работ) — и про уже
+    скачанный файл тоже. Это отказ Яндекса: попытки не сгорают, паузы растут. Раньше вся очередь
+    уходила в ошибки за три прохода, без единой паузы."""
+    con = sqlite3.connect(db)
+    con.executemany("INSERT INTO unlim_files (file_id, name, size) VALUES (?, ?, 5)",
+                    [(str(i), f"f{i}.jpg") for i in range(3, 10)])
+    con.execute("INSERT INTO unlim_files (file_id, name, size, status) VALUES ('0', 'old.jpg', 5, 'downloaded')")
+    con.commit()
+    con.close()
+    w = quiet_worker
+    w.session = _DirectSession({}, broken={str(i): 404 for i in range(10)})
+    for _ in range(9 * uw.MAX_ATTEMPTS):
+        w._process(uw.take_batch(1, size=1))
+    assert {status_of(db, str(i)) for i in range(1, 10)} == {("pending", 0)}
+    assert w._fail_streak >= uw.OUTAGE_STREAK_THRESHOLD
+    assert uw.OUTAGE_PAUSES_SEC[0] in sleeps and max(sleeps) > uw.OUTAGE_PAUSES_SEC[0]
+    assert "bulk_unavailable | " in capsys.readouterr().out
+
+
+def test_404_means_deleted_only_while_yandex_gives_other_links(db, quiet_worker):
+    w = quiet_worker
+    gone = uw.PrepareError("gone", "HTTP 404", 404)
+    w.session = _DirectSession({})
+    # Ни одного скачанного файла — проверить не на чем: это отказ, а не удалённый файл
+    assert w._confirm_gone("1", gone).kind == "refused"
+    # Прошлый запрос выдал ссылку на другой файл — Яндекс работает, верим без лишнего запроса
+    w._last_link = "2"
+    assert w._confirm_gone("1", gone) is gone and w.session.asked == []
+    # Ссылка была на этот же файл (повтор после обрыва) — не довод: проверяем по скачанному
+    uw.mark_done(["2"])
+    w._last_link = "1"
+    assert w._confirm_gone("1", gone) is gone and w.session.asked == ["2"]
+    # Про скачанный файл Яндекс тоже говорит «нет» — отказ; упёрлись в 429 — это и есть причина
+    w._last_link = None
+    w.session = _DirectSession({}, broken={"2": 404})
+    assert w._confirm_gone("1", gone).kind == "refused"
+    w.session = _DirectSession({}, broken={"2": 429})
+    assert w._confirm_gone("1", gone).kind == "rate_limit"
 
 
 def test_same_name_and_size_but_other_photo_is_downloaded(db, quiet_worker, dirs):
@@ -1346,11 +1390,44 @@ def test_retry_after_is_capped(header, want):
     assert uw._retry_after_sec(resp) == want
 
 
-def test_broken_shared_cooldown_does_not_stall_forever(db):
+def _store_cooldown(db_path, value):
     uw.ensure_attempts_column()
-    con = sqlite3.connect(db)
+    con = sqlite3.connect(db_path)
     con.execute("CREATE TABLE IF NOT EXISTS unlim_meta (key TEXT PRIMARY KEY, value TEXT)")
-    con.execute("INSERT INTO unlim_meta VALUES ('cooldown_until', 'inf')")
+    con.execute("INSERT OR REPLACE INTO unlim_meta VALUES ('cooldown_until', ?)", (value,))
     con.commit()
     con.close()
+
+
+def _stored_cooldown(db_path):
+    con = sqlite3.connect(db_path)
+    try:
+        row = con.execute("SELECT value FROM unlim_meta WHERE key='cooldown_until'").fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
+
+
+def test_broken_shared_cooldown_does_not_stall_forever(db):
+    _store_cooldown(db, "inf")
     assert uw.shared_cooldown_remaining() == 0.0
+
+
+def test_day_long_cooldown_from_an_old_version_is_cleared(db):
+    """2.7 верили «Retry-After: 86400»: такая запись держала воркеры без дела сутки — показывала
+    «жду 900 с» снова и снова. Пауз дольше MAX_SHARED_COOLDOWN_SEC не бывает: запись стирается."""
+    _store_cooldown(db, repr(time.time() + 86400))
+    assert uw.shared_cooldown_remaining() == 0.0
+    assert _stored_cooldown(db) is None
+    # Настоящая пауза остаётся как есть
+    uw.set_shared_cooldown(uw.MAX_SHARED_COOLDOWN_SEC)
+    assert uw.MAX_SHARED_COOLDOWN_SEC - 5 < uw.shared_cooldown_remaining() <= uw.MAX_SHARED_COOLDOWN_SEC
+
+
+@pytest.mark.parametrize("stored", ["inf", "nan", "garbage", None, "day"])
+def test_broken_cooldown_gives_way_to_a_new_pause(db, stored):
+    """«inf» никогда не уступал новой паузе (until > inf не бывает): общая пауза по 429 для этой
+    базы не работала. Мусор и NULL роняли воркер на float()."""
+    _store_cooldown(db, repr(time.time() + 86400) if stored == "day" else stored)
+    uw.set_shared_cooldown(uw.RATE_LIMIT_BASE_PAUSE_SEC)
+    assert uw.RATE_LIMIT_BASE_PAUSE_SEC - 5 < uw.shared_cooldown_remaining() <= uw.RATE_LIMIT_BASE_PAUSE_SEC
