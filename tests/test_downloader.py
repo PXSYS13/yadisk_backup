@@ -586,6 +586,9 @@ def test_download_all_lazy_bounded_queue(tmp_path, monkeypatch):
         def get_pending_stats(self):
             return {"count": 20, "bytes": 200}
 
+        def part_named_paths(self):
+            return set(), set()
+
         def get_pending(self):
             nonlocal yielded_count
             for i in range(20):

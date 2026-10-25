@@ -251,6 +251,36 @@ def test_part_named_sibling_is_not_overwritten(tmp_path, net):
     assert sorted(p.name for p in (tmp_path / "v").iterdir()) == ["видео.mp4", "видео.mp4.part"]
 
 
+def test_parts_left_by_old_versions_are_removed_but_not_disk_files(tmp_path, net, monkeypatch):
+    """2.7.4 и раньше качали в «<файл>.part» рядом с файлом: Стоп или сбой оставлял его навсегда, бывает
+    и по нескольку ГБ. Его убирает следующее скачивание того же файла. Не трогаются: «….part», который
+    сам лежит на Диске (даже снятый выбором типов), путь, записанный в базе за другим файлом, и файл
+    больше самого файла Диска — это не его недокачанная копия."""
+    from state import CATEGORY_SKIP_MARKER
+
+    dl = tmp_path / "dl"
+    rows = [("disk:/v/a.mp4", 5), ("disk:/v/b.mp4", 5), ("disk:/v/b.mp4.part", 3),
+            ("disk:/v/c.mp4", 5), ("disk:/v/d.mp4", 5), ("disk:/v/other.bin", 3)]
+    st = _state_with(tmp_path, rows)
+    conn = st._conn()
+    conn.execute("UPDATE files SET status='skipped', error=? WHERE remote_path='disk:/v/b.mp4.part'",
+                 (CATEGORY_SKIP_MARKER,))
+    conn.execute("UPDATE files SET status='downloaded', local_path=? WHERE remote_path='disk:/v/other.bin'",
+                 (str(dl / "v" / "c.mp4.part"),))
+    (dl / "v").mkdir(parents=True)
+    leftovers = {"a.mp4.part": b"ph", "b.mp4.part": b"own", "c.mp4.part": b"oth", "d.mp4.part": b"x" * 50}
+    for name, data in leftovers.items():
+        (dl / "v" / name).write_bytes(data)
+    monkeypatch.setattr(downloader, "_get_thread_client", lambda token: _Client({r: ALIVE for r, _ in rows}))
+
+    counters = downloader.download_all("t", st, str(dl), workers=1)
+    assert counters["downloaded"] == 4 and counters["failed"] == 0
+    assert not (dl / "v" / "a.mp4.part").exists()
+    for name in ("b.mp4.part", "c.mp4.part", "d.mp4.part"):
+        assert (dl / "v" / name).read_bytes() == leftovers[name]
+    st.close()
+
+
 def test_file_too_big_for_the_folder_fails_alone_without_download(tmp_path, net, monkeypatch):
     import utils
 

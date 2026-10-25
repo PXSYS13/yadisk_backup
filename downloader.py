@@ -46,6 +46,7 @@ from utils import (
     local_error_kind,
     name_with_tag,
     part_path_for,
+    path_key,
     preview_path_for,
     previews_enabled,
     TELEGRAM_CHANNEL,
@@ -616,6 +617,7 @@ class DownloadJob:
     preview_path: str | None = None   # уже сохранённое страховочное превью
     modified: float | None = None     # когда файл менялся на Диске — это время получит копия
     downloaded_at: str | None = None  # когда файл скачивали раньше: значит, на его месте — наша копия
+    legacy_part: str | None = None    # «<файл>.part» версий до 2.8: путь не занят файлом Диска, можно убрать
 
 
 @dataclass
@@ -869,6 +871,27 @@ def _is_leftover(existing: str, fresh: str) -> bool:
         return False
 
 
+def _drop_legacy_part(job: DownloadJob) -> None:
+    """Убирает «<файл>.part», брошенный версией до 2.8 при остановке или сбое. Никогда не бросает.
+
+    Такие файлы бывают по нескольку гигабайт, а новая версия качает во временный файл с другим
+    именем и их не трогала. Что путь не занят файлом Диска, решено по базе (_jobs_from_state).
+    Файл больше самого файла Диска — не его недокачанная копия: его не трогаем.
+    """
+    if not job.legacy_part:
+        return
+    path = to_long_path(job.legacy_part)
+    try:
+        if os.path.islink(path) or not os.path.isfile(path):
+            return
+        if job.size is not None and os.path.getsize(path) > job.size:
+            return
+        os.remove(path)
+        log.info("Убран временный файл прежней версии: %s", job.legacy_part)
+    except OSError as e:
+        log.warning("не удалён временный файл прежней версии %s: %s", job.legacy_part, e)
+
+
 def _already_downloaded(job: DownloadJob, local_path: str) -> bool:
     """Resume: локальный файл того же размера (и MD5, если API его отдал) — качать не надо."""
     existing_size = file_size_safe(local_path)
@@ -913,6 +936,7 @@ def _download_one(
         local_path = job.local_path or resolve_local_path(download_dir, job.remote_path)
         local_path = avoid_case_collision(local_path)
         _ensure_local_dirs(local_path)
+        _drop_legacy_part(job)
 
         if _already_downloaded(job, local_path):
             return finish("skipped", local_path)
@@ -989,19 +1013,38 @@ def _close_all_clients() -> None:
             pass
 
 
+def _legacy_part(remote_path: str, local_path: str | None,
+                 taken: tuple[set[str], set[str]]) -> str | None:
+    """«<файл>.part», куда качали версии до 2.8, — если его путь не занят файлом Диска.
+
+    На Диске бывает и свой «видео.mp4.part» (недокачанная загрузка браузера): его копию,
+    скачанную или ещё нет, не трогаем. taken — State.part_named_paths().
+    """
+    if not local_path:
+        return None
+    part = local_path + ".part"
+    taken_local, taken_remote = taken
+    if path_key(part) in taken_local or (remote_path + ".part").lower() in taken_remote:
+        return None
+    return part
+
+
 def _jobs_from_state(state: State) -> Iterator[DownloadJob]:
+    taken = state.part_named_paths()
     for row in state.get_pending():
         keys = row.keys()
+        local_path = row["local_path"] if "local_path" in keys else None
         yield DownloadJob(
             remote_path=row["remote_path"],
             size=row["size"],
             md5=row["md5"],
-            local_path=row["local_path"] if "local_path" in keys else None,
+            local_path=local_path,
             error=row["error"] if "error" in keys else None,
             storage_host=row["storage_host"] if "storage_host" in keys else None,
             preview_path=row["preview_path"] if "preview_path" in keys else None,
             modified=row["modified"] if "modified" in keys else None,
             downloaded_at=row["downloaded_at"] if "downloaded_at" in keys else None,
+            legacy_part=_legacy_part(row["remote_path"], local_path, taken),
         )
 
 

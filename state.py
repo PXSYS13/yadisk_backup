@@ -403,6 +403,23 @@ class State:
                 updates,
             )
 
+    def part_named_paths(self) -> tuple[set[str], set[str]]:
+        """Пути «….part», занятые файлами Диска: (ключи path_key их local_path, remote_path
+        в нижнем регистре).
+
+        Версии до 2.8 качали во временный «<файл>.part» рядом с файлом. Брошенный при остановке,
+        он удаляется, только если такого пути нет у файла Диска — ни в папке, ни на Диске.
+        """
+        local: set[str] = set()
+        remote: set[str] = set()
+        for r in self._conn().execute(
+            "SELECT remote_path, local_path FROM files "
+            "WHERE remote_path LIKE '%.part' OR local_path LIKE '%.part'"
+        ):
+            if r["local_path"]:
+                local.add(path_key(r["local_path"]))
+            remote.add(r["remote_path"].lower())
+        return local, remote
 
     def get_failed(self) -> Iterable[sqlite3.Row]:
         return self._conn().execute(
