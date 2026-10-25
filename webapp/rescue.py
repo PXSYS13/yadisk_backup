@@ -41,7 +41,14 @@ from utils import (
 )
 from webapp import access, config, paths
 from webapp.folders import FOLDERS_SUMMARY_SEC, disk_folders_summary
-from webapp.listing import disk_listing_plan, listing_stale, read_listing, write_listing
+from webapp.listing import (
+    disk_listing_plan,
+    listing_stale,
+    note_outside_list_failed,
+    outside_list_failed_recently,
+    read_listing,
+    write_listing,
+)
 from webapp.local_disk import LOW_FREE_BYTES, free_space
 from webapp.queue_db import (
     db_has_pending,
@@ -347,6 +354,12 @@ class Rescue:
                 else "Сначала качаю по уже собранному списку файлов, потом обновлю его")
         self._log(f"📋 {b.label}: {text}")
         self._event(b.name, "info", text)
+
+    def _note_outside_try(self, at: float | None) -> None:
+        try:
+            note_outside_list_failed(at)
+        except sqlite3.Error as e:
+            self._log(f"⚠️ Не получилось записать в базу Безлимита: {e}")
 
     def _forget_listing(self, source: str) -> None:
         try:
@@ -1108,8 +1121,7 @@ class Rescue:
         if not listing_stale(rec, time.time()):
             self._log(f"📋 Безлимит: список фото и видео собран {when_text(rec['at'])} — заново не собираю")
             self._event("unlim", "info", f"Список фото и видео собран {when_text(rec['at'])} — заново не собираю")
-        elif (not explicit and db_has_pending(paths.UNLIM_DB_FILE, "unlim_files")
-              and not unlim_has_rows_outside(paths.UNLIM_DB_FILE)):
+        elif not explicit and db_has_pending(paths.UNLIM_DB_FILE, "unlim_files") and not self._unlim_must_list_first():
             self._list_after(b, rec)
         else:
             code = self._unlim_list(b)
@@ -1118,6 +1130,14 @@ class Rescue:
         self._apply_category_choice(paths.UNLIM_DB_FILE, "unlim_files", "file_id", self.unlim_categories,
                                     "Безлимит")
         return 0
+
+    @staticmethod
+    def _unlim_must_list_first() -> bool:
+        """Строки старых версий вне Безлимита (фото обычного Диска) убирает только полный сбор списка,
+        а без него их скачали бы второй раз в «_unlim» — поэтому сначала список. Но если такой сбор
+        недавно не дошёл до конца, часами ждать его снова на каждом запуске не стоит: качаем по
+        старому списку, а собираем его после шага, как в 2.7.4."""
+        return unlim_has_rows_outside(paths.UNLIM_DB_FILE) and not outside_list_failed_recently(time.time())
 
     def _unlim_list_late(self, b: Branch) -> int:
         """Сбор списка, отложенный до конца первого шага скачивания (Branch.list_after)."""
@@ -1140,9 +1160,12 @@ class Rescue:
         if code == 0:
             self._remember_listing("unlim", {"at": time.time(), "whole": True, "folders": []})
             self._take_relist("unlim")  # «Обновить список», нажатое во время этого сбора, исполнено
+            self._note_outside_try(None)
             total = int(db_stats(paths.UNLIM_DB_FILE, "unlim_files", "file_id").get("total") or 0)
             self._event("unlim", "ok", f"Список получен: {files_text(total)}")
         elif db_has_rows(paths.UNLIM_DB_FILE, "unlim_files"):
+            if unlim_has_rows_outside(paths.UNLIM_DB_FILE):
+                self._note_outside_try(time.time())
             self._log(f"⚠️ Безлимит: список не обновился (код {code}) — качаю по уже собранному")
             self._event("unlim", "warn", "Список не обновился — качаю по уже собранному")
         else:

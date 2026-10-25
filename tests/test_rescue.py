@@ -158,6 +158,32 @@ class DiskSteps(Script):
         return 0
 
 
+def test_rows_outside_unlim_list_first_but_not_again_after_a_broken_listing(rescue, monkeypatch):
+    """Строки старых версий вне /photounlim убирает только полный сбор списка, поэтому он идёт до
+    скачивания. Но если Яндекс не дал собрать список до конца, следующий запуск не ждёт его часами
+    снова: качает по старому списку и собирает его после шага — как 2.7.4."""
+    rescue.skip_disk = True
+    _unlim_rows("a.jpg")
+    con = sqlite3.connect(webapp.paths.UNLIM_DB_FILE)
+    con.execute("INSERT INTO unlim_files (file_id, name, size) VALUES ('disk:/Фото/b.jpg', 'b.jpg', 1)")
+    con.commit()
+    con.close()
+    sc = Script(monkeypatch, rescue, {"unlim_collect": [EXIT_OUTAGE]}, worker_codes=[0])
+    rescue._run()
+    first = [s for s, _ in sc.steps() if s == "unlim_collect" or s.startswith("unlim_w")]
+    assert first[0] == "unlim_collect"  # сбор списка — первым
+    assert webapp.listing.outside_list_failed_recently(time.time())
+    again = webapp.rescue.Rescue()
+    again.retry_every, again.workers, again.skip_disk = 0.05, 1, True
+    sc2 = Script(monkeypatch, again, {"unlim_collect": [EXIT_OUTAGE]}, worker_codes=[0])
+    again._run()
+    second = [s for s, _ in sc2.steps() if s == "unlim_collect" or s.startswith("unlim_w")]
+    assert second[0].startswith("unlim_w") and "unlim_collect" in second  # сначала качаем, список — после
+    # Полный сбор списка забывает неудачу
+    webapp.listing.note_outside_list_failed(None)
+    assert not webapp.listing.outside_list_failed_recently(time.time())
+
+
 def test_an_old_list_is_downloaded_first_and_refreshed_after(rescue, monkeypatch):
     """Список старше 6 часов, а по нему есть что качать: качаем сразу, список обновляем после шага.
     Раньше большой Диск часами перечислялся заново, и всё это время скачивание стояло."""

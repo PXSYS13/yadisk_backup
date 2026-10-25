@@ -20,6 +20,9 @@ LISTING_KEY = "listing"
 # Список файлов моложе этого срока при новом старте не пересобираем — даже после перезапуска
 # программы: запись о сборе лежит в самой базе (см. read_listing)
 RESCUE_RELIST_SEC = 6 * 3600
+# Сбор списка Безлимита, начатый до скачивания из-за строк старых версий вне /photounlim, не дошёл
+# до конца: следующие запуски RESCUE_RELIST_SEC не ждут его снова (см. Rescue._unlim_must_list_first)
+OUTSIDE_TRY_KEY = "outside_list_failed_at"
 
 
 def _listing_db(source: str) -> tuple[Path, str]:
@@ -38,20 +41,51 @@ def parse_listing(value: str | None) -> dict | None:
             "folders": [f for f in folders if isinstance(f, str)] if isinstance(folders, list) else []}
 
 
-def read_listing(source: str) -> dict | None:
-    """Последний удачный сбор списка источника или None, если списка нет."""
+def _read_meta(source: str, key: str) -> str | None:
     db, table = _listing_db(source)
     if not db.exists():
         return None
     try:
         c = sqlite3.connect(sqlite_ro_uri(db), uri=True, timeout=30)
         try:
-            row = c.execute(f"SELECT value FROM {table} WHERE key = ?", (LISTING_KEY,)).fetchone()
+            row = c.execute(f"SELECT value FROM {table} WHERE key = ?", (key,)).fetchone()
         finally:
             c.close()
     except sqlite3.Error:  # старая база без служебной таблицы
         return None
-    return parse_listing(row[0]) if row else None
+    return row[0] if row else None
+
+
+def read_listing(source: str) -> dict | None:
+    """Последний удачный сбор списка источника или None, если списка нет."""
+    value = _read_meta(source, LISTING_KEY)
+    return parse_listing(value) if value is not None else None
+
+
+def outside_list_failed_recently(now: float) -> bool:
+    """Сбор списка Безлимита ради строк вне /photounlim недавно не дошёл до конца."""
+    try:
+        at = float(_read_meta("unlim", OUTSIDE_TRY_KEY) or 0)
+    except ValueError:
+        return False
+    return 0 <= now - at < RESCUE_RELIST_SEC
+
+
+def note_outside_list_failed(at: float | None) -> None:
+    """Запоминает (или забывает — None) неудачный сбор списка Безлимита ради строк вне /photounlim."""
+    if not paths.UNLIM_DB_FILE.exists():
+        return
+    c = connect_unlim_db(str(paths.UNLIM_DB_FILE))
+    try:
+        c.executescript(UNLIM_SCHEMA)
+        with sqlite_tx(c):
+            if at is None:
+                c.execute("DELETE FROM unlim_meta WHERE key = ?", (OUTSIDE_TRY_KEY,))
+            else:
+                c.execute("INSERT INTO unlim_meta (key, value) VALUES (?, ?) "
+                          "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (OUTSIDE_TRY_KEY, str(at)))
+    finally:
+        c.close()
 
 
 def write_listing(source: str, rec: dict | None) -> None:
