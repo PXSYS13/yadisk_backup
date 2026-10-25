@@ -47,3 +47,10 @@ def _isolate_project_files(tmp_path, monkeypatch):
                 "YADISK_WEBUI"):
         monkeypatch.setenv(key, "")
     monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path / "downloads"))
+    yield
+    # unlim_download держит соединение с базой на поток: закрываем то, что открыл тест
+    ud = sys.modules.get("unlim_download")
+    conn = getattr(getattr(ud, "_tls", None), "c", None)
+    if conn is not None:
+        conn.close()
+        ud._tls.c = None

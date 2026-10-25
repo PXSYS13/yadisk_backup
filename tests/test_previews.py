@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+from pathlib import Path
 
 import pytest
 import requests
@@ -128,7 +129,7 @@ def test_disk_deferred_photo_gets_a_preview(tmp_path, disk_net):
     res = downloader._download_one(downloader.DownloadJob("disk:/Фото/a.HEIC", 5, None), cli, str(tmp_path))
     assert res.status == "deferred"
     assert res.preview_path.endswith(os.path.join(PREVIEW_DIRNAME, "Фото", "a.HEIC.jpg"))
-    assert open(res.preview_path, "rb").read() == JPEG
+    assert Path(res.preview_path).read_bytes() == JPEG
 
     st = State(str(tmp_path / "state.db"))
     st.mark_pending_batch([("disk:/Фото/a.HEIC", 5, None)])
@@ -342,14 +343,14 @@ def test_disk_preview_goes_away_when_the_original_arrives(tmp_path, disk_net, mo
     st = _disk_state(tmp_path)
     assert downloader.download_all("y0_test", st, dl, workers=1)["deferred"] == 1
     preview = os.path.join(dl, PREVIEW_DIRNAME, "Фото", "2024", "a.HEIC.jpg")
-    assert open(preview, "rb").read() == JPEG
+    assert Path(preview).read_bytes() == JPEG
     assert _disk_row(st) == ("pending", preview)
 
     # Сервер хранения ожил: оригинал скачан, превью рядом больше не лежит
     downloader.DEAD_HOSTS.clear()
     cli.host = LIVE
     assert downloader.download_all("y0_test", st, dl, workers=1)["downloaded"] == 1
-    assert open(os.path.join(dl, "Фото", "2024", "a.HEIC"), "rb").read() == ORIGINAL
+    assert Path(os.path.join(dl, "Фото", "2024", "a.HEIC")).read_bytes() == ORIGINAL
     assert not os.path.exists(preview)
     assert not os.path.exists(os.path.join(dl, PREVIEW_DIRNAME, "Фото"))  # опустевшие подпапки убраны
     assert os.path.isdir(os.path.join(dl, PREVIEW_DIRNAME))
@@ -367,7 +368,7 @@ def test_disk_preview_goes_away_when_the_original_is_already_in_the_folder(tmp_p
     preview = _put(preview_path_for(dl, original))
     st.mark_deferred("disk:/Фото/2024/a.HEIC", DEAD, "сервер молчит", preview_path=preview)
     assert downloader.download_all("y0_test", st, dl, workers=1)["skipped"] == 1
-    assert not os.path.exists(preview) and open(original, "rb").read() == ORIGINAL
+    assert not os.path.exists(preview) and Path(original).read_bytes() == ORIGINAL
     assert _disk_row(st) == ("skipped", None)
     st.close()
 
