@@ -116,8 +116,13 @@ SERVER_ERROR_WAIT_SEC = 5.0
 # качает storage_fetch. Ответ API дольше минуты — уже сбой: ждать по 5 минут и повторять
 # его 4 раза внутри yadisk, да ещё 7 раз через tenacity, значило висеть часами
 DEFAULT_TIMEOUT = (15.0, 60.0)
-# Свои повторы yadisk: один — чтобы сбой на середине большого списка не начинал его заново
+# Свои повторы yadisk для одиночных запросов (ссылка на файл, сведения о файле): один. Файл,
+# которому Яндекс так и не выдал ссылку, ждёт следующего раунда, а не висит здесь
 DEFAULT_N_RETRIES = 1
+# Для списков — три, как до 2.8: listdir листает папку страницами по 500, и страница, которой
+# не хватило повторов, начинает всю папку заново. С одним повтором при ~20% сбоев большая
+# папка почти никогда не дочитывалась и выпадала из списка, а сбор кончался кодом 3
+LIST_N_RETRIES = 3
 
 
 def make_client(token: str) -> yadisk.Client:
@@ -388,8 +393,8 @@ def _walk(
 @_retry
 def _list_dir(client: yadisk.Client, path: str) -> list:
     """listdir с retry. Возвращает list ResourceObject."""
-    # max_items=None → yadisk сам пагинирует
-    return list(client.listdir(path, max_items=None))
+    # max_items=None → yadisk сам пагинирует; сбой страницы он повторяет сам, не с начала папки
+    return list(client.listdir(path, max_items=None, n_retries=LIST_N_RETRIES))
 
 
 # ── общие папки и дерево папок для Настроек ─────────────────────────────────
@@ -400,7 +405,7 @@ _FOLDER_FIELDS = ["name", "path", "type", "share"]
 @_retry
 def _list_root_with_share(client: yadisk.Client) -> list:
     """Корень Диска с признаком общего доступа (share есть только у общих папок)."""
-    return list(client.listdir("disk:/", max_items=None, fields=_FOLDER_FIELDS))
+    return list(client.listdir("disk:/", max_items=None, fields=_FOLDER_FIELDS, n_retries=LIST_N_RETRIES))
 
 
 def _share_flags(entry) -> tuple[bool, bool | None]:
@@ -498,7 +503,7 @@ def _get_files_page(
     max_items обязателен: без него yadisk сам пагинирует до конца диска и
     возвращает ВЕСЬ хвост от offset — при ручной пагинации это O(N²) запросов.
     """
-    kwargs = {"offset": offset, "limit": limit, "max_items": limit}
+    kwargs = {"offset": offset, "limit": limit, "max_items": limit, "n_retries": LIST_N_RETRIES}
     if media_type:
         kwargs["media_type"] = media_type
     return list(client.get_files(**kwargs))

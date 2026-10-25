@@ -1,9 +1,13 @@
 """Тесты политики повторов: что ретраим, что нет и сколько ждём."""
 
+import json
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
+import requests
+import requests.adapters
 import yadisk
 
 from downloader import (
@@ -83,6 +87,80 @@ def test_local_disk_errors_are_not_retried():
     assert _is_retryable(OSError(errno.ENOSPC, "No space left on device")) is False
     assert _is_retryable(PermissionError(errno.EACCES, "denied")) is False
     assert _is_retryable(OSError("generic io without errno")) is True
+
+
+class _FlakyFolderApi(requests.adapters.BaseAdapter):
+    """REST API Диска для настоящего yadisk.Client: папка из total файлов, страница с offset=500
+    первые fails раз отвечает 503 (Яндекс сбоит)."""
+
+    def __init__(self, total=1200, fails=3):
+        super().__init__()
+        self.total = total
+        self.fails = fails
+        self.offsets = []
+
+    def send(self, request, **kwargs):
+        query = parse_qs(urlsplit(request.url).query)
+        offset, limit = int(query.get("offset", ["0"])[0]), int(query.get("limit", ["20"])[0])
+        self.offsets.append(offset)
+        resp = requests.Response()
+        resp.request, resp.url = request, request.url
+        resp.headers["Content-Type"] = "application/json"
+        if offset == 500 and self.fails > 0:
+            self.fails -= 1
+            resp.status_code = 503
+            body = {"error": "DiskUnavailableError", "message": "x", "description": "x"}
+        else:
+            items = [{"type": "file", "name": f"{i}.jpg", "path": f"disk:/Фото/{i}.jpg", "size": 1}
+                     for i in range(offset, min(offset + limit, self.total))]
+            resp.status_code = 200
+            body = {"type": "dir", "name": "Фото", "path": "disk:/Фото",
+                    "_embedded": {"items": items, "offset": offset, "limit": limit,
+                                  "total": self.total, "path": "disk:/Фото"}}
+        resp._content = json.dumps(body).encode()
+        return resp
+
+    def close(self):
+        pass
+
+
+def test_big_folder_survives_a_flaky_page_without_starting_over(monkeypatch):
+    """Вторая страница большой папки трижды подряд отвечает 503. Её повторяет сам yadisk, папка
+    не перечитывается с начала. С одним повтором на запрос при ~20% сбоев большая папка почти
+    никогда не дочитывалась, выпадала из списка, и сбор кончался кодом 3 каждый раунд."""
+    import downloader
+
+    monkeypatch.setattr(downloader.time, "sleep", lambda s: None)
+    api = _FlakyFolderApi()
+    client = downloader.make_client("y0_test")
+    try:
+        client.session.requests_session.mount("https://", api)
+        entries = downloader._list_dir(client, "disk:/Фото")
+    finally:
+        client.close()
+    assert len(entries) == 1200
+    assert api.offsets.count(0) == 1  # первую страницу не перечитывали
+
+
+def test_listing_calls_retry_more_than_single_file_calls():
+    import downloader
+
+    seen = {}
+
+    class Client:
+        def get_files(self, **kw):
+            seen["get_files"] = kw.get("n_retries")
+            return iter([])
+
+        def listdir(self, path, **kw):
+            seen[path] = kw.get("n_retries")
+            return iter([])
+
+    downloader._get_files_page(Client(), None, 0, 200)
+    downloader._list_root_with_share(Client())
+    downloader._list_dir(Client(), "disk:/A")
+    assert set(seen.values()) == {downloader.LIST_N_RETRIES}
+    assert downloader.LIST_N_RETRIES >= 3 > downloader.DEFAULT_N_RETRIES
 
 
 def test_account_info_maps_api_fields():
