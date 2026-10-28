@@ -179,6 +179,33 @@ def test_main_verify_prints_summary_last_and_remembers_problems(tmp_path, monkey
             ("disk:/b.jpg", "missing")]
 
 
+def test_deleted_from_old_folder_comes_back_into_new_one(tmp_path, monkeypatch, capsys):
+    # Вопрос из канала: сменил диск из-за нехватки места, скачанное на старый диск удалил.
+    # Проверка находит пропавшие файлы по записанному пути, а очередь кладёт их в новую папку.
+    monkeypatch.setattr(main, "DB_FILE", tmp_path / "state.db")
+    monkeypatch.setenv("YADISK_WEBUI", "1")
+    old, new = tmp_path / "old_disk", tmp_path / "new_disk"
+    old.mkdir()
+    new.mkdir()
+    with State(str(main.DB_FILE)) as st:
+        for name, data in (("Фото/a.jpg", b"a" * 10), ("b.jpg", b"b" * 20)):
+            st.mark_pending(f"disk:/{name}", len(data), _md5(data))
+        st.assign_local_paths(str(old))
+        st.mark_downloaded("disk:/Фото/a.jpg", str(old / "Фото" / "a.jpg"))
+        st.assign_local_paths(str(new))
+        (new / "b.jpg").write_bytes(b"b" * 20)
+        st.mark_downloaded("disk:/b.jpg", str(new / "b.jpg"))
+    assert main.cmd_verify({}, None) == 1
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1].split(" | ", 1)[1])
+    assert (summary["missing"], summary["all_missing"]) == (1, False)  # кнопка «Скачать недостающие» видна
+    with State(str(main.DB_FILE)) as st:
+        assert st.requeue_verify_problems(("missing",), str(new)) == (1, 0, 0)
+        st.assign_local_paths(str(new))
+        row = st._conn().execute("SELECT status, local_path FROM files WHERE remote_path='disk:/Фото/a.jpg'").fetchone()
+    assert row["status"] == "pending"
+    assert row["local_path"] == str(new / "Фото" / "a.jpg")
+
+
 def test_main_verify_without_downloads_says_so(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(main, "DB_FILE", tmp_path / "state.db")
     assert main.cmd_verify({}, None) == 0
