@@ -121,7 +121,7 @@ global.document = Object.assign(el(), { documentElement: el(), body: el(), creat
   querySelectorAll: () => [], querySelector: () => null, getElementById: (id) => (nodes[id] = nodes[id] || el()) });
 global.localStorage = { getItem: () => null, setItem() {} };
 global.matchMedia = () => ({ matches: false, addEventListener() {} });
-for (const f of ['core.js', 'components.js', 'screens/home.js']) require(path.join(process.env.JS_DIR, f));
+for (const f of ['core.js', 'components.js', 'flag.js', 'screens/home.js']) require(path.join(process.env.JS_DIR, f));
 window.App.screens.home.update(JSON.parse(require('fs').readFileSync(0, 'utf8')));
 process.stdout.write(JSON.stringify({ stats: nodes['home-stats'].innerHTML, where: nodes['home-where'].innerHTML,
   space: nodes['home-space'].innerHTML, sources: nodes['home-sources'].innerHTML, actions: nodes['home-actions'].innerHTML }));
@@ -334,6 +334,214 @@ def _demo_statuses(monkeypatch) -> dict:
     monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     return {state: client.get(f"/api/status?demo={state}").json() for state in webapp.demo.DEMO_STATES}
+
+
+# Флажок «От автора»: когда он появляется, когда карточка сворачивается и когда раскрывается
+# снова — в node, хранилище, часы и клики подменены
+_FLAG_HARNESS = r"""
+const path = require('path');
+global.window = globalThis;
+global.addEventListener = () => {};
+global.location = { search: '', hash: '', pathname: '/' };
+global.setTimeout = (fn) => { fn(); return 0; };
+const nodes = {};
+const clicks = [];
+const el = () => ({ innerHTML: '', textContent: '', className: '', dataset: {}, style: {}, addEventListener() {},
+  setAttribute() {}, querySelector: () => null, classList: { add() {}, remove() {}, toggle() {} } });
+global.document = Object.assign(el(), { documentElement: el(), body: el(), createElement: el,
+  querySelectorAll: () => [], querySelector: () => null, getElementById: (id) => (nodes[id] = nodes[id] || el()),
+  addEventListener: (type, fn) => { if (type === 'click') clicks.push(fn); } });
+const store = {};
+let broken = false;
+global.localStorage = {
+  getItem: (k) => { if (broken) throw new Error('нет доступа'); return k in store ? store[k] : null; },
+  setItem: (k, v) => { if (broken) throw new Error('нет доступа'); store[k] = String(v); },
+};
+global.matchMedia = () => ({ matches: false, addEventListener() {} });
+for (const f of ['core.js', 'components.js', 'flag.js', 'screens/home.js', 'screens/support.js']) {
+  require(path.join(process.env.JS_DIR, f));
+}
+const App = window.App;
+const st = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const DAY = 86400;
+const base = st.done.rescue.finished_at;
+let now = base * 1000;
+Date.now = () => now;
+const at = (days) => { now = (base + days * DAY) * 1000; };
+// Новое удачное скачивание, закончившееся через days дней после первого
+const done = (days) => Object.assign({}, st.done,
+  { rescue: Object.assign({}, st.done.rescue, { finished_at: base + days * DAY }) });
+const home = (s, visit) => {
+  App.state.status = s;
+  if (visit) App.screens.home.show();
+  App.screens.home.update(s);
+  return { pennant: nodes['home-flag'].innerHTML, card: nodes['home-flag-card'].innerHTML,
+    donate: nodes['home-donate'].innerHTML };
+};
+// Клик по ссылке карточки: браузер сам откроет её, обработчики только видят событие
+const clickLink = () => clicks.forEach((fn) => fn({ target: { closest: (sel) => (sel.includes('a[data-ask]') ? {} : null) } }));
+const out = { quiet: {} };
+for (const k of ['downloading', 'waiting', 'stopped', 'disk_full', 'token', 'done_partial']) {
+  const h = home(st[k], true);
+  out.quiet[k] = h.pennant + h.card;
+}
+out.partial_donate = home(st.done_partial).donate;
+App.state.offline = true;
+const off = home(st.done);
+out.quiet.offline = off.pennant + off.card;
+App.state.offline = false;
+out.store_quiet = store['ydb.flag'] || null;
+
+out.first = home(st.done);
+out.first_store = JSON.parse(store['ydb.flag']);
+out.evil = home(Object.assign({}, st.done, { telegram_url: 'https://t.me/x"><img src=x onerror=alert(1)>' })).card;
+home(st.done);
+App.actions['flag-later']();
+out.later = home(st.done);
+App.actions['flag-toggle']();
+out.reopened = home(st.done);
+App.actions['flag-toggle']();
+out.closed = home(st.done);
+
+at(10); out.soon = home(done(10), true);
+at(31); out.visits = [1, 2, 3, 4].map(() => home(done(31), true));
+
+at(62); out.before_click = home(done(62), true).card;
+clickLink();
+out.after_click = home(done(62));
+out.click_store = store['ydb.flag'];
+at(62 + 31); out.after_31 = home(done(62 + 31), true);
+at(62 + 91); out.after_91 = home(done(62 + 91), true);
+
+App.screens.support.mount(el());
+App.screens.support.update(st.done);
+out.apps = nodes['support-apps'].innerHTML;
+out.note = nodes['support-flag'].innerHTML;
+App.actions['app-owned']({ dataset: { app: 'vk' }, closest: () => null });
+App.actions['app-owned']({ dataset: { app: '__proto__' }, closest: () => null });
+App.screens.support.update(st.done);
+out.apps_vk_owned = nodes['support-apps'].innerHTML;
+out.card_vk_owned = home(done(62 + 91)).card;
+App.actions['app-owned']({ dataset: { app: 'icloud' }, closest: () => null });
+App.screens.support.update(st.done);
+out.apps_none = nodes['support-apps'].innerHTML;
+App.actions['flag-hide']();
+App.screens.support.update(st.done);
+out.note_hidden = nodes['support-flag'].innerHTML;
+out.hidden = home(done(62 + 91));
+App.actions['flag-hide']();
+out.unhidden = home(done(62 + 91));
+out.final_store = JSON.parse(store['ydb.flag']);
+
+broken = true;  // приватный режим: хранилище бросает исключения
+at(400); out.broken = home(done(400), true);
+App.actions['flag-later']();
+out.broken_later = home(done(400));
+process.stdout.write(JSON.stringify(out));
+"""
+
+_FLAG_CARD_TEXT = "О сбоях Яндекса и ВК пишу в канале. Программы бесплатные, взнос любой суммы — по желанию."
+_VK_URL = "https://github.com/PXSYS13/vk_backup"
+_ICLOUD_URL = "https://github.com/PXSYS13/icloud_backup"
+
+
+def _plain_links(html: str) -> list[str]:
+    links = re.findall(r"<a [^>]*>", html)
+    assert all('target="_blank"' in a and 'rel="noopener noreferrer"' in a for a in links), links
+    return links
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_author_flag_after_a_finished_download(monkeypatch):
+    statuses = _demo_statuses(monkeypatch)
+    res = subprocess.run(["node", "-e", _FLAG_HARNESS], input=json.dumps(statuses), capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    # Идёт скачивание, ждём Яндекса, пауза, нужно действие, часть не скачалась, программа не
+    # отвечает — флажка нет, и браузер ничего не запоминает
+    assert out["quiet"] == dict.fromkeys(out["quiet"], ""), out["quiet"]
+    assert out["store_quiet"] is None
+    # «Скачано почти всё» по-прежнему спрашивает своей плашкой: флажок её не заменяет
+    assert "Программа помогла?" in out["partial_donate"]
+
+    # Первое удачное скачивание: флажок переливается, под главной карточкой — «Будем на связи»
+    first = out["first"]
+    assert 'class="pennant glow"' in first["pennant"] and "От автора" in first["pennant"]
+    assert 'aria-expanded="true" aria-controls="flag-card"' in first["pennant"]
+    card = first["card"]
+    for text in ("Будем на связи", _FLAG_CARD_TEXT, "Подписаться</a>", "Поддержать</a>",
+                 'data-action="flag-later">Не сейчас', "А ВКонтакте? VK Backup"):
+        assert text in card, text
+    assert f'href="{utils.TELEGRAM_CHANNEL}"' in card and f'href="{utils.DONATION_URL}"' in card
+    assert f'href="{_VK_URL}"' in card and _ICLOUD_URL not in card
+    assert len(_plain_links(card)) == 3
+    assert first["donate"] == ""  # вторая просьба «Программа помогла?» рядом не появляется
+    assert out["first_store"]["visits"] == 1
+    assert "&quot;&gt;&lt;img" in out["evil"] and "<img" not in out["evil"]
+
+    # «Не сейчас»: остаётся только флажок, он раскрывает и сворачивает карточку
+    later = out["later"]
+    assert later["card"] == "" and 'aria-expanded="false"' in later["pennant"]
+    assert "glow" not in later["pennant"] and "aria-controls" not in later["pennant"]
+    assert "Будем на связи" in out["reopened"]["card"] and 'aria-expanded="true"' in out["reopened"]["pennant"]
+    assert "glow" not in out["reopened"]["pennant"] and out["closed"]["card"] == ""
+
+    # Новое скачивание раньше чем через 30 дней — только флажок. Через 31 день карточка раскрывается
+    # снова и держится три захода на Главную; на четвёртом остаётся флажок
+    assert out["soon"]["card"] == "" and "От автора" in out["soon"]["pennant"]
+    assert [bool(v["card"]) for v in out["visits"]] == [True, True, True, False]
+    assert "glow" in out["visits"][0]["pennant"] and "glow" not in out["visits"][1]["pennant"]
+    assert all("От автора" in v["pennant"] for v in out["visits"])
+
+    # Переход в канал или к донату сворачивает карточку; браузер помнит время, а не куда нажали
+    assert "Будем на связи" in out["before_click"]
+    assert out["after_click"]["card"] == "" and "От автора" in out["after_click"]["pennant"]
+    assert json.loads(out["click_store"])["clickedAt"]
+    assert not re.search(r"t\.me|donationalerts|telegram|donat|href|http", out["click_store"])
+    # После перехода карточка ждёт 90 дней, а не 30
+    assert out["after_31"]["card"] == "" and "Будем на связи" in out["after_91"]["card"]
+
+    # «Поддержать»: другие программы автора, «Уже есть» прячет карточку и тут, и во флажке
+    apps = out["apps"]
+    assert "Другие программы автора" in apps and len(_plain_links(apps)) == 2
+    assert f'href="{_VK_URL}"' in apps and f'href="{_ICLOUD_URL}"' in apps
+    assert "Бэкап ВКонтакте: переписки, фото, стена и друзья из официального архива ВК, без пароля." in apps
+    assert ("Скачивает всю медиатеку iCloud Фото на компьютер, если вы больше не платите за iCloud+. "
+            "Бета-версия.") in apps
+    assert apps.count("Скачать</a>") == 2 and apps.count('data-action="app-owned"') == 2
+    assert _VK_URL not in out["apps_vk_owned"] and _ICLOUD_URL in out["apps_vk_owned"]
+    assert _VK_URL not in out["card_vk_owned"] and "Будем на связи" in out["card_vk_owned"]
+    assert out["apps_none"] == ""
+    # «Скрыть флажок» — переключатель: флажка нет совсем, второе нажатие возвращает его
+    assert "Программа никуда не сообщает, нажали ли вы на ссылку." in out["note"]
+    assert 'data-action="flag-hide" aria-pressed="false"' in out["note"] and "Скрыть флажок" in out["note"]
+    assert 'aria-pressed="true"' in out["note_hidden"]
+    assert out["hidden"] == {"pennant": "", "card": "", "donate": ""}
+    assert "От автора" in out["unhidden"]["pennant"]
+    # В хранилище одна запись: время, счётчик и отметки
+    final = out["final_store"]
+    assert set(final) <= {"lastFullAt", "lastBackupId", "visits", "expanded", "dismissed", "clickedAt", "hidden", "owned"}
+    assert final["owned"] == {"vk": True, "icloud": True}
+    assert all(v is None or isinstance(v, (bool, int, float)) for k, v in final.items() if k != "owned")
+    # Хранилище недоступно — флажок работает и помнит до перезагрузки страницы
+    assert "Будем на связи" in out["broken"]["card"] and out["broken_later"]["card"] == ""
+
+
+def test_author_flag_makes_no_requests_and_no_popups():
+    js = (ASSETS / "static" / "js" / "flag.js").read_text(encoding="utf-8")
+    # Флажок ничего не запрашивает и не открывает сам: ссылки открывает человек, без окон и уведомлений
+    for banned in ("fetch(", "App.api", "XMLHttpRequest", "sendBeacon", "WebSocket", "EventSource", "new Image",
+                   "window.open", "App.toast", "App.confirm", "Notification", "style="):
+        assert banned not in js, banned
+    assert _plain_links(js)
+    registered = set(re.findall(r"App\.action\('([a-z0-9-]+)'", _all_js()))
+    assert {"flag-toggle", "flag-later", "flag-hide", "app-owned"} <= registered
+    # Переливается не больше двух раз, а при «меньше движения» анимаций нет вовсе
+    css = (ASSETS / "static" / "app.css").read_text(encoding="utf-8")
+    glow = re.search(r"\.pennant\.glow\{animation:[^;}]*\s(\d+)\}", css)
+    assert glow and int(glow.group(1)) <= 2
+    assert re.search(r"@media \(prefers-reduced-motion:reduce\)\{\s*\*,\*::before,\*::after\{animation:none !important", css)
 
 
 # Уведомления браузера: о чём сообщить, когда состояние сменилось, — в node, без браузера
@@ -574,7 +782,7 @@ global.localStorage = {
   setItem: (k, v) => { if (broken) throw new Error('нет доступа'); store[k] = String(v); },
 };
 global.matchMedia = () => ({ matches: false, addEventListener() {} });
-for (const f of ['core.js', 'components.js', 'screens/home.js', 'screens/help.js']) require(path.join(process.env.JS_DIR, f));
+for (const f of ['core.js', 'components.js', 'flag.js', 'screens/home.js', 'screens/help.js']) require(path.join(process.env.JS_DIR, f));
 const App = window.App;
 App.toast = () => {};
 const st = JSON.parse(require('fs').readFileSync(0, 'utf8'));

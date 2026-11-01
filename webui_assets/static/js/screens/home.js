@@ -223,7 +223,8 @@
       el.innerHTML = `<div id="home-banner"></div>
         <div id="home-update"></div>
         <section class="card hero" id="home-hero" aria-labelledby="home-headline">
-          <div class="hero-top"><span id="home-pill"></span><span id="home-beat"></span></div>
+          <div class="hero-top"><span id="home-pill"></span>
+            <span class="hero-top-end"><span id="home-beat"></span><span id="home-flag"></span></span></div>
           <div class="hero-body">
             <div id="home-visual"></div>
             <div>
@@ -236,6 +237,7 @@
           <div id="home-stats"></div>
           <p class="hero-what" id="home-what"></p>
         </section>
+        <div class="mt" id="home-flag-card"></div>
         <div class="mt" id="home-space"></div>
         <div class="mt" id="home-safety"></div>
         <div class="mt" id="home-notice"></div>
@@ -247,6 +249,8 @@
         </div>
         <div id="home-thanks"></div>`;
     },
+    // Заход на Главную: флажок «От автора» считает их, чтобы карточка не висела вечно
+    show() { App.flag.visit(); },
     update(s) {
       const r = s.rescue || {};
       const offline = App.state.offline;
@@ -271,7 +275,12 @@
       const showSafety = r.state !== 'idle' && !((r.summary || {}).complete) && !r.notice;
       App.html(byId('home-safety'), showSafety && !offline ? App.safetyNote() : '');
       App.html(byId('home-notice'), offline ? '' : App.noticeBanner(r.notice));
-      const moment = offline ? null : App.donateMoment(r, App.donateSeen.get());
+      // Флажок «От автора» (flag.js) — только после удачного скачивания целиком. Тогда он и просит:
+      // плашка «Программа помогла?» рядом была бы второй просьбой подряд
+      const flag = App.flag.home(s, offline);
+      App.html(byId('home-flag'), flag.pennant);
+      App.html(byId('home-flag-card'), flag.card);
+      const moment = offline || flag.finished ? null : App.donateMoment(r, App.donateSeen.get());
       App.html(byId('home-donate'), App.donateCard(moment, s.donation_url));
       byId('home-donate').classList.toggle('hidden', !moment);
       const src = r.sources || {};

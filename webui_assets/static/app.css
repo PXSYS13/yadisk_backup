@@ -475,6 +475,29 @@ button.small .i,.btn.small .i{width:16px;height:16px}
 .empty-box p{margin-top:16px;font-size:17px;font-weight:500}
 .more-row{display:flex;justify-content:center;margin-top:24px}
 
+/* ── Флажок «От автора» на главной карточке и другие программы автора ── */
+.hero-top-end{display:inline-flex;align-items:center;gap:8px 12px;flex-wrap:wrap}
+button.pennant{min-height:36px;padding:0 14px 0 12px;gap:6px;border:0;border-radius:10px 10px 10px 2px;background:var(--grad);color:#fff;font-size:14px;box-shadow:var(--glow)}
+button.pennant:hover:not(:disabled){background:var(--grad);filter:brightness(1.1)}
+button.pennant .i{width:16px;height:16px}
+button.pennant[aria-expanded="true"]{box-shadow:0 0 0 3px var(--accent-soft)}
+/* Два раза и всё; при «меньше движения» анимаций нет совсем (правило в конце файла) */
+button.pennant.glow{animation:pennant-glow 1.2s ease-in-out 2}
+@keyframes pennant-glow{50%{box-shadow:0 0 0 8px var(--accent-soft),var(--glow)}}
+.flag-card{border-color:var(--accent-line)}
+.flag-card p{max-width:68ch}
+.flag-card .actions{margin-top:16px;gap:12px}
+.app-promo{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:12px;align-items:center;margin-top:16px;padding:14px 16px;border-radius:var(--radius-sm);background:var(--surface-2)}
+.app-text{min-width:0}
+.app-text .tiny{display:block;margin-top:2px;line-height:1.45}
+.promo-actions{flex-wrap:nowrap;gap:6px}
+.support-apps h2{font-size:24px;letter-spacing:-.01em;margin:40px 0 20px}
+.promos{display:flex;flex-direction:column;gap:12px}
+.promos .app-promo{margin-top:0;background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow)}
+.support-flag{display:flex;align-items:center;justify-content:space-between;gap:12px 24px;flex-wrap:wrap;margin-top:28px;padding-top:20px;border-top:1px solid var(--border)}
+.support-flag p{flex:1 1 320px;color:var(--text-3);font-size:14px;line-height:1.5;max-width:62ch}
+.support-flag button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-text)}
+
 /* ── Формы ── */
 label.field{display:flex;flex-direction:column;gap:8px;margin:14px 0}
 label.field>span{font-size:14px;font-weight:600;color:var(--text-2)}
@@ -736,6 +759,8 @@ details>.body{padding:12px 0 2px 23px;color:var(--text-2)}
   .support-hero{padding:24px}
   .support-hero h1{font-size:28px}
   .banner{flex-direction:column;align-items:flex-start}
+  .app-promo{grid-template-columns:40px minmax(0,1fr)}
+  .promo-actions{grid-column:1 / -1;flex-wrap:wrap}
 }
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation:none !important;transition:none !important}

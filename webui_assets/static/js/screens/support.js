@@ -65,6 +65,15 @@
       ${visible < list.length ? `<div class="more-row"><button data-action="supporters-more">Показать ещё</button></div>` : ''}`);
   }
 
+  // Другие программы автора и переключатель флажка «От автора» (flag.js). Все программы уже есть —
+  // блока нет совсем
+  function paintAuthor() {
+    const apps = App.flag.apps();
+    App.html(byId('support-apps'), apps);
+    byId('support-apps').classList.toggle('hidden', !apps);
+    App.html(byId('support-flag'), App.flag.note());
+  }
+
   App.screens.support = {
     mount(el) {
       const I = App.icon;
@@ -80,7 +89,9 @@
             <a class="btn big" id="support-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">${I('send')}Канал в Telegram</a>
             <a class="btn big" href="https://github.com/PXSYS13/yadisk_backup" target="_blank" rel="noopener">${I('code')}Проект на GitHub</a>
           </div>
+          <div class="support-flag" id="support-flag"></div>
         </section>
+        <section class="support-apps hidden" id="support-apps" aria-labelledby="support-apps-title"></section>
         <section class="hidden" id="support-top-wrap" aria-labelledby="support-top-title">
           <div class="supporters-head"><div><h2 id="support-top-title">Больше всех помогли</h2>
             <p id="support-top-note"></p></div></div>
@@ -96,12 +107,14 @@
     show() {
       visible = PAGE;
       App.loadSupporters();
+      paintAuthor();
       paintList();
     },
     update(s) {
       if (s.donation_url) byId('support-donate').href = s.donation_url;
       if (s.telegram_url) byId('support-telegram').href = s.telegram_url;
       App.text(byId('footer-text'), `Бэкап Яндекс.Диска ${esc(s.app_version || '')}`);
+      paintAuthor();
       paintList();
     },
   };
