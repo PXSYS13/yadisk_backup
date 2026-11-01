@@ -8,9 +8,11 @@
 
        python tools/sync_supporters.py --from-widget "путь/к/сохранённой/странице.html"
 
-   Виджет показывает последние 100 донатов, поэтому записи, которых на странице уже нет,
-   остаются в списке. Ключ виджета в файл списка не попадает: берутся только имя, сумма,
-   дата, сообщение и номер доната. Сохранённую страницу в репозиторий не кладите.
+   Виджет показывает последние 100 оповещений всех типов: донаты через dalink и другие
+   способы оплаты приходят не только типом 1. Донатом считается любое оповещение с суммой
+   больше нуля; подписки и прочие оповещения без суммы в список не идут. Записи, которых на
+   странице уже нет, остаются в списке. Ключ виджета в файл списка не попадает: берутся только
+   имя, сумма, дата, сообщение и номер оповещения. Сохранённую страницу в репозиторий не кладите.
 
 2. Автоматически: GitHub Actions по расписанию (.github/workflows/supporters.yml) берёт
    все донаты через API DonationAlerts и переписывает их часть списка. Нужен ключ в
@@ -55,8 +57,10 @@ ROOT = Path(__file__).resolve().parent.parent
 SUPPORTERS_FILE = ROOT / "supporters.json"
 
 API_URL = "https://www.donationalerts.com/api/v1/alerts/donations"
-# Виджет «Последние оповещения»: открывается только у того, кто вошёл в DonationAlerts
-WIDGET_URL = "https://www.donationalerts.com/widget/lastdonations?alert_type=1&limit=100"
+# Виджет «Последние оповещения»: открывается только у того, кто вошёл в DonationAlerts. Все типы
+# оповещений: донаты через dalink и другие способы оплаты приходят не только типом 1
+WIDGET_URL = ("https://www.donationalerts.com/widget/lastdonations?alert_type=1,4,6,8,7,10,9,11,12,13,14,15,16,"
+              "17,19,20,27,28,29,30,31,32,33,34,35,36&limit=100")
 AUTHORIZE_URL = "https://www.donationalerts.com/oauth/authorize"
 TOKEN_URL = "https://www.donationalerts.com/oauth/token"
 SCOPE = "oauth-donation-index"
@@ -241,13 +245,12 @@ _VOID_TAGS = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "inpu
                         "source", "track", "wbr"})
 _WIDGET_FIELDS = {("span", "_name"): "username", ("span", "_sum"): "sum", ("div", "message-container"): "message"}
 _SUM_RE = re.compile(r"^\s*([\d\s  .,]+?)\s*([A-Za-z]{3})\s*$")
-# Тип оповещения «донат»: остальные (подписки и прочее) в список не идут
-DONATION_ALERT_TYPE = "1"
 
 
 class _WidgetParser(HTMLParser):
-    """Донаты со страницы виджета: div.b-last-events-widget__item с data-alert_id, внутри
-    input[name=date_created] (время UTC), span._name, span._sum и div.message-container.
+    """Оповещения со страницы виджета: div.b-last-events-widget__item с data-alert_id, внутри
+    input[name=date_created] (время UTC), span._name, span._sum (у подписок его нет) и
+    div.message-container.
 
     Скрипты, кнопки и адреса страницы (в них ключ виджета) не читаются вовсе.
     """
@@ -311,15 +314,20 @@ def _widget_sum(text) -> tuple[float | None, str | None]:
 
 
 def parse_widget_html(text: str) -> list[dict]:
-    """Донаты со страницы виджета в том же виде, что отдаёт API (id, username, amount …)."""
+    """Донаты со страницы виджета в том же виде, что отдаёт API (id, username, amount …).
+
+    Донат — любое оповещение с суммой больше нуля, какого бы типа оно ни было: платежи через
+    dalink и другие способы оплаты приходят своими типами. Подписки и прочие оповещения без
+    суммы в список не идут.
+    """
     parser = _WidgetParser()
     parser.feed(text)
     parser.close()
     out = []
     for item in parser.items:
-        if item.get("alert_type") not in (None, DONATION_ALERT_TYPE):
-            continue
         amount, currency = _widget_sum(item.get("sum"))
+        if amount is None or amount <= 0:
+            continue
         out.append({"id": item["id"], "username": item.get("username"), "amount": amount,
                     "currency": currency, "created_at": item.get("created_at"),
                     "message": item.get("message") or None, "message_type": "text"})

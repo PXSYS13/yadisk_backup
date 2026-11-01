@@ -452,6 +452,13 @@ button.small .i,.btn.small .i{width:16px;height:16px}
 .support-hero .sub{color:var(--text-2);font-size:17px;line-height:1.55;max-width:56ch;margin-top:12px}
 .support-hero .support-note{color:var(--text-3);font-size:14px;line-height:1.5;max-width:62ch;margin-top:10px}
 .support-hero .actions{margin-top:28px;gap:12px}
+/* Кнопки и QR-код доната рядом; на узком экране QR-код уходит под кнопки */
+.donate-row{display:flex;gap:20px 24px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:28px}
+.support-hero .donate-row .actions{margin-top:0}
+.donate-main{flex:1 1 320px;min-width:0}
+.donate-main .tiny{margin-top:12px;max-width:62ch}
+/* QR-код — на белом в любой теме: тёмный фон камера телефона не прочитает */
+.donate-qr{display:block;flex:none;width:132px;height:132px;padding:6px;border-radius:12px;background:#fff;border:1px solid var(--border);image-rendering:pixelated}
 .supporters-head{display:flex;align-items:flex-end;justify-content:space-between;gap:8px 24px;flex-wrap:wrap;margin:40px 0 20px}
 .supporters-head h2{font-size:24px;letter-spacing:-.01em}
 .supporters-head p{margin-top:4px;font-size:17px;color:var(--text-2)}

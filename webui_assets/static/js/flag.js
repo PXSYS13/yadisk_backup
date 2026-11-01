@@ -10,7 +10,7 @@
   const { esc, icon } = App;
 
   const TELEGRAM_URL = 'https://t.me/davronsv';
-  const DONATE_URL = 'https://www.donationalerts.com/r/davronsvv';
+  const DONATE_URL = 'https://dalink.to/davronsvv';
   // Карточку программы прячет кнопка «Уже есть»
   const APPS = {
     vk: { icon: 'users', name: 'VK Backup', ask: 'А ВКонтакте?', url: 'https://github.com/PXSYS13/vk_backup',

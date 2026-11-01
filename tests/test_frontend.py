@@ -326,7 +326,7 @@ def test_donate_card_asks_once_per_milestone():
     assert "Программа помогла?" in out["card"] and 'href="https://dalink.to/x"' in out["card"]
     assert 'data-action="donate-open"' in out["card"] and 'data-key="m-10000"' in out["card"]
     assert "Уже 10 000 файлов на вашем компьютере" in out["card_ms"]
-    assert "https://www.donationalerts.com/r/davronsvv" in out["card_ms"]
+    assert "https://dalink.to/davronsvv" in out["card_ms"]
 
 
 def _demo_statuses(monkeypatch) -> dict:

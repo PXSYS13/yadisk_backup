@@ -84,10 +84,16 @@
             Если она помогла — можно поддержать автора или просто рассказать о ней знакомым.</p>
           <p class="support-note">Имя и сообщение из доната появятся ниже, в «Нас поддерживают».
             Не хотите, чтобы имя было видно, — подпишитесь «Аноним».</p>
-          <div class="row actions">
-            <a class="btn primary big" id="support-donate" href="https://www.donationalerts.com/r/davronsvv" target="_blank" rel="noopener">${I('heart')}Поддержать на DonationAlerts</a>
-            <a class="btn big" id="support-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">${I('send')}Канал в Telegram</a>
-            <a class="btn big" href="https://github.com/PXSYS13/yadisk_backup" target="_blank" rel="noopener">${I('code')}Проект на GitHub</a>
+          <div class="donate-row">
+            <div class="donate-main">
+              <div class="row actions">
+                <a class="btn primary big" id="support-donate" href="https://dalink.to/davronsvv" target="_blank" rel="noopener">${I('heart')}Поддержать на DonationAlerts</a>
+                <a class="btn big" id="support-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">${I('send')}Канал в Telegram</a>
+                <a class="btn big" href="https://github.com/PXSYS13/yadisk_backup" target="_blank" rel="noopener">${I('code')}Проект на GitHub</a>
+              </div>
+              <p class="tiny">Или наведите камеру телефона на QR-код — откроется та же страница DonationAlerts.</p>
+            </div>
+            <img class="donate-qr" src="/static/donate-qr.png" width="132" height="132" alt="QR-код: поддержать проект через DonationAlerts (dalink.to/davronsvv)">
           </div>
           <div class="support-flag" id="support-flag"></div>
         </section>

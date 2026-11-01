@@ -208,16 +208,18 @@ def test_main_exit_codes(monkeypatch):
 
 
 def widget_item(alert_id, name, total, created, message="", alert_type="1", self_closing=False):
-    """Пункт страницы виджета в разметке DonationAlerts (октябрь 2026)."""
+    """Пункт страницы виджета в разметке DonationAlerts (октябрь 2026). total=None — оповещение
+    без суммы (подписка и тому подобное)."""
     end = "/>" if self_closing else ">"
     msg = f'<div class="message-container b-last-events-widget__item--text">{message}</div>' if message else ""
+    what = f'отправил <span class="_sum">{total}</span>' if total is not None else "подписался"
     return (f'<div class="event b-last-events-widget__item " data-alert_type="{alert_type}" '
             f'data-alert_id="{alert_id}" data-amount_main="1"><div class="show-progress"></div>'
             f'<input type="hidden" name="date_created" value="{created}"{end}'
             f'<div class="b-last-events-widget__item--from _dalink"><svg><path d="M0"/></svg></div>'
             f'<div class="b-last-events-widget__item--inner"><div class="b-last-events-widget__item--title">'
-            f'<span class="_name">{name}<img class="commission-covered-icon" src="/i.svg"></span> отправил '
-            f'<span class="_sum">{total}</span></div>{msg}<div class="action-buttons-container-footer">'
+            f'<span class="_name">{name}<img class="commission-covered-icon" src="/i.svg"></span> {what}'
+            f'</div>{msg}<div class="action-buttons-container-footer">'
             f'<button>Повторить оповещение</button><span class="date-container">1 час назад</span></div></div></div>')
 
 
@@ -231,7 +233,7 @@ def test_widget_page_gives_donations_like_the_api():
     page = widget_page(
         widget_item(11, "Мария", "1 000 RUB", "2026-10-18 21:16:28", message="Вернула фото &amp; видео"),
         widget_item(12, "@tg_nick", "0,30 USD", "2026-10-19 01:30:20", self_closing=True),
-        widget_item(13, "Подписчик", "100 RUB", "2026-10-19 02:00:00", alert_type="4"),  # не донат
+        widget_item(13, "Подписчик", None, "2026-10-19 02:00:00", alert_type="6"),  # без суммы — не донат
     )
     got = ss.parse_widget_html(page)
     assert [d["id"] for d in got] == ["11", "12"]
@@ -282,6 +284,52 @@ def test_widget_import_refuses_a_page_without_donations(tmp_path, capsys, monkey
     assert ss.main(["--from-widget", str(page)]) == 1
     assert "На странице нет донатов" in capsys.readouterr().out
     assert path.read_text(encoding="utf-8") == '{"supporters": []}'
+
+
+def test_widget_keeps_paid_alerts_of_any_type():
+    """dalink и другие способы оплаты приходят в виджет своими типами оповещений: донат — всё,
+    у чего есть сумма."""
+    page = widget_page(
+        widget_item(21, "Карта", "500 RUB", "2026-10-20 10:00:00", alert_type="1"),
+        widget_item(22, "СБП", "150 RUB", "2026-10-20 11:00:00", alert_type="4"),
+        widget_item(23, "Через dalink", "1 000 RUB", "2026-10-20 12:00:00", alert_type="27"),
+    )
+    got = ss.parse_widget_html(page)
+    assert [d["id"] for d in got] == ["21", "22", "23"]
+    assert [ss.donation_entry(d)["amount"] for d in got] == [500, 150, 1000]
+    assert [ss.donation_entry(d)["id"] for d in got] == ["da-21", "da-22", "da-23"]
+
+
+@pytest.mark.parametrize("total", [None, "", "0 RUB", "0,00 USD", " RUB", "сто рублей"])
+def test_widget_skips_alerts_without_money(total):
+    page = widget_page(
+        widget_item(31, "Подписчик", total, "2026-10-20 10:00:00", alert_type="6"),
+        widget_item(32, "Анна", "300 RUB", "2026-10-20 11:00:00", alert_type="27"),
+    )
+    assert [d["id"] for d in ss.parse_widget_html(page)] == ["32"]
+
+
+def test_widget_import_takes_every_paid_type_and_still_hides(tmp_path):
+    path = tmp_path / "supporters.json"
+    path.write_text(json.dumps({"hidden": ["42"], "no_message": ["41"], "supporters": []}), encoding="utf-8")
+    html_file = tmp_path / "lastdonations.html"
+    html_file.write_text(widget_page(
+        widget_item(40, "Карта", "500 RUB", "2026-10-20 10:00:00", message="Спасибо!"),
+        widget_item(41, "СБП", "150 RUB", "2026-10-20 11:00:00", message="грубость", alert_type="4"),
+        widget_item(42, "Спамер", "10 RUB", "2026-10-20 12:00:00", alert_type="27"),
+        widget_item(43, "Через dalink", "1 000 RUB", "2026-10-20 13:00:00", alert_type="27"),
+        widget_item(44, "Подписчик", None, "2026-10-20 14:00:00", alert_type="6"),
+        widget_item(45, "Ноль", "0 RUB", "2026-10-20 15:00:00", alert_type="4"),
+    ), encoding="utf-8")
+    assert ss.import_widget(html_file, path=path, today="2026-10-20") is True
+    text = path.read_text(encoding="utf-8")
+    data = json.loads(text)
+    assert [(x["id"], x["name"], x["amount"]) for x in data["supporters"]] == [
+        ("da-43", "Через dalink", 1000), ("da-41", "СБП", 150), ("da-40", "Карта", 500)]
+    assert data["supporters"][1]["message"] is None and data["supporters"][2]["message"] == "Спасибо!"
+    # Ключ виджета из скриптов страницы и оповещения без денег в файл не попадают
+    for absent in ("secret", "Спамер", "Подписчик", "Ноль", "da-44", "da-45"):
+        assert absent not in text, absent
 
 
 @pytest.mark.parametrize("text", [
