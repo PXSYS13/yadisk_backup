@@ -394,16 +394,21 @@ def cmd_scan_media(cfg: dict, args: argparse.Namespace) -> int:
     print(f"Сканирую медиа: {', '.join(media_types)}")
 
     progress = _ScanProgress("Найдено медиа")
-    with State(str(DB_FILE)) as state, closing(make_client(cfg["token"])) as client:
-        try:
+    try:
+        with State(str(DB_FILE)) as state, closing(make_client(cfg["token"])) as client:
             files, total_bytes = scan_media(
                 client=client,
                 state=state,
                 media_types=media_types,
                 on_file=progress.on_file,
             )
-        finally:
-            progress.close()
+    except Exception as e:  # noqa: BLE001 — ниже решаем, известная ли это ошибка
+        code = scan_exit_code(e)
+        if code is None:
+            raise
+        return _scan_failed(code, e)
+    finally:
+        progress.close()
 
     print(f"Найдено медиа-файлов: {files}")
     print(f"Суммарный объём: {human_bytes(total_bytes)}")

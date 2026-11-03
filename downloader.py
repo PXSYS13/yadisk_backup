@@ -72,6 +72,10 @@ log = logging.getLogger("yadisk_backup")
 
 # Сколько файлов берём за один запрос get_files и кладём в БД одной пачкой
 SCAN_PAGE_SIZE = 200
+# Столько полных страниц подряд почти без новых файлов (меньше SCAN_MIN_FRESH_SHARE страницы) —
+# плоский список повторяет присланное, и сбор переходит на обход папок
+SCAN_STALE_PAGES = 5
+SCAN_MIN_FRESH_SHARE = 0.1
 # Как часто печатать строку прогресса, когда вывод не терминал (Web UI)
 PLAIN_PROGRESS_EVERY_SEC = 5.0
 # Сколько раз берём свежую ссылку, если сервер хранения оборвал файл или ответил 50x
@@ -305,15 +309,33 @@ def scan_tree(
     """
     if to_disk_path(root) in ("disk:/", "disk:"):
         seen_top: set[str] = set()
+        listed: set[str] = set()
         try:
-            files, total = scan_all_files(client, state, on_file=on_file, seen_top=seen_top)
+            files, total = scan_all_files(client, state, on_file=on_file, seen_top=seen_top, known=listed)
         except Exception as e:
             log.warning("get_files недоступен (%s), переключаюсь на обход дерева папок", e)
         else:
+            listed.clear()  # больше не нужен, а на большом Диске это сотни мегабайт
             more_files, more_bytes = _scan_shared_folders(client, state, seen_top, on_file, on_dir, on_note)
             return files + more_files, total + more_bytes
-        return _walk(client, state, root, on_file, on_dir, on_note=on_note)
+        return _walk(client, state, root, _new_files_only(on_file, listed), on_dir, on_note=on_note)
     return _walk(client, state, root, on_file, on_dir, strict_root=True, on_note=on_note)
+
+
+def _new_files_only(on_file: OnFile | None, counted: set[str]) -> OnFile | None:
+    """on_file, который молчит о файлах из counted.
+
+    Обход папок после оборванного плоского списка проходит и уже посчитанные файлы:
+    без этого «Найдено» показало бы их дважды.
+    """
+    if on_file is None or not counted:
+        return on_file
+
+    def notify(path: str, size: int) -> None:
+        if path not in counted:
+            on_file(path, size)
+
+    return notify
 
 
 def scan_exit_code(e: BaseException) -> int | None:
@@ -511,30 +533,43 @@ def _get_files_page(
     return list(client.get_files(**kwargs))
 
 
-def _iter_files(client: yadisk.Client, media_type: str | None = None, page_size: int = SCAN_PAGE_SIZE):
+def _iter_files(
+    client: yadisk.Client,
+    media_type: str | None = None,
+    page_size: int = SCAN_PAGE_SIZE,
+    known: set[str] | None = None,
+):
     """Итератор по файлам диска для заданного media_type (или всех файлов, если media_type=None).
 
     Сами пагинируем — yadisk.get_files() умеет итератор, но мы хотим
     обернуть КАЖДУЮ страницу в retry, а не одну общую попытку.
 
-    Полная страница, которая повторяет первую или предыдущую, — RepeatedPages: без этой
-    проверки сбор шёл бы бесконечно, а scan_tree тогда обходит Диск по папкам.
+    Отдаёт только файлы, которых в этом сборе ещё не было (known — их пути): страница может
+    задеть часть предыдущей. Полная страница без единого нового пути — RepeatedPages: Яндекс
+    повторяет уже присланное. Сравнивать только с первой и предыдущей страницей мало — по кругу
+    из других кусков сбор у человека шёл 70 часов и «нашёл» 10 млн файлов. Страницы, где новых
+    почти нет, SCAN_STALE_PAGES раз подряд — тоже RepeatedPages: по файлу за запрос до конца шли
+    бы сутками. scan_tree после RepeatedPages обходит Диск по папкам.
     """
+    known = set() if known is None else known
     offset = 0
-    first: set[str] = set()
-    prev: set[str] = set()
+    stale = 0
     while True:
         page = _get_files_page(client, media_type, offset, page_size)
         if not page:
             return
-        paths = {entry.path for entry in page}
-        if offset and len(page) >= page_size and (paths <= prev or paths <= first):
-            raise RepeatedPages(offset)
-        yield from page
+        fresh = []
+        for entry in page:
+            if entry.path not in known:
+                known.add(entry.path)
+                fresh.append(entry)
+        # Сначала отдаём новое: путь уже в known, и обход папок его второй раз не посчитает
+        yield from fresh
         if len(page) < page_size:
             return
-        first = first or paths
-        prev = paths
+        stale = stale + 1 if len(fresh) < page_size * SCAN_MIN_FRESH_SHARE else 0
+        if not fresh or stale >= SCAN_STALE_PAGES:
+            raise RepeatedPages(offset)
         offset += page_size
 
 
@@ -544,29 +579,32 @@ def _scan_flat(
     media_type: str | None,
     on_file: OnFile | None,
     seen_top: set[str] | None = None,
+    known: set[str] | None = None,
 ) -> tuple[int, int]:
     """Плоский обход get_files() с регистрацией в БД пачками по SCAN_PAGE_SIZE.
 
     seen_top собирает верхние папки увиденных файлов — по ним видно, каких
-    общих папок в плоском списке не оказалось.
+    общих папок в плоском списке не оказалось. known собирает пути присланных файлов.
     """
     files_count = 0
     bytes_total = 0
     batch: list = []
 
-    for entry in _iter_files(client, media_type=media_type):
-        if entry.type != "file" or _is_skipped(entry.path):
-            continue
-        if seen_top is not None and (top := _top_folder(entry.path)):
-            seen_top.add(top)
-        files_count += 1
-        bytes_total += _register_file(entry, batch, on_file)
-        if len(batch) >= SCAN_PAGE_SIZE:
+    try:
+        for entry in _iter_files(client, media_type=media_type, known=known):
+            if entry.type != "file" or _is_skipped(entry.path):
+                continue
+            if seen_top is not None and (top := _top_folder(entry.path)):
+                seen_top.add(top)
+            files_count += 1
+            bytes_total += _register_file(entry, batch, on_file)
+            if len(batch) >= SCAN_PAGE_SIZE:
+                state.mark_pending_batch(batch)
+                batch.clear()
+    finally:
+        # Оборвался список — уже присланное всё равно в базу: эти файлы скачаются
+        if batch:
             state.mark_pending_batch(batch)
-            batch.clear()
-
-    if batch:
-        state.mark_pending_batch(batch)
 
     return files_count, bytes_total
 
@@ -599,9 +637,10 @@ def scan_all_files(
     state: State,
     on_file: OnFile | None = None,
     seen_top: set[str] | None = None,
+    known: set[str] | None = None,
 ) -> tuple[int, int]:
     """Быстрое сканирование всего диска плоским get_files() вместо рекурсии по папкам."""
-    return _scan_flat(client, state, None, on_file, seen_top)
+    return _scan_flat(client, state, None, on_file, seen_top, known)
 
 
 # ── скачивание ──────────────────────────────────────────────────────────────

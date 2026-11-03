@@ -226,6 +226,93 @@ def test_flat_list_that_repeats_pages_falls_back_to_walking_folders():
     assert "disk:/A" in disk.listed
 
 
+PAGE = downloader.SCAN_PAGE_SIZE
+
+
+class EndlessFlat(FakeDisk):
+    """Плоский список, у которого после двух честных страниц конец не приходит никогда.
+
+    tail(k) — что Яндекс отдаёт на k-й странице (k ≥ 2), всегда полную страницу.
+    """
+
+    def __init__(self, *a, tail, **kw):
+        super().__init__(*a, **kw)
+        self.tail = tail
+        self.calls = 0
+
+    def get_files(self, offset=0, limit=200, max_items=None, **kw):
+        self.calls += 1
+        if self.calls > 100:
+            pytest.fail("плоский список крутится бесконечно")  # BaseException: scan_tree её не проглотит
+        k = offset // limit
+        return iter(self.flat[offset:offset + limit] if k < 2 else self.tail(k))
+
+
+def _scan_counting(disk, root="disk:/"):
+    st = FakeState()
+    counted = []
+    got = downloader.scan_tree(disk, st, root=root, on_file=lambda path, size: counted.append(path))
+    return got, st, counted
+
+
+def test_flat_list_that_cycles_through_old_pages_falls_back_to_walking_folders():
+    """Ни один кусок не совпадает целиком ни с первой, ни с предыдущей страницей — так сбор
+    у человека дошёл до «найдено: 10 413 493» за 70 часов."""
+    files = [_file(f"disk:/A/{i}.jpg") for i in range(2 * PAGE + 50)]
+    starts = (PAGE // 2, PAGE // 4, PAGE * 3 // 4)
+    disk = EndlessFlat({"disk:/": [_dir("disk:/A")], "disk:/A": files}, flat=files,
+                       tail=lambda k: files[starts[k % 3]:starts[k % 3] + PAGE])
+    got, st, counted = _scan_counting(disk)
+    assert got == (len(files), len(files))
+    assert set(st.rows) == {f.path for f in files}
+    assert "disk:/A" in disk.listed
+    assert disk.calls == 3
+    # «Найдено» растёт только на новые файлы: повторы плоского списка и второй проход
+    # по папкам не считаются ещё раз
+    assert sorted(counted) == sorted(f.path for f in files)
+
+
+def test_flat_list_that_drips_one_new_file_per_page_gives_up_soon():
+    """Каждая страница — старые файлы и один новый: до конца так дошли бы через тысячи запросов."""
+    files = [_file(f"disk:/A/{i}.jpg") for i in range(2 * PAGE + 50)]
+
+    def tail(k):
+        extra = 2 * PAGE + k - 2
+        return files[:PAGE - 1] + [files[extra]] if extra < len(files) else files[:PAGE]
+
+    disk = EndlessFlat({"disk:/": [_dir("disk:/A")], "disk:/A": files}, flat=files, tail=tail)
+    got, st, counted = _scan_counting(disk)
+    assert got == (len(files), len(files))
+    assert set(st.rows) == {f.path for f in files}
+    assert "disk:/A" in disk.listed
+    assert disk.calls == 2 + downloader.SCAN_STALE_PAGES
+    assert sorted(counted) == sorted(f.path for f in files)
+
+
+def test_flat_list_counts_files_repeated_by_a_shifting_list_once():
+    """Яндекс сдвигает список: каждая следующая страница задевает 20 файлов предыдущей."""
+    files = [_file(f"disk:/A/{i}.jpg") for i in range(500)]
+
+    class Overlapping(FakeDisk):
+        def get_files(self, offset=0, limit=200, max_items=None, **kw):
+            start = max(offset - 20 * (offset // limit), 0)
+            return iter(self.flat[start:start + limit])
+
+    disk = Overlapping({}, flat=files)
+    got, st, counted = _scan_counting(disk, root="/")
+    assert got == (500, 500)
+    assert set(st.rows) == {f.path for f in files}
+    assert len(counted) == 500
+
+
+def test_flat_list_of_whole_pages_ends_on_the_empty_page_without_walking_folders():
+    files = [_file(f"disk:/A/{i}.jpg") for i in range(2 * PAGE)]
+    disk = FakeDisk({"disk:/": [_dir("disk:/A")], "disk:/A": files}, flat=files)
+    got, st, _counted = _scan_counting(disk)
+    assert got == (2 * PAGE, 2 * PAGE)
+    assert "disk:/A" not in disk.listed
+
+
 def test_shared_folder_check_failure_does_not_break_the_scan():
     disk = FakeDisk(tree={}, flat=[_file("disk:/A/x.jpg")])  # корень не читается
     st = FakeState()
