@@ -98,7 +98,7 @@ def main():
     print()
     if neighbour:
         print(f"  На http://{ports.HOST}:{wanted} уже работает эта программа из другой папки:")
-        print(f"  {neighbour.get('folder')}")
+        print(f"  {ports.neighbour_text(neighbour)}")
         print(f"  Эта копия работает рядом, на {url}. У каждой копии свои ключ доступа, папка и прогресс.")
         print()
     elif port != wanted:

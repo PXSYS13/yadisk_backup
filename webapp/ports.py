@@ -17,7 +17,7 @@ import time
 from fastapi.responses import JSONResponse
 
 from utils import IS_WINDOWS
-from webapp import paths
+from webapp import config, paths
 
 log = logging.getLogger("webui")
 
@@ -141,25 +141,51 @@ def _our_copy_on(port: int) -> dict | None:
         return hello if hello.get("app") == APP_ID else None
     # Версии до 2.6.1 не знают /api/hello — узнаём их по /api/status
     status = _ask_port(port, "/api/status", 5)
-    return {"app": APP_ID} if status is not None and "tasks" in status else None
+    if status is None or "tasks" not in status:
+        return None
+    info = {"app": APP_ID}
+    # Свою папку они не сообщают, а папку для скачивания — да: по ней видно копию из другой папки
+    cfg = status.get("config")
+    download_dir = cfg.get("download_dir") if isinstance(cfg, dict) else None
+    if isinstance(download_dir, str) and download_dir.strip():
+        info["download_dir"] = download_dir
+    return info
+
+
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
 def same_folder(info: dict | None) -> bool:
     """Копия программы на порту запущена из этой же папки, то есть над этими же базами.
 
-    Версии до 2.6.1 папку не сообщают — считаем, что из этой: лучше не запуститься,
-    чем открыть вторую копию над теми же базами.
+    Версии до 2.6.1 папку не сообщают. Тогда сравниваем папку для скачивания: копия из той же
+    папки читает тот же .env, а у копии из другой папки она своя (по умолчанию — downloads внутри
+    неё). Если не сообщают и её — считаем, что из этой: лучше не запуститься, чем открыть вторую
+    копию над теми же базами.
     """
     folder = str((info or {}).get("folder") or "")
-    if not folder:
-        return True
-    return os.path.normcase(os.path.abspath(folder)) == os.path.normcase(os.path.abspath(str(paths.PROJECT)))
+    if folder:
+        return _same_path(folder, str(paths.PROJECT))
+    download_dir = str((info or {}).get("download_dir") or "")
+    if download_dir:
+        return _same_path(download_dir, config.get_config()["download_dir"])
+    return True
 
 
 def other_copy_on(port: int) -> dict | None:
     """На порту работает эта же программа, но из другой папки — например, для второго аккаунта."""
     info = _our_copy_on(port)
     return info if info is not None and not same_folder(info) else None
+
+
+def neighbour_text(info: dict) -> str:
+    """Чем назвать соседнюю копию в окне: её папка, а у старых версий — куда она качает."""
+    if info.get("folder"):
+        return str(info["folder"])
+    if info.get("download_dir"):
+        return f"старая версия, качает в {info['download_dir']}"
+    return "старая версия программы"
 
 
 def choose_port(first: int, tries: int) -> tuple[socket.socket | None, int, dict | None]:
@@ -189,6 +215,10 @@ def show_running_copy(port: int, info: dict) -> None:
     url = f"http://{HOST}:{port}"
     print(f"  Программа уже работает в другом окне: {url}")
     print("  Открываю её в браузере. Это окно можно закрыть.")
+    if not info.get("folder"):
+        # Старая версия не сообщает свою папку: вдруг это копия для другого аккаунта
+        print("  Это старая версия программы. Если вы запускали эту копию из другой папки —")
+        print("  например, для второго аккаунта, — закройте окно старой программы и запустите эту снова.")
     log.info("порт %d: уже работает копия программы из этой папки (%s), вторую не запускаю", port,
              info.get("version") or "версия до 2.6.1")
     if os.getenv("YADISK_NO_BROWSER") != "1":

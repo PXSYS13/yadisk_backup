@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import utils
+import webapp.config
 import webapp.paths
 import webapp.ports
 import webui
@@ -128,6 +129,56 @@ def test_copy_of_an_old_version_is_recognized_by_status():
     with _Occupant(port, {"/api/status": {"tasks": {}, "pipeline": {}}}):  # до 2.6.1 нет /api/hello
         sock, chosen, running = webapp.ports.choose_port(port, 5)
     assert sock is None and chosen == port and running == {"app": webapp.ports.APP_ID}
+
+
+def test_old_version_from_another_folder_runs_next_to_it():
+    """Старая копия (до 2.6.1) качает первый аккаунт на первый диск, новая распакована в другую папку.
+
+    Раньше новая считала старую «собой», открывала её в браузере и закрывалась: человек вписывал
+    ключ второго аккаунта и второй диск в старую копию, и её недокачанные файлы первого аккаунта
+    уезжали на второй диск. Папку старые версии не сообщают, но папку для скачивания — да.
+    """
+    port = _two_free_ports()
+    status = {"tasks": {}, "config": {"download_dir": "D:\\Яндекс первый аккаунт"}}
+    with _Occupant(port, {"/api/status": status}):
+        sock, chosen, running = webapp.ports.choose_port(port, 5)
+        try:
+            assert sock is not None and chosen == port + 1 and running is None
+            assert webapp.ports.other_copy_on(port)["download_dir"] == "D:\\Яндекс первый аккаунт"
+        finally:
+            sock.close()
+
+
+def test_old_version_with_our_download_folder_is_this_copy():
+    """Старую копию обновили поверх, не закрыв: тот же .env — та же папка для скачивания, те же базы."""
+    port = _two_free_ports()
+    ours = webapp.config.get_config()["download_dir"]
+    with _Occupant(port, {"/api/status": {"tasks": {}, "config": {"download_dir": ours + "/"}}}):
+        sock, chosen, running = webapp.ports.choose_port(port, 5)
+    assert sock is None and chosen == port and running["download_dir"] == ours + "/"
+
+
+def test_same_folder_of_an_old_version_follows_its_download_folder():
+    ours = webapp.config.get_config()["download_dir"]
+    assert webapp.ports.same_folder({"app": webapp.ports.APP_ID, "download_dir": ours})
+    assert not webapp.ports.same_folder({"app": webapp.ports.APP_ID, "download_dir": ours + "_wife"})
+    # Папка из /api/hello важнее: её сообщают версии с 2.6.1
+    assert webapp.ports.same_folder({"folder": str(webapp.paths.PROJECT), "download_dir": ours + "_wife"})
+
+
+def test_old_neighbour_is_named_by_its_download_folder(monkeypatch):
+    """В окне не должно быть «None» вместо папки соседней копии."""
+    monkeypatch.setattr(webapp.ports, "_our_copy_on",
+                        lambda port: {"app": webapp.ports.APP_ID, "download_dir": "D:\\Первый"})
+    assert webapp.ports.neighbour_text(webapp.ports.other_copy_on(8000)) == "старая версия, качает в D:\\Первый"
+    assert webapp.ports.neighbour_text({"folder": "/home/user/wife"}) == "/home/user/wife"
+
+
+def test_old_copy_shown_instead_warns_about_another_folder(monkeypatch, capsys):
+    monkeypatch.setenv("YADISK_NO_BROWSER", "1")
+    webapp.ports.show_running_copy(8000, {"app": webapp.ports.APP_ID})
+    out = capsys.readouterr().out
+    assert "старая версия" in out and "из другой папки" in out
 
 
 def test_other_app_with_hello_is_not_mistaken_for_us():
