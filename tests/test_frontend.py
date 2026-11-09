@@ -757,6 +757,9 @@ def test_details_shows_which_folders_are_complete():
     assert out["asked"] == ["disk:/", "disk:/Фото"]
     assert "<b>Весь Диск</b>" in root and "Скачаны целиком: <b>3</b> из 6 папок" in root
     assert root.count("скачана целиком") == 3 and "ждут Яндекса: 1 330" in root.replace("\xa0", " ")
+    # «Работа»: 12 не скачались и 20 ждут Яндекса — видны оба числа, сумма сходится с Главной
+    plain = root.replace("\xa0", " ")
+    assert "не скачались: 12" in plain and "ждут Яндекса: 20" in plain
     assert 'data-action="fp-open" data-path="disk:/Фото"' in root  # в «Фото» есть подпапки
     assert root.count('data-action="open-disk-folder"') == 2  # «Музыку» уже перенесли
     assert "в папке скачивания её уже нет" in root

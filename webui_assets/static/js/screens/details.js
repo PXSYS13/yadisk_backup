@@ -74,16 +74,20 @@
       items.map((x) => `<span aria-hidden="true">›</span>${x}`).join('') + '</nav>';
   }
 
-  function folderBadge(f) {
-    if (!f.files) return ['', 'не выбрана'];
-    if (f.complete) return ['ok', 'скачана целиком'];
-    if (f.failed) return ['err', `не скачались: ${fmt.num(f.failed)}`];
-    if (f.deferred) return ['wait', `ждут Яндекса: ${fmt.num(f.deferred)}`];
-    return ['', `в очереди: ${fmt.num(f.waiting)}`];
+  // Все проблемы папки, а не только главная: раньше «не скачались» прятало «ждут Яндекса»,
+  // и сумма по папкам не сходилась с Главной
+  function folderBadges(f) {
+    if (!f.files) return [['', 'не выбрана']];
+    if (f.complete) return [['ok', 'скачана целиком']];
+    const out = [];
+    if (f.failed) out.push(['err', `не скачались: ${fmt.num(f.failed)}`]);
+    if (f.deferred) out.push(['wait', `ждут Яндекса: ${fmt.num(f.deferred)}`]);
+    if (!out.length) out.push(['', `в очереди: ${fmt.num(f.waiting)}`]);
+    return out;
   }
 
   function folderRow(f, title) {
-    const [cls, text] = folderBadge(f);
+    const badges = folderBadges(f).map(([cls, text]) => `<span class="badge ${cls}">${esc(text)}</span>`).join('');
     const seg = (c, n) => `<span class="${c}" style="width:${fmt.pct(n, f.files).toFixed(2)}%"></span>`;
     const bar = f.files ? `<div class="bar thin" role="img" aria-label="Скачано ${f.done} из ${f.files}">${
       seg('done', f.done)}${seg('work', f.waiting)}${seg('wait', f.deferred)}${seg('fail', f.failed)}</div>` : '';
@@ -99,7 +103,7 @@
     } else if (f.complete && f.on_disk === false) {
       tail = '<span class="tiny">в папке скачивания её уже нет</span>';
     }
-    return `<li class="fp-row"><div class="fp-top">${name}<span class="badge ${cls}">${esc(text)}</span></div>${bar}
+    return `<li class="fp-row"><div class="fp-top">${name}<span class="fp-badges">${badges}</span></div>${bar}
       <div class="fp-meta"><span>${meta}</span>${tail}</div></li>`;
   }
 

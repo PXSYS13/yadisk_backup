@@ -665,6 +665,7 @@ table.list td.name{word-break:break-all}
 .fp-name{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:100%;font-size:15px;font-weight:500;color:var(--text)}
 button.fp-name{min-height:36px;color:var(--link);text-align:left}
 .fp-name .i{width:16px;height:16px;flex:none}
+.fp-badges{display:inline-flex;flex-wrap:wrap;gap:6px}
 span.fp-name .i{color:var(--text-3)}
 .fp-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .fp-meta{display:flex;align-items:center;justify-content:space-between;gap:6px 12px;flex-wrap:wrap;font-size:13px;color:var(--text-3)}
