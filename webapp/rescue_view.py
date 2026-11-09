@@ -126,6 +126,26 @@ def source_live(name: str, tasks: dict, branch_state: str | None, rate: dict | N
     }
 
 
+RENEWED_TEXT = {"token": "Ключ обновлён — можно продолжать",
+                "cookies": "Доступ к Безлимиту обновлён — можно продолжать"}
+
+
+def access_renewed(action: str, branch: dict | None, token: dict, cookies: dict) -> bool:
+    """Доступ, на котором остановился запуск, уже заменён рабочим.
+
+    Ключ к Диску проверяется у Яндекса при каждом опросе. Данные входа для Безлимита
+    Яндекс проверяет при сохранении, а здесь видно только файл: годятся те, что
+    сохранены позже отказа. Без этого человек сохранял новый вход, а Главная всё так же
+    просила «Обновить доступ» — и вела в Настройки по кругу.
+    """
+    if action == "token":
+        return bool(token.get("ok"))
+    if action == "cookies":
+        since = float((branch or {}).get("state_since") or 0)
+        return bool(cookies.get("ok")) and float(cookies.get("saved_at") or 0) > since
+    return False
+
+
 def waits_for_person(branch: dict | None) -> bool:
     """Запуск остановился на этой части и ждёт человека: новый ключ, место, папки или отчёт."""
     return bool(branch) and branch.get("state") in ("needs_action", "error")
@@ -273,16 +293,15 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
 
     # Что нужно от человека
     action_id, action_source = None, None
-    key_renewed = False
+    key_renewed = ""  # «… обновлён — можно продолжать», когда отклонённый доступ уже заменили
     for name in ("disk", "unlim"):
         a = sources[name].get("action")
         if a and sources[name]["state"] in ("needs_action", "error"):
-            if a == "token" and not running and token.get("ok"):
-                # Запуск закончился на отклонённом ключе, а человек уже ввёл рабочий: дальше —
-                # «Продолжить», а не снова «Получить новый ключ». Доступ к Безлимиту так не узнать:
-                # его проверка смотрит только на файл, а не на то, пускает ли Яндекс
-                key_renewed = True
-                sources[name].update(state="stopped", action=None, reason="Ключ обновлён — можно продолжать")
+            if not running and access_renewed(a, branches.get(name), token, cookies):
+                # Запуск закончился на отклонённом ключе или входе, а человек уже ввёл новый: дальше —
+                # «Продолжить», а не снова «Обновить доступ» по кругу
+                key_renewed = RENEWED_TEXT[a]
+                sources[name].update(state="stopped", action=None, reason=key_renewed)
                 continue
             action_id, action_source = a, name
             break
@@ -374,7 +393,7 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
             subline = (f"Сохранено {files_text(totals['done'])}. Не скачались: {files_text(totals['failed'])}"
                        + (f", ждут Яндекса: {files_text(totals['deferred'])}" if totals["deferred"] else ""))
     elif state == "stopped" and key_renewed:
-        headline = "Ключ обновлён — можно продолжать"
+        headline = key_renewed
         subline = "Нажмите «Продолжить»: программа докачает остальное с того же места. Уже скачанное сохранено."
     elif state == "stopped":
         headline = "Скачивание на паузе"

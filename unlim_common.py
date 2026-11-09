@@ -104,6 +104,18 @@ def missing_required_cookies(cookies: list) -> list[str]:
     return [n for n in REQUIRED_COOKIES if n not in names]
 
 
+def foreign_cookie_domains(cookies: list) -> list[str]:
+    """Домены, с которых пришли обязательные куки, когда ни одна из них не с yandex.ru.
+
+    Пусто — всё в порядке. Иначе человек скопировал вход с yandex.com, .kz, .by или
+    другого сайта: на disk.yandex.ru такая сессия не действует.
+    """
+    required = [c for c in cookies if isinstance(c, dict) and c.get("name") in REQUIRED_COOKIES]
+    if not required or any(is_yandex_ru_domain(c.get("domain")) for c in required):
+        return []
+    return sorted({str(c.get("domain")).lstrip(".") for c in required})
+
+
 def load_cookies(cookies_file: str | None = None) -> dict[str, str]:
     """Загружает куки из cookies.json (формат Cookie-Editor)."""
     path = cookies_file or COOKIES_FILE
@@ -116,13 +128,38 @@ def load_cookies(cookies_file: str | None = None) -> dict[str, str]:
         raw = json.load(f)
     if not isinstance(raw, list):
         raise CookiesFormatError("cookies.json должен быть массивом (формат Cookie-Editor)")
+    return cookies_dict(raw)
+
+
+def is_yandex_ru_domain(domain) -> bool:
+    """Кука с домена yandex.ru (или без домена): только такие пускают на disk.yandex.ru."""
+    if not isinstance(domain, str) or not domain:
+        return True
+    d = domain.strip().lstrip(".").lower()
+    return d == "yandex.ru" or d.endswith(".yandex.ru")
+
+
+def cookies_dict(raw: list) -> dict[str, str]:
+    """Имя → значение из массива формата Cookie-Editor.
+
+    Экспорт из браузера может нести одноимённые куки разных доменов (yandex.ru и
+    yandex.com, kz, by): сессия чужого домена на disk.yandex.ru не действует, поэтому
+    при повторе имени побеждает кука домена yandex.ru, а не последняя в списке.
+    """
     res: dict[str, str] = {}
+    from_ru: set[str] = set()
     for c in raw:
-        if isinstance(c, dict):
-            name = c.get("name")
-            value = c.get("value")
-            if isinstance(name, str) and isinstance(value, str) and name and value:
-                res[name] = value
+        if not isinstance(c, dict):
+            continue
+        name, value = c.get("name"), c.get("value")
+        if not (isinstance(name, str) and isinstance(value, str) and name and value):
+            continue
+        ru = is_yandex_ru_domain(c.get("domain"))
+        if name in from_ru and not ru:
+            continue
+        res[name] = value
+        if ru:
+            from_ru.add(name)
     return res
 
 

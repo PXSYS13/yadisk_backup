@@ -213,6 +213,21 @@ def test_new_key_after_a_finished_run_offers_to_continue():
     assert r["state"] == "needs_action" and r["action"]["id"] == "cookies"
 
 
+def test_new_cookies_after_a_rejected_run_offer_to_continue():
+    # Яндекс отверг вход в 150, человек сохранил новые данные в 300: Главная больше не гоняет
+    # его «Обновить доступ» по кругу, а зовёт «Продолжить»
+    unlim = {"state": "needs_action", "action": "cookies", "state_since": 150.0}
+    r = build(rescue_st(state="failed", unlim=unlim), unlim_db=db(total=10, downloaded=5, pending=5),
+              cookies={"ok": True, "saved_at": 300.0})
+    assert r["state"] == "stopped" and r["action"] is None
+    assert r["headline"] == "Доступ к Безлимиту обновлён — можно продолжать"
+    assert r["sources"]["unlim"]["action"] is None
+    # Файл старше отказа — это те же отвергнутые куки: просим обновить
+    r = build(rescue_st(state="failed", unlim=unlim), unlim_db=db(total=10, downloaded=5, pending=5),
+              cookies={"ok": True, "saved_at": 100.0})
+    assert r["action"]["id"] == "cookies"
+
+
 def test_run_with_nothing_to_download_still_asks_for_setup():
     # Запуск не нашёл, что качать: ни одна часть не начинала — это по-прежнему первая настройка
     r = build(rescue_st(state="failed"), token=NO, cookies=NO)

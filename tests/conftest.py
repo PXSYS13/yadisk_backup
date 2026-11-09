@@ -40,6 +40,9 @@ def _isolate_project_files(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp.updates, "RELEASES_URL", "")
     monkeypatch.setattr(webapp.updates, "_state", {"asked_at": None, "latest": None, "busy": False})
     monkeypatch.setattr(webapp.updates, "_thread", None)
+    # Сохранение кук спрашивает Яндекс, пускает ли он с ними: в тестах — без сети, «пускает»
+    import webapp.access
+    monkeypatch.setattr(webapp.access, "get_sk_uid", lambda s: ("sk", "1"))
     # Настройки, которые программа пишет прямо в os.environ: после теста — как было.
     # Пустое значение = «по умолчанию» (всё качать, превью включены, демо выключено)
     for key in ("BACKUP_SOURCES", "BACKUP_CATEGORIES", "BACKUP_DISK_FOLDERS", "GENTLE_MODE",

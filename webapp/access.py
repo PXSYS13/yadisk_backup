@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 
@@ -17,7 +18,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from downloader import account_info, api_error_details, make_browse_client
-from unlim_common import missing_required_cookies
+from unlim_common import (AuthExpiredError, cookies_dict, foreign_cookie_domains, get_sk_uid, make_session,
+                          missing_required_cookies)
 from webapp import config, paths
 
 log = logging.getLogger("webui")
@@ -28,6 +30,20 @@ router = APIRouter()
 _token_check_cache: dict = {"token": None, "at": 0, "data": None}
 _TOKEN_TTL = 30  # секунд
 _token_refreshing = threading.Event()
+
+
+def normalize_token(raw: str) -> str:
+    """Ключ из того, что человек вставил: сам ключ, «OAuth …», адрес страницы с #access_token=….
+
+    Люди копируют адрес из строки браузера целиком, приставку «OAuth» из примеров или
+    ключ с переносом строки посередине — Яндекс такой не принимает.
+    """
+    text = (raw or "").strip().strip("'\"«»").strip()
+    m = re.search(r"access_token=([^&#\s]+)", text)
+    if m:
+        text = m.group(1)
+    text = re.sub(r"^(?:oauth|bearer)\s+", "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", "", text)
 
 
 def check_token(token: str) -> dict:
@@ -99,7 +115,77 @@ def cookies_report(arr: list) -> dict:
                 "msg": f"Не хватает кук: {', '.join(missing)}. "
                        f"Залогинься в браузере на disk.yandex.ru и заэкспортируй заново.",
                 "count": len(arr)}
+    foreign = foreign_cookie_domains(arr)
+    if foreign:
+        return {"ok": False,
+                "msg": f"Данные входа скопированы с {', '.join(foreign)}, а нужны с disk.yandex.ru. "
+                       f"Откройте именно disk.yandex.ru, войдите и скопируйте заново.",
+                "count": len(arr)}
     return {"ok": True, "msg": f"Куки OK ({len(arr)} шт)", "count": len(arr)}
+
+
+def parse_cookies_text(text: str) -> list | None:
+    """Массив кук из вставленного текста: JSON Cookie-Editor, Header String или Netscape.
+
+    None — ничего похожего на куки. Cookie-Editor по умолчанию предлагает разные
+    форматы, и люди вставляли «Header String» или файл cookies.txt — раньше это
+    отвергалось как «не похоже на экспорт».
+    """
+    text = (text or "").strip().lstrip(chr(0xFEFF)).strip()  # BOM из Блокнота
+    if not text:
+        return None
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        raw = None
+    if isinstance(raw, dict) and isinstance(raw.get("cookies"), list):
+        raw = raw["cookies"]
+    if isinstance(raw, list):
+        return raw
+    if raw is not None:
+        return None
+    rows: list = []
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if any(ln.count("\t") >= 6 for ln in lines):
+        for ln in lines:
+            if ln.startswith("#") and not ln.startswith("#HttpOnly_"):
+                continue
+            parts = ln.split("\t")
+            if len(parts) >= 7:
+                domain = parts[0].removeprefix("#HttpOnly_")
+                rows.append({"name": parts[5].strip(), "value": parts[6].strip(), "domain": domain})
+        return rows or None
+    header = re.sub(r"^cookie:\s*", "", " ".join(lines), flags=re.IGNORECASE)
+    for part in header.split(";"):
+        name, eq, value = part.strip().partition("=")
+        if eq and name and " " not in name:
+            rows.append({"name": name, "value": value.strip()})
+    return rows or None
+
+
+def verify_cookies(arr: list) -> dict:
+    """Пускает ли Яндекс с этими куками: та же страница, с которой начинает работу Безлимит.
+
+    ok=False + rejected — Яндекс явно не пустил (вход завершён, не тот аккаунт или сайт);
+    ok=True + unreachable — проверить не удалось (сбой, сеть): сохраняем, проверит скачивание.
+    """
+    try:
+        s = make_session(cookies_dict(arr))
+        try:
+            get_sk_uid(s)
+        finally:
+            s.close()
+    except AuthExpiredError:
+        log.warning("куки отклонены Яндексом при сохранении")
+        return {"ok": False, "rejected": True,
+                "msg": "Яндекс не пустил с этими данными входа: вход в браузере уже завершён или "
+                       "скопировано не с того сайта. Откройте disk.yandex.ru, проверьте, что вы вошли в свой "
+                       "аккаунт, и скопируйте данные заново."}
+    except Exception as e:  # noqa: BLE001 — сеть, 50x, изменённая страница: это не «плохие куки»
+        log.warning("проверка кук не удалась: %s: %s", type(e).__name__, e)
+        return {"ok": True, "unreachable": True,
+                "msg": "Яндекс сейчас не ответил на проверку — сохранил, проверю при скачивании"}
+    return {"ok": True, "msg": "Яндекс пускает с этими данными входа"}
 
 
 def check_cookies() -> dict:
@@ -111,7 +197,13 @@ def check_cookies() -> dict:
         return {"ok": False, "msg": f"Ошибка: {e}", "count": 0}
     if not isinstance(raw, list):
         return {"ok": False, "msg": "Формат не Cookie-Editor", "count": 0}
-    return cookies_report(raw)
+    rep = cookies_report(raw)
+    try:
+        # Когда сохранены: доступ, который запуск отверг, снова годен, только если файл новее отказа
+        rep["saved_at"] = paths.COOKIES_FILE.stat().st_mtime
+    except OSError:
+        pass
+    return rep
 
 
 def onboarding_state(cfg: dict, token: dict, cookies: dict, disk_db: dict, unlim_db: dict) -> dict:
@@ -186,18 +278,19 @@ class TokenPayload(BaseModel):
 
 
 class CookiesPayload(BaseModel):
-    cookies: list
+    cookies: list | None = None
+    text: str | None = None  # вставленный как есть: JSON, Header String или cookies.txt
 
 
 @router.post("/api/config/token/check")
 def api_check_token(payload: TokenPayload):
     """Проверка без сохранения."""
-    return check_token((payload.token or "").strip())
+    return check_token(normalize_token(payload.token))
 
 
 @router.post("/api/config/token")
 def api_set_token(payload: TokenPayload):
-    token = (payload.token or "").strip()
+    token = normalize_token(payload.token)
     if not token:
         raise HTTPException(400, "Пустой токен")
     config.env_set("YA_DISK_TOKEN", token)
@@ -227,10 +320,16 @@ def api_clear_token():
 @router.post("/api/cookies")
 def api_set_cookies(payload: CookiesPayload):
     """Сохраняет cookies.json атомарно через tmp+replace с предварительной валидацией."""
-    val = cookies_report(payload.cookies)
+    arr = payload.cookies if payload.cookies is not None else parse_cookies_text(payload.text or "")
+    if arr is None:
+        raise HTTPException(400, "Это не похоже на данные входа. В Cookie-Editor нажмите Export → "
+                                 "Export as JSON и вставьте сюда целиком")
+    val = cookies_report(arr)
     if not val.get("ok"):
         raise HTTPException(400, val.get("msg", "Невалидные cookies"))
-    arr = payload.cookies
+    live = verify_cookies(arr)
+    if not live.get("ok"):
+        raise HTTPException(400, live["msg"])
     tmp = paths.COOKIES_FILE.with_suffix(".json.tmp")
     try:
         tmp.write_text(json.dumps(arr, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -245,7 +344,7 @@ def api_set_cookies(payload: CookiesPayload):
         raise HTTPException(500, f"Не удалось сохранить cookies.json: {e}")
     log.info("cookies сохранены: %d шт", len(arr))
     _resume_branch("unlim")
-    return {"ok": True, "check": check_cookies(), "saved_count": len(arr)}
+    return {"ok": True, "check": check_cookies(), "saved_count": len(arr), "live": live}
 
 
 @router.post("/api/cookies/clear")

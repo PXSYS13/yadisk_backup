@@ -771,18 +771,20 @@
     const root = accessRoot(btn);
     const raw = field(root, 'cookies-input').value.trim();
     if (!raw) return { ok: false, error: 'Вставьте данные из Cookie-Editor (Export → Export as JSON)' };
-    let cookies;
-    try { cookies = JSON.parse(raw); } catch (e) {
-      return { ok: false, error: 'Это не похоже на экспорт Cookie-Editor: скопируйте через Export → Export as JSON' };
-    }
-    if (!Array.isArray(cookies)) return { ok: false, error: 'Нужен список из Cookie-Editor (Export as JSON)' };
-    const res = await App.api.post('/api/cookies', { cookies });
+    // Формат разбирает сервер: JSON, Header String и cookies.txt — и сразу спрашивает Яндекс,
+    // пускает ли он с этими данными
+    App.text(field(root, 'cookies-result'), 'Проверяю у Яндекса…');
+    const res = await App.api.post('/api/cookies', { text: raw });
     if (res.ok) {
       field(root, 'cookies-input').value = '';
-      App.text(field(root, 'cookies-result'), 'Сохранено');
+      const live = (res.data || {}).live || {};
+      App.text(field(root, 'cookies-result'), live.unreachable
+        ? 'Сохранено. Яндекс сейчас не ответил на проверку — проверю при скачивании.'
+        : 'Сохранено: Яндекс пускает с этими данными');
       root.dispatchEvent(new CustomEvent('access-saved', { bubbles: true, detail: { kind: 'cookies' } }));
       return { ok: true, data: { msg: 'Доступ к Безлимиту сохранён' } };
     }
+    App.text(field(root, 'cookies-result'), '');
     return res;
   }));
 
