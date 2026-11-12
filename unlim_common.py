@@ -54,7 +54,9 @@ CREATE TABLE IF NOT EXISTS unlim_files (
     assigned_at TIMESTAMP,
     downloaded_at TIMESTAMP,
     storage_host TEXT,
-    preview_path TEXT
+    preview_path TEXT,
+    file_time REAL,
+    dated REAL
 );
 CREATE INDEX IF NOT EXISTS idx_unlim_status ON unlim_files(status);
 CREATE TABLE IF NOT EXISTS unlim_clusters (
@@ -323,7 +325,8 @@ def _add_column(c: sqlite3.Connection, ddl: str) -> None:
 
 
 def ensure_unlim_schema(db_path: str | None = None) -> None:
-    """Миграция старых БД: колонки attempts и storage_host, индекс, таблица unlim_meta.
+    """Миграция старых БД: колонки attempts, storage_host, preview_path, file_time и dated,
+    индекс, таблица unlim_meta.
 
     Воркеры стартуют одновременно и зовут её параллельно — это безопасно.
     """
@@ -338,6 +341,11 @@ def ensure_unlim_schema(db_path: str | None = None) -> None:
             _add_column(c, "ALTER TABLE unlim_files ADD COLUMN storage_host TEXT")
         if cols and "preview_path" not in cols:
             _add_column(c, "ALTER TABLE unlim_files ADD COLUMN preview_path TEXT")
+        # file_time — дата для копии (съёмки или загрузки, секунды эпохи); dated — с какой
+        # file_time уже сверили дату скачанной копии (file_dates)
+        for col in ("file_time", "dated"):
+            if cols and col not in cols:
+                _add_column(c, f"ALTER TABLE unlim_files ADD COLUMN {col} REAL")
         if {"status", "attempts", "assigned_at"}.issubset(cols):
             c.execute("CREATE INDEX IF NOT EXISTS idx_unlim_pending ON unlim_files(status, attempts, assigned_at)")
         # Общие для всех воркеров значения: пауза по 429, молчащие серверы хранения

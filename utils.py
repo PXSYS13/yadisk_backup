@@ -38,7 +38,7 @@ CASE_INSENSITIVE_PATHS = IS_WINDOWS or sys.platform == "darwin"
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
-APP_VERSION = "2.8.8"
+APP_VERSION = "2.8.9"
 
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 
@@ -117,12 +117,12 @@ def remove_preview(preview_path: str | None, download_dir: str) -> bool:
     try:
         root = os.path.abspath(os.path.join(_strip_long_prefix(download_dir), PREVIEW_DIRNAME))
         target = os.path.abspath(_strip_long_prefix(preview_path))
-        if not _inside(target, root):
+        if not is_inside(target, root):
             root = _own_previews_root(target) or root
-        if not target.lower().endswith(".jpg") or not _inside(target, root):
+        if not target.lower().endswith(".jpg") or not is_inside(target, root):
             return False
         long_target = to_long_path(target)  # без \\?\ realpath глубокого пути в Windows падает
-        if not _inside(_strip_long_prefix(os.path.realpath(long_target)),
+        if not is_inside(_strip_long_prefix(os.path.realpath(long_target)),
                        _strip_long_prefix(os.path.realpath(to_long_path(root)))):
             return False  # подпапка _превью ведёт ссылкой в другое место
         if os.path.lexists(long_target):
@@ -153,7 +153,7 @@ def _own_previews_root(target: str) -> str | None:
     return None
 
 
-def _inside(path: str, root: str) -> bool:
+def is_inside(path: str, root: str) -> bool:
     """path лежит внутри root, но не равен ему (регистр — как у файловой системы)."""
     p, r = path_key(path), path_key(root)
     try:
@@ -165,7 +165,7 @@ def _inside(path: str, root: str) -> bool:
 def _remove_empty_dirs(start: str, root: str) -> None:
     """Удаляет пустые папки от start вверх, не доходя до root. Первая непустая — стоп."""
     d = start
-    while _inside(d, root):
+    while is_inside(d, root):
         try:
             os.rmdir(to_long_path(d))
         except FileNotFoundError:

@@ -18,6 +18,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from file_dates import DateRow
 from utils import (
     MAX_NAME_LEN,
     legacy_local_path,
@@ -82,6 +83,15 @@ DEFERRED_MARKER = "storage_down | "
 # Сколько строк очереди get_pending читает за раз
 PENDING_CHUNK = 500
 
+# Скачанные (и найденные в папке при докачке) файлы с датой от Яндекса, ещё не сверенной
+# с копией. Найденный в папке — только сверенный по MD5: без него совпал лишь размер, и это
+# может быть файл, который человек менял. Снятые выбором (skipped с маркером) не попадают
+_DATES_TO_CHECK = (
+    "modified IS NOT NULL AND local_path IS NOT NULL AND local_path <> '' "
+    "AND (status = 'downloaded' OR (status = 'skipped' AND error IS NULL AND md5 IS NOT NULL)) "
+    "AND (dated IS NULL OR dated <> modified)"
+)
+
 # Маркеры в колонке error: файл снят выбором человека, и это обратимо. Ставит и
 # снимает их webui.py; сбор списка обновляет у таких строк размер и MD5, но не статус
 CATEGORY_SKIP_MARKER = "not in selected categories"
@@ -129,8 +139,10 @@ class State:
             conn = self._conn()
             conn.executescript(SCHEMA)
             cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
-            # modified — когда файл менялся на Диске (секунды эпохи): то же время получает копия
-            for col, kind in (("storage_host", "TEXT"), ("preview_path", "TEXT"), ("modified", "REAL")):
+            # modified — когда файл менялся на Диске (секунды эпохи): то же время получает копия.
+            # dated — modified, с которым уже сверили дату скачанной копии (file_dates)
+            for col, kind in (("storage_host", "TEXT"), ("preview_path", "TEXT"), ("modified", "REAL"),
+                              ("dated", "REAL")):
                 if col in cols:
                     continue
                 try:
@@ -332,6 +344,36 @@ class State:
             for rid in chunk:
                 if rid in rows:
                     yield rows[rid]
+
+    def dates_to_check(self) -> Iterator[list[DateRow]]:
+        """Скачанные файлы, чью дату ещё не сверяли с Яндексом (file_dates), — порциями.
+
+        Каждая порция — отдельный короткий запрос по возрастанию rowid: курсор не держит
+        снимок базы весь проход, память не растёт с размером Диска, а строки «посмотреть
+        в следующий раз» за один проход не читаются дважды. Сверенную строку помечает
+        mark_dated; новая дата с Яндекса (сбор списка обновил modified) — повод сверить снова.
+        """
+        conn = self._conn()
+        last = 0
+        while True:
+            rows = conn.execute(
+                "SELECT rowid, remote_path, local_path, size, modified, downloaded_at FROM files "
+                f"WHERE {_DATES_TO_CHECK} AND rowid > ? ORDER BY rowid LIMIT ?",
+                (last, PENDING_CHUNK),
+            ).fetchall()
+            if not rows:
+                return
+            last = rows[-1]["rowid"]
+            yield [DateRow(r["remote_path"], r["local_path"], r["size"], r["modified"], r["downloaded_at"])
+                   for r in rows]
+
+    def mark_dated(self, items: Iterable[tuple[float | None, str]]) -> None:
+        """Дату копии сверили с Яндексом: items — (modified на момент сверки, remote_path)."""
+        items = list(items)
+        if not items:
+            return
+        with self._tx() as conn:
+            conn.executemany("UPDATE files SET dated = ? WHERE remote_path = ?", items)
 
     def get_pending_stats(self) -> dict[str, int]:
         """Быстро возвращает количество и сумму байт pending файлов."""

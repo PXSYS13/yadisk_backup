@@ -354,6 +354,41 @@ def test_changed_photo_goes_back_to_the_queue(unlim_db):
     assert tuple(row) == ("pending", 12, "b" * 32)
 
 
+def test_listing_keeps_the_date_the_copy_will_get(unlim_db):
+    """Дата съёмки (etime), а без неё — когда фото загрузили (mtime): её получит скачанная копия."""
+    ud = unlim_db
+    shot, uploaded = 1_439_180_741, 1_628_085_980
+    ud.save_listed_files([
+        dict(_unlim_item("a.jpg", 10), etime=shot, mtime=uploaded, ctime=uploaded),
+        dict(_unlim_item("b.jpg", 10), mtime=uploaded, meta=dict(_unlim_item("b.jpg", 10)["meta"], etime=shot)),
+        dict(_unlim_item("c.mp4", 20), mtime=uploaded),  # видео без даты съёмки
+        dict(_unlim_item("d.jpg", 30), etime=0, mtime="мусор"),
+        _unlim_item("e.jpg", 40),  # ответ без дат
+    ])
+    times = {name: when for name, when in ud.db().execute("SELECT name, file_time FROM unlim_files")}
+    assert times == {"a.jpg": shot, "b.jpg": shot, "c.mp4": uploaded, "d.jpg": None, "e.jpg": None}
+    ud.save_listed_files([_unlim_item("a.jpg", 10)])  # повтор без дат прежнюю не стирает
+    assert ud.db().execute("SELECT file_time FROM unlim_files WHERE name='a.jpg'").fetchone()[0] == shot
+
+
+def test_listing_asks_yandex_for_the_shot_date():
+    import unlim_download as ud
+    assert "etime" in ud.LIST_META.split(",")
+
+
+def test_old_unlim_db_gets_the_date_columns(tmp_path):
+    db = tmp_path / "unlim_state.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE unlim_files (file_id TEXT PRIMARY KEY, name TEXT, size INTEGER, status TEXT)")
+    con.commit()
+    con.close()
+    uc.ensure_unlim_schema(str(db))
+    con = sqlite3.connect(db)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(unlim_files)")}
+    con.close()
+    assert {"file_time", "dated"} <= cols
+
+
 def test_collect_reports_a_full_disk_not_a_yandex_outage(unlim_db, monkeypatch, capsys):
     """База не записалась посреди списка (место кончилось): код 4 и «local_disk», а не «Яндекс не отвечает»."""
     import sqlite3

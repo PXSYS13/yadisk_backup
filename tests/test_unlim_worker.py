@@ -1199,6 +1199,125 @@ def test_direct_batch_downloads_each_file(db, quiet_worker, dirs, capsys):
     assert "batch 1: ✓ 2/2 files / 0.00 GB" in capsys.readouterr().out
 
 
+SHOT = 1_439_180_741  # дата съёмки фото по Яндексу (etime)
+
+
+def _set_rows(db_path, sql, params=()):
+    con = sqlite3.connect(db_path)
+    con.execute(sql, params)
+    con.commit()
+    con.close()
+
+
+def test_direct_download_gets_the_shot_date(db, quiet_worker, dirs):
+    _set_rows(db, "UPDATE unlim_files SET file_time = ? WHERE file_id = '1'", (SHOT,))
+    w = quiet_worker
+    w.session = _DirectSession({"1": b"a" * 10, "2": b"b" * 20})
+    batch = uw.take_batch(1, size=10)
+    assert [it["file_time"] for it in batch] == [SHOT, None]
+    w.batch_idx = 1
+    w._process(batch)
+    assert abs(os.path.getmtime(dirs / "a.jpg") - SHOT) < 2
+    assert time.time() - os.path.getmtime(dirs / "b.jpg") < 600  # Яндекс даты не сказал — как есть
+
+
+def test_take_batch_works_on_a_db_without_date_columns(db):
+    assert [it["file_time"] for it in uw.take_batch(1, size=10)] == [None, None]
+
+
+def _downloaded_photo(db, dirs, mtime):
+    uw.ensure_attempts_column()
+    dirs.mkdir(parents=True, exist_ok=True)
+    photo = dirs / "a.jpg"
+    photo.write_bytes(b"a" * 10)
+    os.utime(photo, (mtime, mtime))
+    _set_rows(db, "UPDATE unlim_files SET status='downloaded', local_path=?, file_time=?, "
+                  "downloaded_at=CURRENT_TIMESTAMP WHERE file_id='1'", (str(photo), SHOT))
+    return photo
+
+
+def test_restore_dates_returns_the_shot_date_to_photos_saved_before(db, dirs):
+    """До 2.8.9 Безлимит дат не ставил: у скачанных фото — дата скачивания."""
+    photo = _downloaded_photo(db, dirs, time.time() - 3600)
+    assert uw.restore_dates() == 1
+    assert abs(photo.stat().st_mtime - SHOT) < 2
+    assert uw.restore_dates() == 0  # строка помечена — второй раз не смотрим
+
+
+def test_restore_dates_skips_when_the_folder_is_missing(db, dirs):
+    photo = _downloaded_photo(db, dirs, time.time() - 3600)
+    photo.unlink()
+    dirs.rmdir()
+    assert uw.restore_dates() == 0
+    con = sqlite3.connect(db)
+    assert con.execute("SELECT dated FROM unlim_files WHERE file_id='1'").fetchone()[0] is None
+    con.close()
+
+
+def test_only_the_first_worker_returns_dates(monkeypatch, capsys):
+    import file_dates
+    calls = []
+    monkeypatch.setattr(uw, "restore_dates", lambda say=None: calls.append(1) or 2)
+    uw._restore_dates(uw.Worker(2, 1), 0)
+    uw._restore_dates(uw.Worker(1, 1), uw.EXIT_DISK_FULL)
+    assert calls == []
+    uw._restore_dates(uw.Worker(1, 1), uw.EXIT_DEFERRED)
+    assert calls == [1]
+    out = capsys.readouterr().out
+    assert file_dates.restored_count(out.splitlines()) == 2 and file_dates.restored_text(2) in out
+
+
+def test_zip_batch_files_get_the_shot_date(db, quiet_worker, dirs):
+    dirs.mkdir(parents=True)
+    photo = dirs / "a.jpg"
+    photo.write_bytes(b"a" * 10)
+    batch = [{"file_id": "1", "name": "a.jpg", "size": 10, "file_time": SHOT}]
+    quiet_worker._on_batch_success(batch, uw.SplitResult(["1"], [], {"1": str(photo)}), dur=1.0)
+    assert status_of(db, "1")[0] == "downloaded"
+    assert abs(photo.stat().st_mtime - SHOT) < 2
+
+
+def test_restore_dates_never_breaks_the_worker(db, dirs, monkeypatch):
+    _downloaded_photo(db, dirs, time.time() - 3600)
+
+    def locked(items):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(uw, "mark_dated", locked)
+    assert uw.restore_dates() == 0
+
+
+def test_worker_returns_dates_even_when_it_exits_early(db, dirs, monkeypatch):
+    """Воркер вышел через _exit (отложенные час не отвечали, Яндекс недоступен) — даты всё равно."""
+    import argparse
+
+    codes = []
+    monkeypatch.setattr(uw, "_restore_dates", lambda worker, code: codes.append(code))
+    monkeypatch.setattr(uw.Worker, "authorize", lambda self: None)
+
+    def give_up(self):
+        raise SystemExit(uw.EXIT_DEFERRED)
+
+    monkeypatch.setattr(uw.Worker, "run", give_up)
+    with pytest.raises(SystemExit):
+        uw._main_run(uw.Worker(1, 1), argparse.Namespace(retry_failed=False, wait=False))
+    assert codes == [uw.EXIT_DEFERRED]
+
+
+def test_wait_rounds_return_dates_after_every_round(monkeypatch):
+    codes = iter([uw.EXIT_DEFERRED, 0])
+    seen = []
+    monkeypatch.setattr(uw.Worker, "authorize", lambda self: None)
+    monkeypatch.setattr(uw.Worker, "run", lambda self: next(codes))
+    monkeypatch.setattr(uw, "_restore_dates", lambda worker, code: seen.append(code))
+    monkeypatch.setattr(uw, "count_deferred", lambda db: 0)
+    monkeypatch.setattr(uw, "clear_dead_hosts", lambda db: 0)
+    monkeypatch.setattr(uw, "recover_stuck", lambda worker_id=None: 0)
+    monkeypatch.setattr(uw, "retry_every_sec", lambda: 0)
+    assert uw._run_rounds(uw.Worker(1)) == 0
+    assert seen == [uw.EXIT_DEFERRED, 0]
+
+
 def test_direct_failure_keeps_done_files_and_returns_the_rest(db, quiet_worker, dirs):
     con = sqlite3.connect(db)
     con.execute("INSERT INTO unlim_files (file_id, name, size) VALUES ('3', 'c.jpg', 5)")

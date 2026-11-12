@@ -27,6 +27,7 @@ import time
 
 from tqdm import tqdm
 
+from file_dates import plausible
 from unlim_common import (
     DOWNLOAD_DIR,
     LOG_DIR,
@@ -65,7 +66,8 @@ CLUSTER_BATCH = 15
 # Безлимит во внутреннем API Диска (mpfs); фотосрез называет те же файлы «photounlim:/имя»
 UNLIM_ROOT = "/photounlim"
 LIST_PAGE = 1000
-LIST_META = "size,md5,mimetype,mediatype"
+# etime — когда снято фото или видео: эту дату получит скачанная копия (file_dates)
+LIST_META = "size,md5,mimetype,mediatype,etime"
 # Страница списка не пришла и после повторов api_call: ещё попытки через столько секунд.
 # Иначе один сбой Яндекса посреди большого безлимита начинал весь сбор заново
 LIST_PAGE_PAUSES = (30, 60)
@@ -141,12 +143,22 @@ def list_unlim_page(s, sk, uid, offset: int, amount: int = LIST_PAGE) -> list[di
     return data
 
 
+def listed_time(item: dict) -> float | None:
+    """Дата для скачанной копии: когда снято (etime), а без неё — когда загружено или менялось (mtime).
+
+    По дате съёмки Яндекс сам раскладывает фото и видео в «Фото»; загружают их в Безлимит
+    часто годы спустя. Других дат mpfs не знает: исходной даты с телефона у Яндекса нет.
+    """
+    meta = item.get("meta") or {}
+    return plausible(item.get("etime") or meta.get("etime")) or plausible(item.get("mtime"))
+
+
 def save_listed_files(items: list[dict]) -> int:
     """Добавляет файлы из mpfs/list, возвращает число новых.
 
     Уже известный файл (в том числе собранный фотосрезом как 'photounlim:/имя') не
-    дублируется — ему только записываются размер и MD5 из mpfs, они точнее. Скачанный файл,
-    чей MD5 на Диске изменился, возвращается в очередь: бэкап догоняет новую версию.
+    дублируется — ему только записываются размер, MD5 и дата из mpfs, они точнее. Скачанный
+    файл, чей MD5 на Диске изменился, возвращается в очередь: бэкап догоняет новую версию.
     """
     added = 0
     with sqlite_tx(db()) as c:
@@ -158,21 +170,22 @@ def save_listed_files(items: list[dict]) -> int:
             size = int(meta.get("size") or 0)
             md5 = meta.get("md5") or None
             mime = meta.get("mimetype") or meta.get("mediatype")
+            when = listed_time(f)
             alt = unlim_twin(path)
             known = c.execute(
                 "UPDATE unlim_files SET "
                 "status = CASE WHEN status = 'downloaded' AND ? IS NOT NULL AND md5 IS NOT NULL "
                 "AND md5 <> ? THEN 'pending' ELSE status END, "
                 "size = COALESCE(NULLIF(?, 0), size), md5 = COALESCE(?, md5), "
-                "mime = COALESCE(mime, ?) WHERE file_id IN (?, ?)",
-                (md5, md5, size, md5, mime, path, alt),
+                "mime = COALESCE(mime, ?), file_time = COALESCE(?, file_time) WHERE file_id IN (?, ?)",
+                (md5, md5, size, md5, mime, when, path, alt),
             ).rowcount
             if known:
                 continue
             c.execute(
-                "INSERT INTO unlim_files (file_id, name, size, md5, mime, status) "
-                "VALUES (?, ?, ?, ?, ?, 'pending')",
-                (path, f.get("name") or path.rsplit("/", 1)[-1], size, md5, mime),
+                "INSERT INTO unlim_files (file_id, name, size, md5, mime, file_time, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+                (path, f.get("name") or path.rsplit("/", 1)[-1], size, md5, mime, when),
             )
             added += 1
     return added

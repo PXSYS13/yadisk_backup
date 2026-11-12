@@ -16,6 +16,7 @@ from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 
+from file_dates import restored_count, restored_text
 from state import SELECTION_MARKERS
 from unlim_common import clear_dead_hosts, reset_failed_files
 from utils import (
@@ -1072,7 +1073,18 @@ class Rescue:
                               "скачиваю файлы")
         if code != -1:
             self._watch_folders(force=True)
+            self._report_dates(b, SLOT_DISK)
         return code
+
+    def _report_dates(self, b: Branch, slot: str) -> None:
+        """Лента: шаг скачивания вернул файлам даты с Яндекса (строка dates_restored | {json}).
+
+        Человек спрашивал, сохраняются ли даты, — пусть видит это на Главной, а не только в журнале.
+        """
+        n = restored_count(self._task_lines(slot))
+        if n:
+            self._log(f"📅 {b.label}: {restored_text(n)}")
+            self._event(b.name, "ok", restored_text(n))
 
     def _watch_folders(self, force: bool = False) -> None:
         """Лента: «Папка «Фото» скачана целиком» — папка верхнего уровня Диска докачалась.
@@ -1194,6 +1206,8 @@ class Rescue:
         codes = self._wait_workers(res["started"])
         if codes is None:
             return -1
+        if 1 in res["started"]:
+            self._report_dates(b, f"{UNLIM_WORKER_SLOT_PREFIX}1")  # даты возвращает воркер №1
         code = self._combine_worker_codes(codes)
         b.last_exit = {"code": code, "at": time.time(), "step": "скачиваю файлы"}
         if not tm.any_alive(UNLIM_WORKER_SLOT_PREFIX):

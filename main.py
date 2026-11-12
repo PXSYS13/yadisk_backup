@@ -34,11 +34,13 @@ from downloader import (
     RootNotFound,
     download_all,
     make_client,
+    restore_dates,
     scan_exit_code,
     scan_media,
     scan_tree,
     token_state,
 )
+from file_dates import restored_line, restored_text
 from state import State
 from utils import (
     APP_VERSION,
@@ -222,7 +224,21 @@ def _run_download(cfg: dict, state: State, workers: int, wait: bool = False) -> 
               f"сейчас не отвечают. Файлы не потеряны — их скачает следующая попытка.", flush=True)
         if not wait and not under_webui():
             _print_deferred_hint(state)
+    if aborted != "local_disk":
+        _restore_dates(state, cfg["download_dir"])
     return _download_exit_code(counters)
+
+
+def _restore_dates(state: State, download_dir: str) -> None:
+    """Скачанным раньше файлам — дату с Яндекса вместо даты скачивания (см. file_dates).
+
+    Идёт после скачивания, а не до: файлы важнее дат. Строку dates_restored читает Web UI.
+    """
+    n = restore_dates(state, download_dir, say=lambda text: print(text, flush=True))
+    if n:
+        print(restored_text(n), flush=True)
+        print(restored_line(n), flush=True)
+        log.info("даты с Яндекса возвращены: %d файлов", n)
 
 
 def _deferred_text(state: State) -> str:

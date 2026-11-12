@@ -33,6 +33,7 @@ from tenacity import (
 )
 from tqdm import tqdm
 
+from file_dates import restore_all, set_file_time
 from state import DEFERRED_MARKER, State
 from storage_fetch import DeadHosts, FetchFailure, fetch_preview, fetch_to_file, preview_failure_text
 from utils import (
@@ -875,15 +876,18 @@ def _describe_download_error(e: BaseException) -> str:
     return f"{name}: {e}{api}"
 
 
-def _set_mtime(local_path: str, ts: float | None) -> None:
-    """Копии — время изменения файла на Диске, а не время скачивания: так его видят проводник,
-    Finder и сортировка по датам. Не получилось — не беда, файл уже на месте."""
-    if not ts:
-        return
+def restore_dates(state: State, download_dir: str, say: Callable[[str], None] | None = None) -> int:
+    """Возвращает дату с Яндекса скачанным раньше файлам, у которых стоит дата скачивания.
+
+    Так их скачивали версии до 2.8.0 и 2.8.x до первого нового сбора списка (даты в базе
+    ещё не было). Возвращает, сколько файлов получили дату. Папки скачивания нет или она
+    пустая (диск отключён) — ничего не делает (см. file_dates.restore_all). Никогда не бросает.
+    """
     try:
-        os.utime(to_long_path(local_path), (ts, ts))
-    except (OSError, OverflowError, ValueError):
-        pass
+        return restore_all(state.dates_to_check(), state.mark_dated, download_dir, say)
+    except Exception as e:  # noqa: BLE001 — даты не должны ломать шаг скачивания
+        log.warning("даты файлов: %s", e)
+        return 0
 
 
 def _beside(local_path: str, remote_path: str) -> str:
@@ -1013,7 +1017,9 @@ def _download_one(
         if beside and not _is_leftover(local_path, part_path):
             local_path = beside
         os.replace(part_path, to_long_path(local_path))
-        _set_mtime(local_path, job.modified)
+        # Копии — дата изменения файла на Диске, а не время скачивания: так его видят
+        # проводник, Finder и сортировка по датам. Не получилось — не беда, файл на месте
+        set_file_time(local_path, job.modified)
     except StorageUnavailable as e:
         if part_path:
             remove_quiet(part_path)

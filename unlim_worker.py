@@ -40,12 +40,14 @@ import time
 import zipfile
 import zlib
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import closing
 from dataclasses import dataclass
 from typing import NamedTuple
 
 import requests
 
+from file_dates import DateRow, restore_all, restored_line, restored_text, set_file_time
 from storage_fetch import FetchFailure, fetch_preview, fetch_to_file, preview_failure_text
 
 from unlim_common import (
@@ -213,6 +215,7 @@ def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATC
         att_col = "COALESCE(attempts, 0) AS attempts" if has_attempts else "0 AS attempts"
         md5_col = "md5" if "md5" in cols else "NULL AS md5"
         md5_col += ", preview_path" if "preview_path" in cols else ", NULL AS preview_path"
+        md5_col += ", file_time" if "file_time" in cols else ", NULL AS file_time"
         # Файлы молчащих серверов хранения не берём: зря спросили бы ссылку у Яндекса
         dead_filter = ""
         if "storage_host" in cols and _has_meta(c):
@@ -242,7 +245,8 @@ def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATC
             file_size = int(r["size"] or 0)
             attempts = int(r["attempts"] or 0)
             item = {"file_id": r["file_id"], "name": r["name"], "size": file_size,
-                    "md5": r["md5"], "attempts": attempts, "preview_path": r["preview_path"]}
+                    "md5": r["md5"], "attempts": attempts, "preview_path": r["preview_path"],
+                    "file_time": r["file_time"]}
             # Если первый же файл тяжёлый или уже имел сбои — качаем соло (1 файл)
             if not items and (file_size >= LARGE_FILE_THRESHOLD or attempts > 0):
                 items.append(item)
@@ -308,6 +312,59 @@ def mark_done(file_ids: list[str], paths: dict[str, str] | None = None) -> None:
                 if row and row[0]:
                     previews.append((fid, row[0]))
     drop_previews(previews)
+
+
+# Скачанные файлы с датой от Яндекса, ещё не сверенной с копией (file_dates)
+_DATES_TO_CHECK = (
+    "status = 'downloaded' AND file_time IS NOT NULL AND local_path IS NOT NULL AND local_path <> '' "
+    "AND (dated IS NULL OR dated <> file_time)"
+)
+DATES_CHUNK = 500
+
+
+def dates_to_check() -> Iterator[list[DateRow]]:
+    """Скачанные фото и видео, чью дату ещё не сверяли с Яндексом, — порциями.
+
+    Порция — короткое соединение и запрос по возрастанию rowid: снимок базы не держится
+    весь проход, пока остальные воркеры в неё пишут, и память не растёт с размером базы.
+    """
+    last = 0
+    while True:
+        with closing(connect_unlim_db(DB_FILE)) as c:
+            rows = c.execute(
+                "SELECT rowid, file_id, local_path, size, file_time, downloaded_at FROM unlim_files "
+                f"WHERE {_DATES_TO_CHECK} AND rowid > ? ORDER BY rowid LIMIT ?",
+                (last, DATES_CHUNK),
+            ).fetchall()
+        if not rows:
+            return
+        last = rows[-1]["rowid"]
+        yield [DateRow(r["file_id"], r["local_path"], r["size"], r["file_time"], r["downloaded_at"])
+               for r in rows]
+
+
+def mark_dated(items: list[tuple[float | None, str]]) -> None:
+    """Дату копии сверили с Яндексом: items — (file_time на момент сверки, file_id)."""
+    if not items:
+        return
+    with _tx() as c:
+        c.executemany("UPDATE unlim_files SET dated=? WHERE file_id=?", items)
+
+
+def restore_dates(say: Callable[[str], None] | None = None) -> int:
+    """Возвращает дату с Яндекса фото и видео, скачанным без неё (до 2.8.9 Безлимит дат не ставил).
+
+    Сколько файлов получили дату. Папки «_unlim» нет или она пустая (диск отключён, ещё
+    ничего не скачано) — ничего не делает (см. file_dates.restore_all). Никогда не бросает.
+    """
+    try:
+        with closing(connect_unlim_db(DB_FILE)) as c:
+            if not {"file_time", "dated"} <= _columns(c):
+                return 0
+        return restore_all(dates_to_check(), mark_dated, EXTRACT_DIR, say)
+    except Exception as e:  # noqa: BLE001 — даты не должны ломать шаг скачивания
+        log.warning("даты файлов: %s", e)
+        return 0
 
 
 def sweep_previews() -> int:
@@ -1600,6 +1657,7 @@ class Worker:
             return "failed"
 
         size = os.path.getsize(to_long_path(path))
+        set_file_time(path, item.get("file_time"))  # дата съёмки, а не время скачивания
         mark_done([fid], {fid: path})
         self._on_file_done(fid, size)
         return "done"
@@ -1784,6 +1842,10 @@ class Worker:
         if self.batch_size < self.target_batch:
             self.batch_size = min(self.target_batch, self.batch_size + 5)
 
+        # Копиям — дата с Яндекса (съёмки или загрузки), а не время распаковки
+        times = {str(it.get("file_id")): it.get("file_time") for it in batch}
+        for fid, path in res.paths.items():
+            set_file_time(path, times.get(fid))
         # Помечаем downloaded ТОЛЬКО те файлы, которые реально нашлись в архиве.
         # Остальные возвращаем в очередь — иначе бэкап «зелёный», а файлов нет.
         mark_done(res.done, res.paths)
@@ -2003,14 +2065,34 @@ def _main_run(worker: Worker, args: argparse.Namespace) -> int:
         with keep_awake():
             return _run_rounds(worker)
     worker.authorize()
-    code = worker.run()
+    try:
+        code = worker.run()
+    except SystemExit as e:
+        # Выход через _exit (отложенные час не отвечали, Яндекс недоступен): даты — всё равно
+        _restore_dates(worker, e.code if isinstance(e.code, int) else EXIT_PARTIAL)
+        raise
     log.info("worker %d завершён: код %s, %d файлов, %s", worker.id, code,
              worker.total_files, human_bytes(worker.total_bytes))
+    _restore_dates(worker, code)
     if code == EXIT_DEFERRED and not under_webui():
         # Под Web UI отложенные повторяет интерфейс; в консоли — только если попросить
         worker.say("Повторить отложенные: запустите воркер снова позже — или с ключом --wait, "
                    "и он будет пробовать их сам каждые 30 минут.")
     return code
+
+
+def _restore_dates(worker: Worker, code: int) -> None:
+    """После шага воркер №1 возвращает даты скачанным раньше файлам: одного прохода на всех хватает.
+
+    Идёт после скачивания: файлы важнее дат. Диск не принимает файлы (код 4) — не до дат.
+    Строку dates_restored читает Web UI.
+    """
+    if worker.id != 1 or code == EXIT_DISK_FULL:
+        return
+    n = restore_dates(say=worker.say)
+    if n:
+        worker.say(restored_text(n))
+        worker.say(restored_line(n))
 
 
 def _run_rounds(worker: Worker) -> int:
@@ -2028,6 +2110,7 @@ def _run_rounds(worker: Worker) -> int:
             code = e.code if isinstance(e.code, int) else EXIT_PARTIAL
         log.info("worker %d, попытка %d: код %s, %d файлов, %s", worker.id, round_no, code,
                  worker.total_files, human_bytes(worker.total_bytes))
+        _restore_dates(worker, code)
         if round_no > 1 and waited:
             worker.say(f"попытка №{round_no}: {deferred_round_text(waited, worker.total_files)}")
         if code not in (EXIT_DEFERRED, EXIT_OUTAGE):

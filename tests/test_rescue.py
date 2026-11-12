@@ -316,6 +316,19 @@ def test_events_tell_the_story_in_plain_words(rescue, monkeypatch):
     assert not any("код" in t or "воркер" in t.lower() or "cookies" in t.lower() for t in texts)
 
 
+def test_feed_tells_when_files_got_their_dates_back(rescue, monkeypatch):
+    """Шаг скачивания вернул файлам даты с Яндекса — человек видит это в ленте, а не только в журнале."""
+    import file_dates
+
+    Script(monkeypatch, rescue, {"disk": [0, 0], "unlim_collect": [0]})
+    lines = {"disk": [file_dates.restored_line(3)], "unlim_w1": ["[w1] " + file_dates.restored_line(2)]}
+    monkeypatch.setattr(rescue, "_task_lines", lambda slot: lines.get(slot, []))
+    rescue._run()
+    got = {(e["source"], e["text"]) for e in rescue.status()["events"]}
+    assert ("disk", file_dates.restored_text(3)) in got
+    assert ("unlim", file_dates.restored_text(2)) in got
+
+
 def test_expired_token_stops_only_the_disk(rescue, monkeypatch):
     Script(monkeypatch, rescue, {"disk": [0, EXIT_AUTH], "unlim_collect": [0]})
     rescue._run()
