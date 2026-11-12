@@ -22,7 +22,7 @@ ALLOWED_TABLES = {"files", "unlim_files"}
 ALLOWED_COLUMNS = {"remote_path", "file_id"}
 
 # Временные ошибки Диска: явный старт возвращает такие файлы в очередь
-DISK_TRANSIENT_ERRORS = ("local_disk |", "local_file |", "auth_expired |", "server_50x |",
+DISK_TRANSIENT_ERRORS = ("local_disk |", "local_file |", "auth_expired |", "overdraft |", "server_50x |",
                          "download_timeout |", "rate_limit |",
                          # Версии до 1.2 писали «ИмяИсключения: текст» без метки и считали
                          # таймаут молчащего сервера ошибкой файла — такие файлы застревали навсегда
@@ -33,6 +33,7 @@ DISK_TRANSIENT_ERRORS = ("local_disk |", "local_file |", "auth_expired |", "serv
 
 # Почему файл не скачан — простыми словами (по префиксу ошибки «kind | …»)
 REASON_TEXT = (
+    ("overdraft |", "Диск переполнен — Яндекс закрыл программам доступ к нему, пока не продлена подписка"),
     ("storage_down |", "Сервер Яндекса с этим файлом не отвечает — программа повторит сама"),
     ("server_50x |", "Сбой серверов Яндекса"),
     ("download_timeout |", "Яндекс отвечал слишком долго"),

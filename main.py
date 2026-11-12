@@ -34,6 +34,7 @@ from downloader import (
     RootNotFound,
     download_all,
     make_client,
+    overdraft_message,
     restore_dates,
     scan_exit_code,
     scan_media,
@@ -50,6 +51,7 @@ from utils import (
     EXIT_INTERRUPTED,
     EXIT_OK,
     EXIT_OUTAGE,
+    EXIT_OVERDRAFT,
     EXIT_PARTIAL,
     MAX_DISK_WORKERS,
     TELEGRAM_CHANNEL,
@@ -144,18 +146,26 @@ def load_config(require_token: bool = True) -> dict:
 
 
 def _token_exit_code(state: str) -> int:
-    """Недействительный токен — код 2 (нужен новый), недоступный Яндекс — код 3 (повторить позже)."""
-    return EXIT_OK if state == "ok" else EXIT_AUTH if state == "invalid" else EXIT_OUTAGE
+    """Недействительный токен — код 2 (нужен новый), недоступный Яндекс — код 3 (повторить позже),
+    переполненный Диск — код 6 (нужно место: новый ключ не поможет)."""
+    return {"ok": EXIT_OK, "invalid": EXIT_AUTH, "overdraft": EXIT_OVERDRAFT}.get(state, EXIT_OUTAGE)
+
+
+def _print_token_state(state: str, msg: str) -> None:
+    """Итог проверки токена. Переполненный Диск — строкой с меткой: её видят журнал задачи и диагностика."""
+    if state == "overdraft":
+        print(f"overdraft | {msg}", flush=True)
+    elif state == "ok":
+        print(msg)
+    else:
+        print(msg, file=sys.stderr)
 
 
 def _require_token(cfg: dict) -> int | None:
     """Проверяет токен и печатает результат. Возвращает код выхода при ошибке, иначе None."""
     state, msg = token_state(cfg["token"])
-    if state != "ok":
-        print(msg, file=sys.stderr)
-        return _token_exit_code(state)
-    print(msg)
-    return None
+    _print_token_state(state, msg)
+    return None if state == "ok" else _token_exit_code(state)
 
 
 def _download_exit_code(counters: dict) -> int:
@@ -169,6 +179,8 @@ def _download_exit_code(counters: dict) -> int:
         return EXIT_DISK_FULL
     if aborted == "auth":
         return EXIT_AUTH
+    if aborted == "overdraft":
+        return EXIT_OVERDRAFT
     if counters.get("deferred", 0) > 0:
         return EXIT_DEFERRED
     return EXIT_OK if counters.get("failed", 0) == 0 else EXIT_PARTIAL
@@ -219,6 +231,8 @@ def _run_download(cfg: dict, state: State, workers: int, wait: bool = False) -> 
               "или диск отключён). Освободите место или выберите другую папку.", flush=True)
     elif aborted == "auth":
         print("auth_expired | Остановлено: Яндекс перестал принимать токен. Получите новый.", flush=True)
+    elif aborted == "overdraft":
+        print(f"overdraft | Остановлено. {overdraft_message(None)}", flush=True)
     elif counters.get("deferred", 0) > 0:
         print(f"storage_down | Отложено {files_text(counters['deferred'])}: их серверы хранения Яндекса "
               f"сейчас не отвечают. Файлы не потеряны — их скачает следующая попытка.", flush=True)
@@ -302,7 +316,7 @@ def _print_summary(counters: dict, elapsed: float) -> None:
 
 def cmd_check(cfg: dict, args: argparse.Namespace) -> int:
     state, msg = token_state(cfg["token"])
-    print(msg)
+    print(f"overdraft | {msg}" if state == "overdraft" else msg, flush=True)
     return _token_exit_code(state)
 
 
@@ -375,6 +389,8 @@ def _scan_failed(code: int, e: BaseException) -> int:
     """Сбор списка оборвался известной ошибкой: строка с префиксом для Web UI и код выхода."""
     if code == EXIT_AUTH:
         print(f"auth_expired | Яндекс перестал принимать ключ доступа: {e}. Получите новый.", flush=True)
+    elif code == EXIT_OVERDRAFT:
+        print(f"overdraft | {overdraft_message(None)}", flush=True)
     elif code == EXIT_DISK_FULL:
         print(f"local_disk | Не получается записать базу state.db: {e}. Освободите место "
               f"или проверьте, что диск подключён.", flush=True)

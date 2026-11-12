@@ -19,7 +19,8 @@
 
   function isDone(kind, s) {
     if (!s) return false;
-    if (kind === 'token') return !!(s.token && (s.token.ok || s.token.unreachable));
+    // Ключ переполненного Диска рабочий: настройка идёт дальше, а Главная объяснит, что нужна подписка
+    if (kind === 'token') return !!(s.token && (s.token.ok || s.token.unreachable || s.token.overdraft));
     if (kind === 'folder') return !!(s.config && s.config.download_dir_set);
     return !!(s.cookies && s.cookies.ok);
   }

@@ -41,6 +41,7 @@ from utils import (
     EXIT_AUTH,
     EXIT_DISK_FULL,
     EXIT_OUTAGE,
+    EXIT_OVERDRAFT,
     MAX_DISK_WORKERS,
     SKIP_PATH_PREFIXES,  # noqa: F401 — реэкспорт: корзину никогда не качаем
     categorize,
@@ -201,6 +202,38 @@ def api_error_details(e: BaseException) -> str:
     return f" [{', '.join(parts)}]" if parts else ""
 
 
+# Так Яндекс отвечает на любой запрос REST API, когда файлы занимают больше места, чем есть:
+# подписка закончилась (у аккаунта владельца в ноябре 2026 в место стал считаться и Безлимит). Сведения о Диске он
+# при этом отдаёт, а список и ссылки — нет. Новый ключ не поможет, помогает только место
+OVERDRAFT_ERROR = "DiskAPIDisabledForOverdraftUserError"
+# Справка Яндекс 360: переполненный Диск 44 дня можно скачивать, потом его блокируют
+OVERDRAFT_DAYS = 44
+
+
+def is_overdraft(e: BaseException) -> bool:
+    """Яндекс закрыл программам доступ к Диску: он переполнен."""
+    return isinstance(e, yadisk.exceptions.ForbiddenError) and getattr(e, "error_type", None) == OVERDRAFT_ERROR
+
+
+def overdraft_account(client: yadisk.Client) -> dict | None:
+    """Сколько занято и сколько есть — Яндекс говорит это и переполненному Диску. Никогда не бросает."""
+    try:
+        return account_info(client)
+    except Exception as e:  # noqa: BLE001 — цифры только поясняют, без них текст тоже верен
+        log.warning("сведения о переполненном Диске: %s%s", type(e).__name__, api_error_details(e))
+        return None
+
+
+def overdraft_message(acc: dict | None) -> str:
+    """Что случилось и что делать — для консоли и журнала."""
+    used = (f" (занято {human_bytes(acc['used'])} из {human_bytes(acc['total'])})"
+            if acc and acc.get("total") else "")
+    return (f"Диск переполнен{used}: Яндекс закрыл программам доступ к нему. Так бывает, когда "
+            f"закончилась подписка на место. Скачивать файлы Яндекс разрешает {OVERDRAFT_DAYS} дня "
+            f"после переполнения, потом блокирует Диск. Продлите подписку хотя бы на месяц — "
+            f"программа продолжит с того же места. Новый ключ доступа не поможет.")
+
+
 def _is_retryable(exc: BaseException) -> bool:
     """Решает, стоит ли retry-ить исключение."""
     if isinstance(exc, NON_RETRYABLE) or is_local_disk_error(exc):
@@ -314,6 +347,8 @@ def scan_tree(
         try:
             files, total = scan_all_files(client, state, on_file=on_file, seen_top=seen_top, known=listed)
         except Exception as e:
+            if is_overdraft(e):
+                raise  # папки ответят тем же: Диск переполнен
             log.warning("get_files недоступен (%s), переключаюсь на обход дерева папок", e)
         else:
             listed.clear()  # больше не нужен, а на большом Диске это сотни мегабайт
@@ -343,9 +378,11 @@ def scan_exit_code(e: BaseException) -> int | None:
     """Код выхода для ошибки, оборвавшей сбор списка; None — неизвестная ошибка.
 
     2 — Яндекс не принял токен, 3 — Яндекс недоступен или просит подождать (повторить
-    позже), 4 — базу не записать на локальный диск. Без этого любая такая ошибка давала
-    код 1, который Web UI читал как «скачивание закончилось с ошибками».
+    позже), 4 — базу не записать на локальный диск, 6 — Диск переполнен. Без этого любая
+    такая ошибка давала код 1, который Web UI читал как «скачивание закончилось с ошибками».
     """
+    if is_overdraft(e):
+        return EXIT_OVERDRAFT
     if isinstance(e, yadisk.exceptions.UnauthorizedError):
         return EXIT_AUTH
     if isinstance(e, (yadisk.exceptions.RequestError, yadisk.exceptions.TooManyRequestsError,
@@ -392,6 +429,10 @@ def _walk(
         except yadisk.exceptions.UnauthorizedError:
             raise  # пробрасываем выше — токен битый
         except Exception as e:
+            if is_overdraft(e):
+                # Не «папка не прочиталась»: так непрочитанным стал бы весь Диск, а сбор — кодом 3
+                # «Яндекс не отвечает» по кругу каждые 30 минут
+                raise
             log.error("Не смог прочитать %s: %s", cur, e)
             if on_note:
                 on_note("unreadable_folders", [cur])
@@ -867,6 +908,8 @@ def _describe_download_error(e: BaseException) -> str:
         return f"rate_limit | 429 TooManyRequests (лимит Яндекса): {e}{api}"
     if isinstance(e, yadisk.exceptions.PathNotFoundError):
         return f"PathNotFound: {e}{api}"
+    if is_overdraft(e):
+        return f"overdraft | {name} [ДИСК ПЕРЕПОЛНЕН, ЯНДЕКС ЗАКРЫЛ ДОСТУП ПРОГРАММАМ]: {e}{api}"
     if isinstance(e, (yadisk.exceptions.UnauthorizedError, yadisk.exceptions.ForbiddenError)):
         return f"auth_expired | {name}: {e}{api}"
     if isinstance(e, TIMEOUT_ERRORS):
@@ -1223,6 +1266,10 @@ def download_all(
         if res.status != "failed":
             streaks["local_disk"] = streaks["auth"] = 0
             return None
+        if error.startswith("overdraft |"):
+            # Переполнен весь Диск, а не этот файл: остальные ответят так же
+            log.error("Диск переполнен: Яндекс закрыл программам доступ к нему — останавливаюсь")
+            return "overdraft"
         streaks["local_disk"] = streaks["local_disk"] + 1 if error.startswith("local_disk |") else 0
         streaks["auth"] = streaks["auth"] + 1 if error.startswith("auth_expired |") else 0
         if streaks["local_disk"] >= LOCAL_DISK_GIVE_UP:
@@ -1379,10 +1426,11 @@ def check_token(token: str) -> tuple[bool, str]:
 
 
 def token_state(token: str) -> tuple[str, str]:
-    """Состояние токена: ('ok' | 'invalid' | 'unreachable', сообщение).
+    """Состояние токена: ('ok' | 'invalid' | 'unreachable' | 'overdraft', сообщение).
 
     unreachable — Яндекс не ответил на проверку (сеть, 50x, таймаут). Это не повод
     просить у человека новый токен: во время сбоев Яндекса старый токен жив.
+    overdraft — токен жив, но Диск переполнен и Яндекс закрыл по нему доступ.
     """
     if not token or token.strip() == "" or token.startswith("AQAAA_paste"):
         return "invalid", (
@@ -1402,6 +1450,8 @@ def token_state(token: str) -> tuple[str, str]:
         log.info("Токен OK. %s", describe_account(acc))
         return "ok", f"Токен OK. {describe_account(acc)}."
     except (yadisk.exceptions.UnauthorizedError, yadisk.exceptions.ForbiddenError) as e:
+        if is_overdraft(e):
+            return "overdraft", overdraft_message(overdraft_account(cli))
         return "invalid", (
             f"Токен не принят ({type(e).__name__}). Получи новый на "
             f"https://yandex.ru/dev/disk/poligon/{api_error_details(e)}"

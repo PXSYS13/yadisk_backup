@@ -27,6 +27,7 @@ from utils import (
     EXIT_DISK_FULL,
     EXIT_INTERRUPTED,
     EXIT_OUTAGE,
+    EXIT_OVERDRAFT,
     EXIT_PARTIAL,
     MAX_DISK_WORKERS,
     MAX_UNLIM_BATCH,
@@ -116,6 +117,11 @@ def launch_unlim_workers(
         else:
             failed.append({"id": i, "msg": msg})
     return {"ok": True, "started": started, "failed": failed}
+
+
+# После этих кодов ветка ждёт человека: новый ключ, место на диске или подписку. Повторный сбор
+# списка после них кончится тем же
+HALT_CODES = (EXIT_AUTH, EXIT_DISK_FULL, EXIT_OVERDRAFT)
 
 
 class Branch:
@@ -394,12 +400,19 @@ class Rescue:
             if not self.is_running() or self._closing:
                 return False
             b = self.branches[source]
-            if b.alive() or b.state != "needs_action" or b.action not in ("token", "cookies"):
+            if b.alive() or b.state != "needs_action" or b.action not in ("token", "cookies", "overdraft"):
                 return False
-            self._log(f"🔑 {b.label}: доступ обновлён — продолжаю")
-            self._event(source, "run", "Доступ обновлён — продолжаю скачивание")
+            text = ("Яндекс снова пускает программу к Диску — продолжаю скачивание" if b.action == "overdraft"
+                    else "Доступ обновлён — продолжаю скачивание")
+            self._log(f"🔑 {b.label}: {text}")
+            self._event(source, "run", text)
             self._restart_branch(b)
             return True
+
+    def waits_for(self, source: str, action: str) -> bool:
+        """Ветка source стоит и ждёт от человека именно этого действия."""
+        b = self.branches[source]
+        return b.state == "needs_action" and b.action == action and not b.alive()
 
     def stop(self) -> tuple[bool, str]:
         if not self.is_running():
@@ -641,8 +654,7 @@ class Rescue:
                 self._log(f"{'✓' if cookies.get('ok') else '✗'} Доступ к Безлимиту: {cookies.get('msg')}")
                 if cookies.get("ok"):
                     self._event("unlim", "ok", "Доступ к Безлимиту работает")
-            token_usable = bool(tok.get("ok") or tok.get("unreachable"))
-            src = access.plan_sources(not self.skip_disk, not self.skip_unlim, token_usable,
+            src = access.plan_sources(not self.skip_disk, not self.skip_unlim, access.token_usable(tok),
                                       bool(cookies.get("ok")))
             for note in src["notes"]:
                 self._log(note)
@@ -756,10 +768,10 @@ class Rescue:
             code = download(b)
             if code == -1:
                 return self._branch_stopped(b)
-            if b.relist and code not in (EXIT_AUTH, EXIT_DISK_FULL):
+            if b.relist and code not in HALT_CODES:
                 # «Обновить список» нажали во время скачивания — собираем список сразу, без паузы
                 continue
-            if b.list_after and code not in (EXIT_AUTH, EXIT_DISK_FULL):
+            if b.list_after and code not in HALT_CODES:
                 b.list_after = False
                 untried = self._untried(db)
                 code_list = list_late(b)
@@ -767,7 +779,7 @@ class Rescue:
                     return self._branch_stopped(b)
                 if code_list == PREPARE_NEEDS_ACTION:
                     return
-                if code_list in (EXIT_AUTH, EXIT_DISK_FULL):
+                if code_list in HALT_CODES:
                     self._after_exit(b, code_list, db, step="prepare")
                     return
                 if self._untried(db) > untried:
@@ -826,6 +838,8 @@ class Rescue:
         if code == EXIT_DISK_FULL:
             self._halt_for_disk()
             return False
+        if code == EXIT_OVERDRAFT:
+            return self._halt_for_overdraft(b)
         if step == "prepare":
             return self._after_prepare_exit(b, code)
         stats = db_stats(*db)
@@ -872,6 +886,21 @@ class Rescue:
         # Неизвестный код — процесс упал или его убили, а не «Яндекс не отвечает»
         return self._wait_round(b, deferred, outage=False, kind="crash",
                                 delay=min(self.retry_every, RESCUE_CRASH_RETRY_SEC))
+
+    def _halt_for_overdraft(self, b: Branch) -> bool:
+        """Диск переполнен: Яндекс закрыл программам доступ. Повторы не помогут — нужна подписка.
+
+        Раньше это выглядело как «Яндекс не отвечает» с попыткой каждые 30 минут.
+        """
+        b.state = "needs_action"
+        b.action = "overdraft"
+        b.reason = "Диск переполнен — Яндекс закрыл программам доступ к нему"
+        b.activity = ""
+        b.next_retry_at = None
+        self._log(f"📦 {b.label}: {b.reason}. Продлите подписку на место — программа продолжит с того же места")
+        self._event(b.name, "err", f"{b.reason}. Продлите подписку на место — программа продолжит "
+                                   f"с того же места")
+        return False
 
     def _after_prepare_exit(self, b: Branch, code: int) -> bool:
         """Сбор списка завершился с ошибкой (не доступ и не диск): ждём и собираем снова."""
@@ -1056,6 +1085,8 @@ class Rescue:
             self._take_relist("disk")  # «Обновить список», нажатое во время этого сбора, исполнено
             total = int(db_stats(paths.DB_FILE, "files", "remote_path").get("total") or 0)
             self._event("disk", "ok", f"Список получен: {files_text(total)}")
+        elif code == EXIT_OVERDRAFT:
+            return code  # «качаю по уже собранному» не выйдет: Яндекс не даст и ссылок
         elif db_has_rows(paths.DB_FILE, "files"):
             self._log(f"⚠️ Диск: список не обновился (код {code}) — качаю по уже собранному")
             self._event("disk", "warn", "Список не обновился — качаю по уже собранному")

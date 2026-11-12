@@ -12,7 +12,7 @@ from pathlib import Path
 import yadisk
 from fastapi import APIRouter
 
-from downloader import api_error_details, list_disk_folders, make_browse_client
+from downloader import api_error_details, is_overdraft, list_disk_folders, make_browse_client
 from state import SELECTION_MARKERS
 from unlim_common import DEFERRED_MARKER
 from utils import remote_parts, sqlite_ro_uri, to_disk_path, to_long_path
@@ -207,7 +207,11 @@ def api_disk_folders(path: str = "disk:/", demo: str | None = None):
     client = make_browse_client(token)
     try:
         folders, truncated = list_disk_folders(client, path)
-    except (yadisk.exceptions.UnauthorizedError, yadisk.exceptions.ForbiddenError):
+    except (yadisk.exceptions.UnauthorizedError, yadisk.exceptions.ForbiddenError) as e:
+        if is_overdraft(e):
+            # Новый ключ не поможет: Яндекс закрыл доступ, пока Диск переполнен
+            return {"ok": False, "msg": "Диск переполнен — Яндекс закрыл программам доступ к нему, "
+                                        "и список папок не показать. Продлите подписку на место."}
         return {"ok": False, "action": "token", "msg": "Яндекс не принял ключ доступа к Диску — получите новый"}
     except (yadisk.exceptions.PathNotFoundError, yadisk.exceptions.WrongResourceTypeError):
         return {"ok": False, "msg": "Этой папки больше нет на Диске — обновите список"}

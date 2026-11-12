@@ -37,6 +37,11 @@ RESCUE_ACTIONS = {
     "send_logs": ("Что-то пошло не так",
                   "Скачайте отчёт для поддержки и пришлите его в Telegram — в нём нет ключа и паролей.",
                   "Скачать отчёт"),
+    "overdraft": ("Диск переполнен — Яндекс закрыл программам доступ к нему",
+                  "Так бывает, когда закончилась подписка на место. Скачивать файлы Яндекс разрешает "
+                  "44 дня после переполнения, потом блокирует Диск. Продлите подписку хотя бы на месяц — "
+                  "программа продолжит с того же места. Новый ключ доступа не поможет.",
+                  "Я продлил подписку — продолжить"),
     "folders": ("Выбранных папок больше нет на Диске",
                 "Их переименовали, перенесли или удалили. Выберите папки заново в «Настройках» — "
                 "уже скачанное не пропадёт.",
@@ -127,7 +132,8 @@ def source_live(name: str, tasks: dict, branch_state: str | None, rate: dict | N
 
 
 RENEWED_TEXT = {"token": "Ключ обновлён — можно продолжать",
-                "cookies": "Доступ к Безлимиту обновлён — можно продолжать"}
+                "cookies": "Доступ к Безлимиту обновлён — можно продолжать",
+                "overdraft": "Яндекс снова пускает программу к Диску — можно продолжать"}
 
 
 def access_renewed(action: str, branch: dict | None, token: dict, cookies: dict) -> bool:
@@ -138,12 +144,32 @@ def access_renewed(action: str, branch: dict | None, token: dict, cookies: dict)
     сохранены позже отказа. Без этого человек сохранял новый вход, а Главная всё так же
     просила «Обновить доступ» — и вела в Настройки по кругу.
     """
-    if action == "token":
+    if action in ("token", "overdraft"):
+        # Подписку продлили — Яндекс снова принимает тот же ключ
         return bool(token.get("ok"))
     if action == "cookies":
         since = float((branch or {}).get("state_since") or 0)
         return bool(cookies.get("ok")) and float(cookies.get("saved_at") or 0) > since
     return False
+
+
+def _size_text(n: float) -> str:
+    """«130 ГБ», «10 ГБ», «113,5 ГБ» — без лишнего «,0» и без переноса между числом и «ГБ»."""
+    return ru_bytes(n).replace(",0 ", " ").replace(" ", " ")
+
+
+def overdraft_text(token: dict, text: str) -> str:
+    """Пояснение к переполненному Диску с цифрами места, если Яндекс их сообщил."""
+    used, total = token.get("used"), token.get("total")
+    if not (used and total):
+        return text
+    return f"Файлы занимают {_size_text(used)}, а на Диске есть {_size_text(total)}. {text}"
+
+
+def _all_saved(src: dict) -> bool:
+    """Всё, что известно о Диске, уже скачано: ждать от Яндекса нечего."""
+    f = src["files"]
+    return bool(f["done"]) and not (f["pending"] or f["in_progress"] or f["deferred"] or f["failed"])
 
 
 def waits_for_person(branch: dict | None) -> bool:
@@ -245,12 +271,13 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
                         cfg: dict, diag: dict | None = None, free_space: dict | None = None,
                         disk_local: dict | None = None, unlim_local: dict | None = None,
                         now: float | None = None, live: dict | None = None,
-                        disk_folders: dict | None = None) -> dict:
+                        disk_folders: dict | None = None, disk_selected: bool = True) -> dict:
     """Всё, что нужно главному экрану, одним объектом: без разбора логов во фронтенде.
 
     Чистая функция от уже собранных данных — её легко проверить тестом. live —
     признаки жизни по источникам (см. source_live), их собирает /api/status.
     disk_folders — сводка disk_folders_summary: сколько папок Диска скачано целиком.
+    disk_selected — Диск выбран в «Настройках» (иначе его переполнение главную не занимает).
     """
     now = now or time.time()
     live = live or {}
@@ -264,7 +291,8 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
     # Часть подключена, если доступ к ней работает — или если запуск остановился на ней и ждёт
     # человека. Яндекс перестал принимать ключ: проверка ключа больше не проходит, но скачанное
     # Диском никуда не делось, а кнопку «Получить новый ключ» даёт действие этой части
-    disk_on = bool(token.get("ok") or token.get("unreachable")) or waits_for_person(disk_branch)
+    disk_on = (bool(token.get("ok") or token.get("unreachable") or token.get("overdraft"))
+               or waits_for_person(disk_branch))
     unlim_on = bool(cookies.get("ok")) or waits_for_person(unlim_branch)
     sources = {
         "disk": source_block("disk", disk_db, disk_branch, disk_on, download_dir, disk_local, window,
@@ -305,6 +333,10 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
                 continue
             action_id, action_source = a, name
             break
+    if (action_id is None and not running and not key_renewed and token.get("overdraft") and state != "done"
+            and disk_selected and not _all_saved(sources["disk"])):
+        # Диск переполнен ещё до запуска (или после паузы): объяснить сразу, а не после сбора списка
+        action_id, action_source, state = "overdraft", "disk", "needs_action"
     if action_id is None and state == "needs_action":
         if key_renewed:
             state = "stopped"
@@ -320,6 +352,8 @@ def build_rescue_status(rescue_st: dict, disk_db: dict, unlim_db: dict, token: d
         variant = None
         if action_id == "token" and not (running and sources["unlim"]["state"] in BUSY_STATES):
             text = TOKEN_ALONE_TEXT
+        if action_id == "overdraft":
+            text = overdraft_text(token, text)
         if action_id == "free_space":
             free = (free_space or {}).get("free")
             if free is not None and free < LOW_FREE_BYTES:

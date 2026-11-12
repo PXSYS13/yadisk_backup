@@ -17,7 +17,7 @@ import yadisk
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from downloader import account_info, api_error_details, make_browse_client
+from downloader import account_info, api_error_details, is_overdraft, make_browse_client, overdraft_account
 from unlim_common import (AuthExpiredError, cookies_dict, foreign_cookie_domains, get_sk_uid, make_session,
                           missing_required_cookies)
 from webapp import config, paths
@@ -46,6 +46,36 @@ def normalize_token(raw: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def _overdraft_status(cli) -> dict:
+    """Ключ жив, но Диск переполнен: Яндекс закрыл по нему доступ. Цифры места он отдаёт и так."""
+    acc = overdraft_account(cli) or {}
+    data = {"ok": False, "overdraft": True,
+            "msg": "Диск переполнен — Яндекс закрыл программам доступ к нему, пока не продлена подписка",
+            "used": acc.get("used"), "total": acc.get("total"), "login": acc.get("login"),
+            "account": acc or None}
+    log.warning("Диск переполнен, Яндекс закрыл доступ по ключу: %s, занято %s из %s",
+                data["login"], data["used"], data["total"])
+    return data
+
+
+def _token_data(cli) -> dict:
+    """Проверка ключа у Яндекса. Отказ во входе и сбои — исключениями, их разбирает check_token."""
+    try:
+        valid = cli.check_token()
+    except yadisk.exceptions.ForbiddenError as e:
+        if is_overdraft(e):
+            return _overdraft_status(cli)
+        raise
+    if not valid:
+        return {"ok": False, "msg": "Токен невалиден: Яндекс ответил, что он не действует. "
+                                   "Скопируйте токен заново целиком."}
+    acc = account_info(cli)
+    log.info("токен проверен: %s, занято %s из %s, безлимит %s", acc["login"],
+             acc["used"], acc["total"], acc["photo_unlim"])
+    return {"ok": True, "msg": "OK", "used": acc["used"], "total": acc["total"],
+            "photo_unlim": acc["photo_unlim"], "login": acc["login"], "account": acc}
+
+
 def check_token(token: str) -> dict:
     if not token or token.startswith("AQAAA_paste"):
         return {"ok": False, "msg": "Токен не задан"}
@@ -59,18 +89,9 @@ def check_token(token: str) -> dict:
         # С таймаутами скачивания проверка во время сбоя Яндекса висела бы до получаса
         cli = make_browse_client(token)
         try:
-            if not cli.check_token():
-                data = {"ok": False, "msg": "Токен невалиден: Яндекс ответил, что он не действует. "
-                                           "Скопируйте токен заново целиком."}
-                _token_check_cache.update({"token": token, "at": now, "data": data})
-                return data
-            acc = account_info(cli)
+            data = _token_data(cli)
         finally:
             cli.close()
-        data = {"ok": True, "msg": "OK", "used": acc["used"], "total": acc["total"],
-                "photo_unlim": acc["photo_unlim"], "login": acc["login"], "account": acc}
-        log.info("токен проверен: %s, занято %s из %s, безлимит %s", acc["login"],
-                 acc["used"], acc["total"], acc["photo_unlim"])
     except (yadisk.exceptions.UnauthorizedError, yadisk.exceptions.ForbiddenError) as e:
         data = {"ok": False, "msg": f"Токен не принят Яндексом: {type(e).__name__}{api_error_details(e)}"}
         log.warning("токен отклонён: %s", data["msg"])
@@ -228,6 +249,15 @@ def onboarding_state(cfg: dict, token: dict, cookies: dict, disk_db: dict, unlim
     return {**steps, "next": next_step}
 
 
+def token_usable(tok: dict) -> bool:
+    """Диск запускать: ключ работает, Яндекс не ответил на проверку или Диск переполнен.
+
+    На переполненном Диске сбор списка сразу кончится кодом 6, и человек увидит, что
+    нужна подписка, а не «нет ключа доступа» или «нечего скачивать».
+    """
+    return bool(tok.get("ok") or tok.get("unreachable") or tok.get("overdraft"))
+
+
 def plan_sources(do_disk: bool, do_unlim: bool, token_ok: bool, cookies_ok: bool) -> dict:
     """Что реально можно скачать при текущих токене и cookies.
 
@@ -263,9 +293,10 @@ def preflight_sources(do_disk: bool, do_unlim: bool) -> dict:
     """plan_sources по текущим настройкам — до запуска, чтобы ответить пользователю сразу.
 
     Яндекс не ответил на проверку токена — это не «нет токена»: Диск всё равно пробуем.
+    Переполненный Диск — тоже не «нет токена»: запуск остановится на понятном действии.
     """
     tok = check_token(config.get_config()["token"]) if do_disk else {}
-    token_ok = bool(tok.get("ok") or tok.get("unreachable"))
+    token_ok = token_usable(tok)
     cookies_ok = bool(check_cookies().get("ok")) if do_unlim else False
     return plan_sources(do_disk, do_unlim, token_ok, cookies_ok)
 

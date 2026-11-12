@@ -33,6 +33,7 @@ def api_status(demo: str | None = None):
         "max_workers": cfg.get("max_workers", 4),
         "token_masked": config.mask_token(cfg.get("token", "")),
     }
+    settings = config.get_settings()
     token = access.token_snapshot(cfg["token"])
     cookies = access.check_cookies()
     disk_db = disk_db_stats()
@@ -80,8 +81,8 @@ def api_status(demo: str | None = None):
         "pipeline": pipe_st,
         "rescue": demo_data["rescue"] if demo_data else build_rescue_status(
             pipe_st, disk_db, unlim_db, token, cookies, cfg, diag, free, disk_local, unlim_local,
-            live=live, disk_folders=folders),
-        "settings": config.get_settings(),
+            live=live, disk_folders=folders, disk_selected="disk" in settings["sources"]),
+        "settings": settings,
         "links": demo_links(time.time(), os.path.join(cfg["download_dir"], LINKS_DIRNAME)) if demo_data
         else links_status(cfg, tasks),
         "demo": demo if demo_data else None,

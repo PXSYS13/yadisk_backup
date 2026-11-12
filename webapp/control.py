@@ -178,12 +178,29 @@ def rescue_workers(settings: dict) -> tuple[int, int]:
     return (2, DEFAULT_UNLIM_BATCH) if settings.get("gentle") else (4, DEFAULT_UNLIM_BATCH)
 
 
+# Подписку оплатили, а Яндекс ещё не пустил программу (или не оплатили вовсе)
+STILL_FULL = ("Диск всё ещё переполнен — Яндекс пока не пускает к нему программу. Если подписку "
+              "только что продлили, подождите пару минут и нажмите снова.")
+
+
+def _continue_after_subscription() -> dict:
+    """Ветка Диска ждала подписки: ключ снова работает — Диск качается дальше."""
+    if not access.check_token(config.get_config()["token"]).get("ok"):
+        return {"ok": False, "msg": STILL_FULL}
+    if rescue.resume_access("disk"):
+        return {"ok": True, "msg": "Яндекс снова пускает программу к Диску — продолжаю"}
+    return _resp(rescue.start())
+
+
 @router.post("/api/rescue/start")
 def api_rescue_start():
     """Главная кнопка «Сохранить мои файлы»: всё по сохранённым настройкам."""
     st = config.get_settings()
     do_disk, do_unlim = "disk" in st["sources"], "unlim" in st["sources"]
     if rescue.is_running():
+        if rescue.waits_for("disk", "overdraft"):
+            # Безлимит качается, Диск ждал подписки: «Я продлил подписку — продолжить»
+            return _continue_after_subscription()
         return _resp(rescue.start())  # идёт — значит «попробовать отложенные сейчас»
     if organize_moving():
         return {"ok": False, "msg": ORGANIZE_BUSY}
@@ -192,6 +209,10 @@ def api_rescue_start():
     src = access.preflight_sources(do_disk, do_unlim)
     if src["error"]:
         return {"ok": False, "msg": src["error"]}
+    if do_disk and not src.get("run_unlim") and access.check_token(config.get_config()["token"]).get("overdraft"):
+        # Качать нечего: Диск переполнен, а Безлимит не выбран или не подключён. Запуск только
+        # собрал бы список и снова остановился на «переполнен»
+        return {"ok": False, "msg": STILL_FULL}
     workers, batch = rescue_workers(st)
     ok, msg = rescue.start(workers=workers, batch=batch, do_disk=do_disk, do_unlim=do_unlim,
                            disk_categories=st["categories"], unlim_categories=st["categories"],

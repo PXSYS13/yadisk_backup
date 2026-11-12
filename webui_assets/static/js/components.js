@@ -35,6 +35,7 @@
     const coo = s.cookies || {};
     const unlimSrc = ((s.rescue || {}).sources || {}).unlim || {};
     const disk = tok.ok ? ['ok', `подключён${tok.login ? ` · ${tok.login}` : ''}`]
+      : tok.overdraft ? ['err', 'Диск переполнен']
       : tok.unreachable ? ['warn', 'Яндекс не ответил на проверку'] : ['err', 'нужен ключ доступа'];
     const unlim = unlimSrc.action === 'cookies' ? ['err', 'обновите доступ']
       : coo.ok ? ['ok', 'подключён'] : ['', 'не подключён'];
@@ -61,6 +62,9 @@
       send_logs: `<a class="btn ${p}" href="/api/logs/bundle">${icon('download')}Скачать отчёт для поддержки</a>` +
         `<a class="btn" href="${esc((s && s.telegram_url) || 'https://t.me/davronsv')}" target="_blank" rel="noopener">${icon('send')}Написать в Telegram</a>`,
       folders: `<button class="${p}" data-action="go-folders">${icon('folder')}Выбрать папки</button>`,
+      // Диск переполнен: помогает только место — кнопка продолжает, когда подписку продлили
+      overdraft: `<button class="${p}" data-action="rescue-start">${icon('play')}Я продлил подписку — продолжить</button>` +
+        `<a class="btn" href="https://disk.yandex.ru/client/disk" target="_blank" rel="noopener">${icon('external')}Открыть Яндекс Диск</a>`,
     }[action.id] || '';
   };
 
@@ -667,10 +671,12 @@
         App.text(q('[data-field="token-state"]'), tok.ok
           ? `Работает: ${tok.login || ''}${acc.total ? `, занято ${fmt.bytes(acc.used)} из ${fmt.bytes(acc.total)}` : ''}${
             acc.photo_unlim ? `, в Безлимите ${fmt.bytes(acc.photo_unlim)}` : ''}`
+          : tok.overdraft ? `Ключ в порядке, но Диск переполнен${tok.total ? `: занято ${fmt.bytes(tok.used)} из ${
+            fmt.bytes(tok.total)}` : ''}. Яндекс закрыл по ключу доступ, пока не продлена подписка — новый ключ не поможет`
           : tok.unreachable ? 'Яндекс сейчас не ответил на проверку — ключ, скорее всего, в порядке'
             : 'Не задан — без него обычный Диск не скачать');
-        tone('token', tok.ok ? 'ok' : tok.unreachable ? 'wait' : actionId === 'token' ? 'err' : '');
-        App.html(q('[data-field="token-buttons"]'), !withButtons ? '' : tok.ok || tok.unreachable
+        tone('token', tok.ok ? 'ok' : tok.overdraft ? 'err' : tok.unreachable ? 'wait' : actionId === 'token' ? 'err' : '');
+        App.html(q('[data-field="token-buttons"]'), !withButtons ? '' : tok.ok || tok.unreachable || tok.overdraft
           ? '<button class="small" data-action="toggle-form" data-form-kind="token">Заменить ключ</button>' +
             '<button class="small danger" data-action="token-clear">Удалить ключ</button>'
           : `<button class="small primary" data-action="toggle-form" data-form-kind="token">${icon('key')}Ввести ключ</button>`);
@@ -734,14 +740,16 @@
     App.text(out, 'Проверяю…');
     const check = await App.api.post('/api/config/token/check', { token });
     const c = check.data || {};
-    if (!c.ok && !c.unreachable) {
+    if (!c.ok && !c.unreachable && !c.overdraft) {
       App.text(out, '');
       return { ok: false, error: `Ключ не подошёл: ${c.msg || check.error || 'Яндекс его не принял'}. Скопируйте его заново целиком.` };
     }
     const saved = await App.api.post('/api/config/token', { token });
     if (!saved.ok) { App.text(out, ''); return saved; }
     field(root, 'token-input').value = '';
-    App.text(out, c.ok ? `Сохранено: ${c.login}` : 'Сохранено. Яндекс сейчас не ответил на проверку — проверю позже.');
+    App.text(out, c.ok ? `Сохранено: ${c.login}`
+      : c.overdraft ? 'Сохранено. Ключ рабочий, но Диск переполнен: Яндекс пустит к нему программу, когда продлите подписку.'
+        : 'Сохранено. Яндекс сейчас не ответил на проверку — проверю позже.');
     root.dispatchEvent(new CustomEvent('access-saved', { bubbles: true, detail: { kind: 'token' } }));
     return { ok: true, data: { msg: 'Ключ сохранён' } };
   }));

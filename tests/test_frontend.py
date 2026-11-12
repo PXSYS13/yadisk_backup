@@ -225,6 +225,25 @@ def test_home_asks_for_a_new_key_when_only_the_disk_was_downloading(monkeypatch)
     assert "нужно действие" in disk_card and "Подключить Диск" not in disk_card
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_home_explains_a_full_disk_instead_of_an_outage(monkeypatch):
+    # Подписка кончилась, Яндекс закрыл API: не «Яндекс не отвечает» и не «получите новый ключ»,
+    # а сколько занято, срок в 44 дня и кнопка «продолжить» после продления
+    monkeypatch.setenv("YADISK_DEMO", "1")
+    monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    client = TestClient(webui.app, headers={"Host": "localhost:8000"})
+    st = client.get("/api/status?demo=overdraft").json()
+    res = subprocess.run(["node", "-e", _HOME_NODES_HARNESS], input=json.dumps(st), capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    home = json.loads(res.stdout)
+    assert home["home-headline"] == "Диск переполнен — Яндекс закрыл программам доступ к нему"
+    assert "130 ГБ" in home["home-subline"] and "44 дня" in home["home-subline"]
+    assert 'data-action="rescue-start"' in home["home-actions"] and "Я продлил подписку" in home["home-actions"]
+    assert "https://disk.yandex.ru/client/disk" in home["home-actions"]
+    assert "Получить новый ключ" not in res.stdout and "не отвечает" not in res.stdout
+
+
 # «Нас поддерживают»: строка внизу главной и суммы — в node, без браузера
 _THANKS_HARNESS = r"""
 const path = require('path');

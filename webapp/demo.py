@@ -12,7 +12,7 @@ from webapp.queue_db import empty_db_stats
 from webapp.rescue_view import build_rescue_status
 
 DEMO_STATES = ("setup", "ready", "listing", "downloading", "low_space", "waiting", "token", "cookies",
-               "disk_full", "done", "done_partial", "stopped", "update")
+               "overdraft", "disk_full", "done", "done_partial", "stopped", "update")
 # update — как ready, и на GitHub «вышла» новая версия (/api/status.update — webapp.updates.demo)
 
 _DEMO_DISK_FILES = ("Документы/Договор аренды.pdf", "Фото/2023/Отпуск/IMG_2041.JPG",
@@ -113,6 +113,17 @@ def demo_rescue(kind: str, cfg: dict) -> dict:
         disk = db(6015, 2500, pending=3515, names=_DEMO_DISK_FILES)
         unlim = db(13602, 400, pending=13202, size=69 * gb, names=_DEMO_UNLIM_FILES)
         live = {"disk": alive(120, 30), "unlim": {"last_activity_at": now - 90}}
+    elif kind == "overdraft":
+        # Подписка закончилась: Безлимит докачан, а Диск Яндекс закрыл до продления
+        tok = {"ok": False, "overdraft": True, "login": "demo", "used": 130 * gb, "total": 10 * gb,
+               "msg": "Диск переполнен — Яндекс закрыл программам доступ к нему, пока не продлена подписка"}
+        st = run({"state": "needs_action", "action": "overdraft", "round": 1}, {"state": "done"}, state="failed",
+                 running=False, ev=start_events + [
+                     (40, "unlim", "ok", "Готово: все файлы сохранены"),
+                     (20, "disk", "err", "Диск переполнен — Яндекс закрыл программам доступ к нему. Продлите "
+                                         "подписку на место — программа продолжит с того же места")])
+        disk = db(6015, 3200, pending=2815, names=_DEMO_DISK_FILES)
+        unlim = db(13602, 13602, size=69 * gb, names=_DEMO_UNLIM_FILES)
     elif kind == "disk_full":
         st = run({"state": "needs_action", "action": "free_space"}, {"state": "needs_action", "action": "free_space"},
                  state="failed", running=False, ev=start_events + [
