@@ -649,6 +649,27 @@ table.list td{padding:12px;border-bottom:1px solid var(--border);vertical-align:
 table.list tr:last-child td{border-bottom:none}
 table.list tbody tr:hover td{background:var(--surface-2)}
 table.list td.name{word-break:break-all}
+.file-path{font-size:12px;color:var(--text-3);margin-top:2px;word-break:break-all}
+/* «Список файлов» в «Подробнее» и «По ссылке»: вкладки, поиск, пагинация */
+.seg-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.seg-tab{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:6px 12px;border-radius:10px;border:1px solid var(--border);background:var(--surface-2);color:var(--text-2);font:inherit;font-size:14px;font-weight:500;cursor:pointer;transition:background .15s,border-color .15s,color .15s}
+.seg-tab:hover{color:var(--text);border-color:var(--border-2,var(--border))}
+.seg-tab.active{background:var(--accent-soft);color:var(--accent-text);border-color:var(--accent-line,var(--accent))}
+.seg-tab .cnt{font-size:12px;opacity:.85;font-variant-numeric:tabular-nums}
+.sub-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.sub-tab{min-height:30px;padding:4px 10px;border-radius:99px;border:1px solid var(--border);background:none;color:var(--text-3);font:inherit;font-size:13px;cursor:pointer}
+.sub-tab:hover{color:var(--text);background:var(--surface-2)}
+.sub-tab.active{background:var(--surface-2);color:var(--text);font-weight:600;border-color:var(--text-3)}
+.folder-filter-bar{margin-bottom:10px}
+.files-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:12px}
+.search-wrap{position:relative;flex:1 1 220px;min-width:180px}
+.search-wrap .i{position:absolute;left:11px;top:50%;transform:translateY(-50%);width:15px;height:15px;color:var(--text-3);pointer-events:none}
+.search-wrap input{width:100%;padding-left:34px;min-height:38px}
+.files-toolbar select{min-height:38px;padding:6px 10px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font:inherit;font-size:14px}
+.pager{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin-top:10px}
+.pager:empty{display:none}
+button.counter.clickable{font:inherit;text-align:left;cursor:pointer;transition:background .15s,border-color .15s}
+button.counter.clickable:hover{background:var(--surface-2)}
 .scroll{max-height:440px;overflow:auto;border-radius:var(--radius-md);border:1px solid var(--border)}
 .console{background:var(--console-bg);color:var(--console-text);border-radius:var(--radius-md);padding:14px;font-family:var(--mono);font-size:12px;max-height:340px;overflow:auto;white-space:pre-wrap;word-break:break-all}
 /* «Папки» в «Подробнее»: какие папки Диска уже скачаны целиком */

@@ -67,6 +67,7 @@ from unlim_common import (
     count_failed,
     ensure_unlim_schema,
     get_sk_uid,
+    is_json_auth_error,
     make_cid,
     make_session as common_make_session,
     reset_failed_files,
@@ -737,10 +738,11 @@ def get_preview_url(s, sk, uid, path: str) -> str | None:
 
     Ссылки в ответе подписаны и живут недолго, поэтому берём их прямо перед скачиванием.
     """
+    base_url = getattr(s, "yadisk_base", BASE).rstrip("/")
     body = {"sk": sk, "connection_id": make_cid(uid), "apiMethod": "mpfs/info",
             "requestParams": {"path": path, "meta": "sizes"}}
     try:
-        r = s.post(f"{BASE}/models-v2", params={"m": "mpfs/info"}, json=body, timeout=(30, 60))
+        r = s.post(f"{base_url}/models-v2", params={"m": "mpfs/info"}, json=body, timeout=(30, 60))
         if r.status_code != 200:
             return None
         data = r.json()
@@ -762,12 +764,13 @@ def get_file_url(s, sk, uid, path: str) -> tuple[str | None, PrepareError | None
     Ошибка gone («такого файла нет») — только слова Яндекса: воркер верит им, лишь когда
     ссылки на другие файлы Яндекс в это же время выдаёт (Worker._confirm_gone).
     """
+    base_url = getattr(s, "yadisk_base", BASE).rstrip("/")
     body = {"sk": sk,
             "connection_id": make_cid(uid),
             "apiMethod": "mpfs/url",
             "requestParams": {"path": path}}
     try:
-        r = s.post(f"{BASE}/models-v2", params={"m": "mpfs/url"}, json=body, timeout=(30, 60))
+        r = s.post(f"{base_url}/models-v2", params={"m": "mpfs/url"}, json=body, timeout=(30, 60))
     except requests.exceptions.Timeout:
         err = PrepareError("timeout", "Яндекс не выдал ссылку на файл за 60 с (ReadTimeout)")
         log.warning(f"url exc: {err}")
@@ -808,9 +811,12 @@ def get_file_url(s, sk, uid, path: str) -> tuple[str | None, PrepareError | None
     elif "error" in data:
         e = data.get("error")
         e_str = (e.get("title") or e.get("id") or str(e)) if isinstance(e, dict) else str(e)
-        gone = any(t in str(e).lower() for t in ("not found", "notfound", "не найден"))
-        err = PrepareError("gone" if gone else "prepare_failed",
-                           f"Яндекс не выдал ссылку на файл: {e_str} | ответ: {str(e)[:200]}{trace}")
+        if is_json_auth_error(e):
+            err = PrepareError("auth_expired", f"Яндекс отклонил сессию/sk: {e_str}{trace}")
+        else:
+            gone = any(t in str(e).lower() for t in ("not found", "notfound", "не найден"))
+            err = PrepareError("gone" if gone else "prepare_failed",
+                               f"Яндекс не выдал ссылку на файл: {e_str} | ответ: {str(e)[:200]}{trace}")
     elif not isinstance(data.get("file"), str) or not data["file"]:
         err = PrepareError("prepare_failed", f"В ответе Яндекса нет ссылки на файл | ответ: {str(data)[:200]}{trace}")
     else:
@@ -824,12 +830,13 @@ def get_file_url(s, sk, uid, path: str) -> tuple[str | None, PrepareError | None
 
 def prepare_zip(s, sk, uid, paths: list[str]) -> tuple[str | None, PrepareError | None]:
     """Просит Яндекс собрать ZIP из файлов. Возвращает (download_url, None) или (None, ошибка)."""
+    base_url = getattr(s, "yadisk_base", BASE).rstrip("/")
     body = {"sk": sk,
             "connection_id": make_cid(uid),
             "apiMethod": "mpfs/bulk-download-prepare",
             "requestParams": {"items": paths}}
     try:
-        r = s.post(f"{BASE}/models-v2",
+        r = s.post(f"{base_url}/models-v2",
                    params={"m": "mpfs/bulk-download-prepare"},
                    json=body, timeout=(30, 90))
     except requests.exceptions.Timeout:
@@ -845,6 +852,12 @@ def prepare_zip(s, sk, uid, paths: list[str]) -> tuple[str | None, PrepareError 
         log.warning(f"prepare exc: {err}")
         return None, err
 
+    trace = response_trace(r)
+    if "captcha" in str(getattr(r, "text", "") or "").lower()[:2000]:
+        err = PrepareError("rate_limit", f"Яндекс показал капчу: слишком частые запросы (HTTP {r.status_code}){trace}",
+                           r.status_code, _retry_after_sec(r))
+        log.warning(f"prepare {err}")
+        return None, err
     if r.status_code != 200:
         return None, _prepare_http_error(r)
 
@@ -852,7 +865,6 @@ def prepare_zip(s, sk, uid, paths: list[str]) -> tuple[str | None, PrepareError 
         data = r.json()
     except Exception:
         data = None
-    trace = response_trace(r)
     if data is None:
         err = PrepareError("invalid_json", f"Ответ Яндекса не JSON ({r.text[:200]}){trace}")
     elif not isinstance(data, dict):
@@ -860,7 +872,10 @@ def prepare_zip(s, sk, uid, paths: list[str]) -> tuple[str | None, PrepareError 
     elif "error" in data:
         e = data.get("error")
         e_str = (e.get("title") or e.get("id") or str(e)) if isinstance(e, dict) else str(e)
-        err = PrepareError("prepare_failed", f"Ошибка сервиса Яндекса: {e_str} | ответ: {str(e)[:200]}{trace}")
+        if is_json_auth_error(e):
+            err = PrepareError("auth_expired", f"Яндекс отклонил сессию/sk: {e_str}{trace}")
+        else:
+            err = PrepareError("prepare_failed", f"Ошибка сервиса Яндекса: {e_str} | ответ: {str(e)[:200]}{trace}")
     elif not data.get("download_url"):
         err = PrepareError("prepare_failed", f"В ответе Яндекса отсутствует download_url | ответ: {str(data)[:200]}{trace}")
     else:
@@ -1539,6 +1554,11 @@ class Worker:
         ids = [it["file_id"] for it in batch]
         t_prep = time.monotonic()
         url, err = prepare_zip(self.session, self.sk, self.uid, ids)
+        if err is not None and err.is_auth:
+            # sk живёт несколько часов: при 401/403 обновляем и пробуем ещё раз, не засчитывая отказ
+            old_sk = self.sk
+            if self._refresh_auth() and self.sk != old_sk:
+                url, err = prepare_zip(self.session, self.sk, self.uid, ids)
         if err is not None:
             self._on_prepare_failed(batch, err)
             return
@@ -1612,6 +1632,11 @@ class Worker:
 
         for attempt in range(2):
             url, err = get_file_url(self.session, self.sk, self.uid, fid)
+            if err is not None and err.is_auth:
+                # sk мог истечь во время долгой работы: обновляем и повторяем сразу без паузы и streak
+                old_sk = self.sk
+                if self._refresh_auth() and self.sk != old_sk:
+                    url, err = get_file_url(self.session, self.sk, self.uid, fid)
             if err is not None and err.kind == "gone":
                 err = self._confirm_gone(fid, err)
             else:

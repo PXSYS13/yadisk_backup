@@ -1081,3 +1081,72 @@ def test_help_answers_deleted_files_with_real_buttons():
             assert f"«{label}»" in text and label in ui, label
         assert "_заменённые" in text
         assert "«Файла больше нет на Диске»" in text and "Файла больше нет на Диске" in reasons
+
+
+_FILES_HARNESS = r"""
+const path = require('path');
+const inp = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+global.window = globalThis;
+global.addEventListener = () => {};
+global.location = { search: '', hash: '#/details/disk', pathname: '/' };
+const nodes = {};
+const el = () => ({ innerHTML: '', textContent: '', className: '', value: '', href: '', dataset: {}, style: {},
+  addEventListener() {}, setAttribute() {}, scrollIntoView() {},
+  classList: { add() {}, remove() {}, toggle() {} } });
+global.document = Object.assign(el(), { documentElement: el(), body: el(), createElement: el,
+  querySelectorAll: () => [], querySelector: () => null, getElementById: (id) => (nodes[id] = nodes[id] || el()) });
+global.localStorage = { getItem: () => null, setItem() {} };
+global.matchMedia = () => ({ matches: false, addEventListener() {} });
+for (const f of ['core.js', 'components.js', 'screens/details.js']) require(path.join(process.env.JS_DIR, f));
+const App = window.App;
+const asked = [];
+App.api.get = async (url) => {
+  asked.push(url);
+  if (url.includes('/files?')) {
+    const status = new URL('http://x' + url).searchParams.get('status') || 'not_downloaded';
+    return { ok: true, data: inp[status] || inp.not_downloaded };
+  }
+  return { ok: true, data: { ok: true, items: [], total: 0, failed: 0, reasons: {}, folders: [], empty: true } };
+};
+const tick = () => new Promise((r) => setTimeout(r, 20));
+(async () => {
+  App.screens.details.mount(el());
+  App.screens.details.show({ source: 'disk' });
+  await tick();
+  const notDone = { tabs: nodes['det-files-tabs'].innerHTML, body: nodes['det-files-body'].innerHTML,
+    csv: nodes['det-export-csv'].href, txt: nodes['det-export-txt'].href };
+  App.actions['files-filter']({ dataset: { status: 'downloaded' } });
+  await tick();
+  const done = { tabs: nodes['det-files-tabs'].innerHTML, body: nodes['det-files-body'].innerHTML,
+    csv: nodes['det-export-csv'].href };
+  App.actions['fp-files']({ dataset: { path: 'disk:/Фото' } });
+  await tick();
+  const filtered = { folder: nodes['det-files-folder'].innerHTML, csv: nodes['det-export-csv'].href };
+  App.screens.details.show({ source: 'unlim' });
+  await tick();
+  const afterSwitch = { csv: nodes['det-export-csv'].href };
+  process.stdout.write(JSON.stringify({ notDone, done, filtered, afterSwitch, asked }));
+})();
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
+def test_details_file_list_tabs_folder_filter_and_export_links():
+    import webapp.file_list
+
+    payload = {
+        "not_downloaded": webapp.file_list.demo_file_list("disk", status="not_downloaded"),
+        "downloaded": webapp.file_list.demo_file_list("disk", status="downloaded"),
+    }
+    res = subprocess.run(["node", "-e", _FILES_HARNESS], input=json.dumps(payload), capture_output=True,
+                         text=True, encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout)
+    assert "Не скачанные" in out["notDone"]["tabs"] and "Скачанные" in out["notDone"]["tabs"]
+    assert "IMG_2042.JPG" in out["notDone"]["body"]
+    assert "format=csv" in out["notDone"]["csv"] and "status=not_downloaded" in out["notDone"]["csv"]
+    assert "format=txt" in out["notDone"]["txt"]
+    assert "Договор аренды.pdf" in out["done"]["body"]
+    assert "status=downloaded" in out["done"]["csv"]
+    assert "/Фото" in out["filtered"]["folder"] and "folder=disk%3A%2F" in out["filtered"]["csv"]
+    assert "status=not_downloaded" in out["afterSwitch"]["csv"] and "/api/unlim/files/export" in out["afterSwitch"]["csv"]

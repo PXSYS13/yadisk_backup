@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 
@@ -18,8 +19,18 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from downloader import account_info, api_error_details, is_overdraft, make_browse_client, overdraft_account
-from unlim_common import (AuthExpiredError, cookies_dict, foreign_cookie_domains, get_sk_uid, make_session,
-                          missing_required_cookies)
+from unlim_common import (
+    REQUIRED_COOKIES,
+    AuthExpiredError,
+    cookies_dict,
+    expired_required_cookies,
+    foreign_cookie_domains,
+    get_sk_uid,
+    make_session,
+    missing_required_cookies,
+    parse_cookies_text,
+    resolve_cookies_base,
+)
 from webapp import config, paths
 
 log = logging.getLogger("webui")
@@ -127,95 +138,91 @@ def token_snapshot(token: str) -> dict:
 
 
 def cookies_report(arr: list) -> dict:
-    """Проверяет массив кук (формат Cookie-Editor) на наличие обязательных."""
+    """Проверяет массив кук на наличие обязательных, срок действия и допустимый домен Яндекса."""
     if not isinstance(arr, list):
         return {"ok": False, "msg": "Должен быть массив", "count": 0}
+    expired = expired_required_cookies(arr)
+    if expired:
+        return {
+            "ok": False,
+            "msg": f"Срок действия данных входа уже истёк ({', '.join(expired)}). "
+                   f"Откройте disk.yandex.ru в браузере, убедитесь, что вы вошли, и скопируйте заново.",
+            "count": len(arr),
+        }
     missing = missing_required_cookies(arr)
     if missing:
-        return {"ok": False,
-                "msg": f"Не хватает кук: {', '.join(missing)}. "
-                       f"Залогинься в браузере на disk.yandex.ru и заэкспортируй заново.",
-                "count": len(arr)}
+        if "Session_id" in missing and "sessionid2" in missing and "yandexuid" not in missing:
+            return {
+                "ok": False,
+                "msg": f"Не хватает защищённых кук ({', '.join(missing)}): они помечены HttpOnly и не копируются "
+                       f"через консоль браузера. Используйте расширение Cookie-Editor (Export → Export as JSON) "
+                       f"или Copy as cURL из вкладки Сеть (Network).",
+                "count": len(arr),
+            }
+        return {
+            "ok": False,
+            "msg": f"Не хватает кук: {', '.join(missing)}. "
+                   f"Войдите в браузере на disk.yandex.ru и скопируйте данные заново.",
+            "count": len(arr),
+        }
     foreign = foreign_cookie_domains(arr)
     if foreign:
-        return {"ok": False,
-                "msg": f"Данные входа скопированы с {', '.join(foreign)}, а нужны с disk.yandex.ru. "
-                       f"Откройте именно disk.yandex.ru, войдите и скопируйте заново.",
-                "count": len(arr)}
-    return {"ok": True, "msg": f"Куки OK ({len(arr)} шт)", "count": len(arr)}
-
-
-def parse_cookies_text(text: str) -> list | None:
-    """Массив кук из вставленного текста: JSON Cookie-Editor, Header String или Netscape.
-
-    None — ничего похожего на куки. Cookie-Editor по умолчанию предлагает разные
-    форматы, и люди вставляли «Header String» или файл cookies.txt — раньше это
-    отвергалось как «не похоже на экспорт».
-    """
-    text = (text or "").strip().lstrip(chr(0xFEFF)).strip()  # BOM из Блокнота
-    if not text:
-        return None
-    try:
-        raw = json.loads(text)
-    except ValueError:
-        raw = None
-    if isinstance(raw, dict) and isinstance(raw.get("cookies"), list):
-        raw = raw["cookies"]
-    if isinstance(raw, list):
-        return raw
-    if raw is not None:
-        return None
-    rows: list = []
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    if any(ln.count("\t") >= 6 for ln in lines):
-        for ln in lines:
-            if ln.startswith("#") and not ln.startswith("#HttpOnly_"):
-                continue
-            parts = ln.split("\t")
-            if len(parts) >= 7:
-                domain = parts[0].removeprefix("#HttpOnly_")
-                rows.append({"name": parts[5].strip(), "value": parts[6].strip(), "domain": domain})
-        return rows or None
-    header = re.sub(r"^cookie:\s*", "", " ".join(lines), flags=re.IGNORECASE)
-    for part in header.split(";"):
-        name, eq, value = part.strip().partition("=")
-        if eq and name and " " not in name:
-            rows.append({"name": name, "value": value.strip()})
-    return rows or None
+        return {
+            "ok": False,
+            "msg": f"Данные входа скопированы с {', '.join(foreign)}, а нужны с disk.yandex.ru. "
+                   f"Откройте именно disk.yandex.ru, войдите и скопируйте заново.",
+            "count": len(arr),
+        }
+    base_url, tld = resolve_cookies_base(arr)
+    picked = cookies_dict(arr, base_domain=tld)
+    missing_after = [n for n in REQUIRED_COOKIES if n not in picked]
+    if missing_after:
+        return {
+            "ok": False,
+            "msg": f"Не удалось использовать обязательные куки ({', '.join(missing_after)}) для disk.{tld}: "
+                   f"они с другого домена или содержат недопустимые символы. Откройте disk.yandex.ru "
+                   f"и скопируйте данные заново через Cookie-Editor (Export → Export as JSON).",
+            "count": len(arr),
+        }
+    return {"ok": True, "msg": f"Куки OK ({len(arr)} шт)", "count": len(arr), "base": base_url}
 
 
 def verify_cookies(arr: list) -> dict:
     """Пускает ли Яндекс с этими куками: та же страница, с которой начинает работу Безлимит.
 
     ok=False + rejected — Яндекс явно не пустил (вход завершён, не тот аккаунт или сайт);
-    ok=True + unreachable — проверить не удалось (сбой, сеть): сохраняем, проверит скачивание.
+    ok=True + unreachable — проверить не удалось (сбой, капча, сеть): сохраняем, проверит скачивание.
     """
+    base_url, tld = resolve_cookies_base(arr)
     try:
-        s = make_session(cookies_dict(arr))
+        s = make_session(cookies_dict(arr, base_domain=tld), base=base_url)
         try:
             get_sk_uid(s)
         finally:
             s.close()
     except AuthExpiredError:
-        log.warning("куки отклонены Яндексом при сохранении")
+        log.warning("куки отклонены Яндексом при сохранении (%s)", base_url)
         return {"ok": False, "rejected": True,
                 "msg": "Яндекс не пустил с этими данными входа: вход в браузере уже завершён или "
                        "скопировано не с того сайта. Откройте disk.yandex.ru, проверьте, что вы вошли в свой "
                        "аккаунт, и скопируйте данные заново."}
-    except Exception as e:  # noqa: BLE001 — сеть, 50x, изменённая страница: это не «плохие куки»
+    except Exception as e:  # noqa: BLE001 — сеть, капча, 50x, изменённая страница: это не «плохие куки»
         log.warning("проверка кук не удалась: %s: %s", type(e).__name__, e)
-        return {"ok": True, "unreachable": True,
-                "msg": "Яндекс сейчас не ответил на проверку — сохранил, проверю при скачивании"}
-    return {"ok": True, "msg": "Яндекс пускает с этими данными входа"}
+        msg = ("Яндекс попросил проверку на робота (капчу) — сохранил данные входа, проверю при скачивании"
+               if "капч" in str(e).lower()
+               else "Яндекс сейчас не ответил на проверку — сохранил, проверю при скачивании")
+        return {"ok": True, "unreachable": True, "msg": msg}
+    return {"ok": True, "msg": "Яндекс пускает с этими данными входа", "base": base_url}
 
 
 def check_cookies() -> dict:
     if not paths.COOKIES_FILE.exists():
         return {"ok": False, "msg": "cookies.json не загружен", "count": 0}
     try:
-        raw = json.loads(paths.COOKIES_FILE.read_text(encoding="utf-8"))
+        text = paths.COOKIES_FILE.read_text(encoding="utf-8-sig")
     except Exception as e:
         return {"ok": False, "msg": f"Ошибка: {e}", "count": 0}
+    raw = parse_cookies_text(text)
     if not isinstance(raw, list):
         return {"ok": False, "msg": "Формат не Cookie-Editor", "count": 0}
     rep = cookies_report(raw)
@@ -348,32 +355,54 @@ def api_clear_token():
     return {"ok": True}
 
 
+def _atomic_write_cookies(arr: list) -> None:
+    """Атомарно записывает cookies.json с короткими повторами на Windows (блокировка антивирусом/воркером)."""
+    parent = paths.COOKIES_FILE.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".cookies-", suffix=".tmp", dir=str(parent))
+    tmp = paths.COOKIES_FILE.parent / os.path.basename(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(arr, ensure_ascii=False, indent=2))
+        config.owner_only(tmp)  # данные входа — только владельцу компьютера
+        last_err: OSError | None = None
+        for attempt in range(10):
+            try:
+                os.replace(tmp, paths.COOKIES_FILE)
+                return
+            except PermissionError as e:
+                last_err = e
+                if attempt < 9:
+                    time.sleep(0.15)
+        if last_err is not None:
+            raise last_err
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 @router.post("/api/cookies")
 def api_set_cookies(payload: CookiesPayload):
     """Сохраняет cookies.json атомарно через tmp+replace с предварительной валидацией."""
     arr = payload.cookies if payload.cookies is not None else parse_cookies_text(payload.text or "")
     if arr is None:
         raise HTTPException(400, "Это не похоже на данные входа. В Cookie-Editor нажмите Export → "
-                                 "Export as JSON и вставьте сюда целиком")
+                                 "Export as JSON и вставьте сюда целиком (также подходят Header String, "
+                                 "cookies.txt и Copy as cURL)")
     val = cookies_report(arr)
     if not val.get("ok"):
         raise HTTPException(400, val.get("msg", "Невалидные cookies"))
     live = verify_cookies(arr)
     if not live.get("ok"):
         raise HTTPException(400, live["msg"])
-    tmp = paths.COOKIES_FILE.with_suffix(".json.tmp")
     try:
-        tmp.write_text(json.dumps(arr, ensure_ascii=False, indent=2), encoding="utf-8")
-        config.owner_only(tmp)  # данные входа — только владельцу компьютера
-        os.replace(tmp, paths.COOKIES_FILE)
+        _atomic_write_cookies(arr)
     except Exception as e:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
         raise HTTPException(500, f"Не удалось сохранить cookies.json: {e}")
-    log.info("cookies сохранены: %d шт", len(arr))
+    log.info("cookies сохранены: %d шт (%s)", len(arr), val.get("base", "yandex.ru"))
     _resume_branch("unlim")
     return {"ok": True, "check": check_cookies(), "saved_count": len(arr), "live": live}
 

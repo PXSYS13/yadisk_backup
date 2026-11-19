@@ -32,6 +32,9 @@
 
   function buttonsHtml(it) {
     const b = [`<button class="small" data-action="links-open" data-id="${it.id}">${icon('folder')}Открыть папку</button>`];
+    if (it.files && it.files.total) {
+      b.push(`<button class="small" data-action="links-files" data-id="${it.id}" data-name="${esc(it.name)}">${icon('list')}Файлы</button>`);
+    }
     if (['waiting', 'limited', 'error', 'done_partial', 'paused'].includes(it.state)) {
       b.push(`<button class="small" data-action="links-retry-now" data-id="${it.id}">${icon('refresh')}Попробовать сейчас</button>`);
     }
@@ -41,6 +44,91 @@
     b.push(`<button class="small ghost" data-action="links-remove" data-id="${it.id}" data-name="${esc(it.name)}">` +
       `${icon('trash')}Убрать из списка</button>`);
     return b.join('');
+  }
+
+  // ── Список файлов выбранной ссылки: скачанные и нескачанные + CSV/TXT ──
+  const FILE_BADGE = {
+    downloaded: ['ok', 'скачан'], queued: ['', 'в очереди'], deferred: ['wait', 'ждёт Яндекса'],
+    failed: ['err', 'не скачался'], limited: ['wait', 'лимит Яндекса'],
+  };
+  const lf = { linkId: null, linkName: '', status: 'not_downloaded', q: '', page: 1, limit: 100, data: null, seq: 0 };
+  let lfTimer = null;
+
+  function lfParams(extra = {}) {
+    const p = new URLSearchParams();
+    p.set('link_id', String(lf.linkId));
+    p.set('status', extra.status || lf.status);
+    if (lf.q) p.set('q', lf.q);
+    if (extra.format) p.set('format', extra.format);
+    else { p.set('page', String(lf.page)); p.set('limit', String(lf.limit)); }
+    if (App.demo) p.set('demo', App.demo);
+    return p.toString();
+  }
+
+  function syncLfExport() {
+    const csv = byId('links-export-csv');
+    const txt = byId('links-export-txt');
+    if (csv && lf.linkId) csv.href = `/api/links/files/export?${lfParams({ format: 'csv' })}`;
+    if (txt && lf.linkId) txt.href = `/api/links/files/export?${lfParams({ format: 'txt' })}`;
+  }
+
+  async function loadLinkFiles() {
+    if (!lf.linkId) return;
+    const seq = ++lf.seq;
+    syncLfExport();
+    const res = await App.api.get(`/api/links/files?${lfParams()}`);
+    if (seq !== lf.seq) return;
+    const data = res.ok && res.data ? res.data : null;
+    const error = data ? data.error : res.error || 'Не получилось загрузить список';
+    lf.data = error ? { error, items: [], counts: {}, total: 0, page: 1, pages: 1 } : data;
+    paintLinkFiles();
+  }
+
+  function paintLinkFiles() {
+    const card = byId('links-files-card');
+    if (!card) return;
+    card.classList.toggle('hidden', !lf.linkId);
+    if (!lf.linkId) return;
+    App.text(byId('links-files-title'), `Файлы: ${lf.linkName || 'Ссылка'}`);
+    syncLfExport();
+    const d = lf.data;
+    const cnt = (d && d.counts) || {};
+    const tabs = [
+      ['not_downloaded', 'Не скачанные', cnt.not_downloaded],
+      ['downloaded', 'Скачанные', cnt.downloaded],
+      ['all', 'Все', cnt.all],
+    ];
+    if (cnt.limited || lf.status === 'limited') tabs.push(['limited', 'Лимит Яндекса', cnt.limited]);
+    App.html(byId('links-files-tabs'), tabs.map(([st, label, n]) =>
+      `<button type="button" class="seg-tab${lf.status === st ? ' active' : ''}" data-action="links-files-filter" data-status="${st}">` +
+      `${esc(label)}${n != null ? ` <span class="cnt">${fmt.num(n)}</span>` : ''}</button>`).join(''));
+    const body = byId('links-files-body');
+    const pager = byId('links-files-pager');
+    if (!d) { App.html(body, '<p class="muted">Загружаю…</p>'); App.html(pager, ''); return; }
+    if (d.error) { App.html(body, `<p class="muted">${esc(d.error)}</p>`); App.html(pager, ''); return; }
+    const items = d.items || [];
+    if (!items.length) {
+      App.html(body, `<div class="empty">${icon(lf.status === 'not_downloaded' && !lf.q ? 'check' : 'info')}${
+        esc(lf.q ? `По запросу «${lf.q}» ничего не нашлось.` : lf.status === 'not_downloaded' ? 'Нескачанных файлов нет.' : 'Файлов нет.')}</div>`);
+      App.html(pager, '');
+      return;
+    }
+    const rows = items.map((x) => {
+      const [cls, label] = FILE_BADGE[x.state] || ['', x.state_label || x.state];
+      const dirLine = x.dir && x.dir !== '/' ? `<div class="file-path">${esc(x.dir)}</div>` : '';
+      return `<tr><td class="name">${esc(x.name)}${dirLine}</td><td>${x.size ? fmt.bytes(x.size) : '—'}</td>` +
+        `<td><span class="badge ${cls}">${esc(label)}</span></td><td class="small muted">${esc(x.reason || '')}</td></tr>`;
+    }).join('');
+    App.html(body, `<div class="scroll"><table class="list"><thead><tr><th>Файл</th><th>Размер</th><th>Состояние</th><th>Подробности</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+    const total = d.total || 0;
+    const from = (d.page - 1) * d.limit + 1;
+    const to = Math.min(total, from + items.length - 1);
+    App.html(pager, total > d.limit
+      ? `<span class="tiny">Показаны ${fmt.num(from)}–${fmt.num(to)} из ${fmt.num(total)}</span>` +
+        `<div class="row" style="gap:6px"><button type="button" class="small" data-action="links-files-page" data-page="${d.page - 1}"${d.page <= 1 ? ' disabled' : ''}>Назад</button>` +
+        `<span class="tiny">Стр. ${fmt.num(d.page)} из ${fmt.num(d.pages)}</span>` +
+        `<button type="button" class="small" data-action="links-files-page" data-page="${d.page + 1}"${d.page >= d.pages ? ' disabled' : ''}>Далее</button></div>`
+      : `<span class="tiny">Всего: ${fmt.files(total)}</span>`);
   }
 
   // Карточки по id: обновляются только изменившиеся части — кнопки не пересоздаются на каждом опросе
@@ -122,6 +210,18 @@
           <div id="links-problem"></div>
           <p class="empty" id="links-empty">${icon('info')}Пока нет ссылок — вставьте ссылку выше и нажмите «Скачать».</p>
           <div class="stack" id="links-list"></div></div>
+        <div class="card hidden" id="links-files-card"><div class="card-head"><span class="icon-box info">${icon('list')}</span>
+            <div class="grow"><h2 id="links-files-title">Файлы ссылки</h2>
+              <span class="tiny">Скачанные и ещё не скачанные файлы по этой ссылке</span></div>
+            <button type="button" class="small ghost" data-action="links-files-close">${icon('x')}Скрыть</button></div>
+          <div class="seg-tabs" id="links-files-tabs"></div>
+          <div class="files-toolbar">
+            <div class="search-wrap">${icon('search')}<input type="search" id="links-files-q" placeholder="Поиск по имени или пути…" autocomplete="off" spellcheck="false"></div>
+            <a class="btn small" id="links-export-csv" href="#">${icon('download')}Скачать CSV</a>
+            <a class="btn small ghost" id="links-export-txt" href="#">${icon('file')}TXT</a>
+          </div>
+          <div id="links-files-body"></div>
+          <div class="pager" id="links-files-pager"></div></div>
         <div class="card" id="links-where"><div class="card-head"><span class="icon-box plain">${icon('folder')}</span>
             <div class="grow"><h3>Куда скачивается</h3></div></div>
           <div class="path-box">${icon('drive')}<code id="links-folder"></code></div>
@@ -132,6 +232,17 @@
         </div>`;
       // Enter в поле ссылки нажимает «Скачать» сам (кнопка — первая в форме); отправку формы гасим
       byId('links-form').addEventListener('submit', (e) => e.preventDefault());
+      const qEl = byId('links-files-q');
+      if (qEl && qEl.addEventListener) {
+        qEl.addEventListener('input', () => {
+          clearTimeout(lfTimer);
+          lfTimer = setTimeout(() => {
+            lf.q = (qEl.value || '').trim();
+            lf.page = 1;
+            loadLinkFiles();
+          }, 280);
+        });
+      }
     },
     update(s) {
       const L = s.links || { items: [], state: 'idle' };
@@ -183,5 +294,37 @@
     const yes = await App.confirm({ title: `Убрать «${btn.dataset.name || 'ссылку'}» из списка?`, ok: 'Убрать из списка',
       text: 'Файлы, которые уже скачались, останутся в папке. Программа просто перестанет качать эту ссылку.' });
     if (yes) App.run(btn, () => App.api.post('/api/links/remove', { id: Number(btn.dataset.id) }));
+  });
+
+  App.action('links-files', (btn) => {
+    lf.linkId = Number(btn.dataset.id) || null;
+    lf.linkName = btn.dataset.name || '';
+    lf.status = 'not_downloaded';
+    lf.q = '';
+    lf.page = 1;
+    lf.data = null;
+    const qEl = byId('links-files-q');
+    if (qEl) qEl.value = '';
+    paintLinkFiles();
+    loadLinkFiles();
+    const card = byId('links-files-card');
+    if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  App.action('links-files-close', () => {
+    lf.linkId = null;
+    lf.data = null;
+    paintLinkFiles();
+  });
+  App.action('links-files-filter', (btn) => {
+    lf.status = btn.dataset.status || 'not_downloaded';
+    lf.page = 1;
+    paintLinkFiles();
+    loadLinkFiles();
+  });
+  App.action('links-files-page', (btn) => {
+    const p = Number(btn.dataset.page) || 1;
+    if (p < 1) return;
+    lf.page = p;
+    loadLinkFiles();
   });
 })();

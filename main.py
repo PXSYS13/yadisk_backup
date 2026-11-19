@@ -605,6 +605,27 @@ def cmd_verify(cfg: dict, args: argparse.Namespace) -> int:
     return run_check(items, save)
 
 
+def cmd_export(cfg: dict, args: argparse.Namespace) -> int:
+    """Выгружает список скачанных / нескачанных файлов из state.db в CSV или TXT."""
+    from webapp.file_list import VALID_STATUSES, export_to_file
+
+    status = args.status.replace("-", "_")
+    if status not in VALID_STATUSES:
+        print(f"Неизвестный статус: {args.status}. Доступны: {', '.join(VALID_STATUSES)}", file=sys.stderr)
+        return 2
+    if not DB_FILE.exists():
+        print("База state.db ещё не создана — сначала выполните scan.")
+        return 1
+    fmt = "txt" if args.format == "txt" else "csv"
+    out = args.out or f"yadisk-disk-{status}.{fmt}"
+    n = export_to_file(
+        "disk", out, status=status, fmt=fmt,
+        q=args.search or "", folder=args.folder or "", db_file=DB_FILE,
+    )
+    print(f"Список сохранён: {out} ({files_text(n)})")
+    return 0
+
+
 # ── argparse ────────────────────────────────────────────────────────────────
 
 
@@ -661,6 +682,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify = sub.add_parser("verify", help="Проверить, что скачанные файлы на месте: размер и MD5")
     p_verify.set_defaults(func=cmd_verify)
 
+    p_export = sub.add_parser("export", help="Выгрузить список скачанных или нескачанных файлов (CSV/TXT)")
+    p_export.add_argument(
+        "--status",
+        default="not_downloaded",
+        help="Какие файлы выгрузить: downloaded, not_downloaded, all, queued, deferred, failed, excluded",
+    )
+    p_export.add_argument("--format", choices=("csv", "txt"), default="csv", help="Формат: csv (для Excel) или txt")
+    p_export.add_argument("--out", default=None, help="Путь к выходному файлу")
+    p_export.add_argument("--folder", default="", help="Только файлы внутри указанной папки Диска")
+    p_export.add_argument("--search", default="", help="Фильтр по части имени или пути")
+    p_export.set_defaults(func=cmd_export)
+
     return p
 
 
@@ -676,8 +709,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  YouTube: {YOUTUBE_VIDEO_URL}")
     print("=" * 65)
 
-    # stats и verify читают только локальную БД — токен не нужен
-    require_token = args.cmd not in ("stats", "verify")
+    # stats, verify и export читают только локальную БД — токен не нужен
+    require_token = args.cmd not in ("stats", "verify", "export")
     cfg = load_config(require_token=require_token)
     setup_logging(cfg["log_level"])
     log.info(

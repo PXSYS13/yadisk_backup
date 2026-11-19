@@ -625,14 +625,17 @@
     cookies: `<div class="access-form" data-form="cookies">
         <ol class="small muted" style="padding-left:18px">
           <li>Установите в браузер расширение Cookie-Editor.</li>
-          <li>Откройте disk.yandex.ru и войдите в свой аккаунт.</li>
+          <li>Откройте disk.yandex.ru (или ваш региональный домен Диска) и войдите в свой аккаунт.</li>
           <li>Нажмите на значок Cookie-Editor → Export → Export as JSON.</li>
-          <li>Вставьте скопированное сюда и нажмите «Сохранить доступ».</li>
+          <li>Вставьте скопированное сюда или загрузите файл и нажмите «Сохранить доступ».</li>
         </ol>
         <p class="small" style="margin-top:8px"><a href="/guide" target="_blank" rel="noopener">Подробная инструкция с картинками</a></p>
-        <label class="field"><span>Данные входа (JSON из Cookie-Editor)</span>
+        <p class="tiny" style="margin-top:4px">Подходят JSON из Cookie-Editor, cookies.txt (Netscape), Header String и Copy as cURL.</p>
+        <label class="field"><span>Данные входа (cookies)</span>
           <textarea data-field="cookies-input" spellcheck="false" placeholder='[{"name":"Session_id", …}]'></textarea></label>
+        <input type="file" accept=".json,.txt,application/json,text/plain" class="hidden" data-field="cookies-file">
         <div class="row"><button class="primary" data-action="cookies-save">${icon('check')}Сохранить доступ</button>
+          <button type="button" class="small" data-action="cookies-pick-file">${icon('upload')}Загрузить из файла</button>
           <span class="small muted" data-field="cookies-result"></span></div></div>`,
   };
   const ROW_TITLES = { token: 'Ключ доступа к Диску', folder: 'Папка для файлов', cookies: 'Доступ к Безлимиту' };
@@ -651,6 +654,23 @@
           <div class="row" data-field="${k}-buttons"></div>
           <div class="${open.includes(k) ? '' : 'hidden'}" data-wrap="${k}" style="width:100%">${FORMS[k]}</div>
         </div>`).join('');
+      if (!el._cookiesFileBound) {
+        el._cookiesFileBound = true;
+        el.addEventListener('change', (ev) => {
+          const inp = ev.target;
+          if (!inp || !inp.dataset || inp.dataset.field !== 'cookies-file') return;
+          const file = inp.files && inp.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = () => {
+            const ta = el.querySelector('[data-field="cookies-input"]');
+            if (ta) ta.value = String(reader.result || '');
+            App.text(el.querySelector('[data-field="cookies-result"]'), `Загружен файл ${file.name} — нажмите «Сохранить доступ»`);
+          };
+          reader.readAsText(file, 'utf-8');
+          inp.value = '';
+        });
+      }
     },
     update(el, s) {
       if (!el || !s) return;
@@ -774,6 +794,11 @@
     }
     return res;
   }));
+
+  App.action('cookies-pick-file', (btn) => {
+    const inp = field(accessRoot(btn), 'cookies-file');
+    if (inp && inp.click) inp.click();
+  });
 
   App.action('cookies-save', (btn) => App.run(btn, async () => {
     const root = accessRoot(btn);

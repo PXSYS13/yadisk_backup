@@ -249,6 +249,25 @@ def collect_via_list(s, sk, uid) -> int:
         try:
             # Терпеливо — только посреди списка: там сбой стоил бы всего уже прочитанного
             page = _list_page_patiently(s, sk, uid, offset) if offset else list_unlim_page(s, sk, uid, offset)
+        except AuthExpiredError as e:
+            # sk живёт несколько часов: при долгом сборе обновляем его и повторяем текущую страницу 1 раз
+            try:
+                new_sk, new_uid = get_sk_uid(s)
+            except Exception:
+                new_sk, new_uid = sk, uid
+            if new_sk and new_sk != sk:
+                sk, uid = new_sk, new_uid
+                log.info("mpfs/list: обновил sk на offset=%d, повторяю страницу", offset)
+                try:
+                    page = _list_page_patiently(s, sk, uid, offset) if offset else list_unlim_page(s, sk, uid, offset)
+                except Exception as e2:
+                    if not offset:
+                        raise
+                    raise ListBroken(seen, e2) from e2
+            else:
+                if not offset:
+                    raise
+                raise ListBroken(seen, e) from e
         except Exception as e:
             if not offset:
                 raise
@@ -574,6 +593,26 @@ def cmd_verify() -> int:
     return run_check(items, save)
 
 
+def cmd_export(out_path: str | None = None, status: str = "not_downloaded", fmt: str = "csv") -> int:
+    """Выгружает список скачанных / нескачанных файлов безлимита в CSV или TXT (без cookies)."""
+    from pathlib import Path
+
+    from webapp.file_list import VALID_STATUSES, export_to_file
+
+    status = (status or "not_downloaded").replace("-", "_")
+    if status not in VALID_STATUSES:
+        print(f"Неизвестный статус: {status}. Доступны: {', '.join(VALID_STATUSES)}", file=sys.stderr)
+        return 2
+    if not os.path.exists(DB_FILE):
+        print("БД пуста — запусти --collect")
+        return 1
+    fmt = "txt" if fmt == "txt" else "csv"
+    target = out_path or f"yadisk-unlim-{status}.{fmt}"
+    n = export_to_file("unlim", target, status=status, fmt=fmt, db_file=Path(DB_FILE))
+    print(f"Список сохранён: {target} ({files_text(n)})")
+    return 0
+
+
 def main():
     ensure_utf8_stdio()
 
@@ -586,6 +625,12 @@ def main():
                     help="Вернуть упавшие и зависшие файлы в очередь")
     ap.add_argument("--verify", action="store_true",
                     help="Проверить, что скачанные файлы на месте: размер и MD5")
+    ap.add_argument("--export", nargs="?", const="", default=None, metavar="PATH",
+                    help="Выгрузить список файлов безлимита (CSV/TXT)")
+    ap.add_argument("--export-status", default="not_downloaded",
+                    help="Статус для --export: downloaded, not_downloaded, all, queued, deferred, failed, excluded")
+    ap.add_argument("--export-format", choices=("csv", "txt"), default="csv",
+                    help="Формат для --export: csv или txt")
     args = ap.parse_args()
     _setup_logging()
     if args.collect:
@@ -596,6 +641,8 @@ def main():
         cmd_retry_failed()
     elif args.verify:
         return cmd_verify()
+    elif args.export is not None:
+        return cmd_export(args.export or None, status=args.export_status, fmt=args.export_format)
     else:
         ap.print_help()
 

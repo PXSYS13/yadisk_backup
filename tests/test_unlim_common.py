@@ -433,3 +433,122 @@ def test_queue_knows_rows_from_the_old_photoslice_list(tmp_path):
     con.commit()
     con.close()
     assert unlim_has_rows_outside(db)
+
+
+def test_load_cookies_supports_bom_and_text_formats(tmp_path):
+    p = tmp_path / "cookies.json"
+    p.write_text(
+        "\ufeff" + json.dumps([
+            {"name": "Session_id", "value": "s1", "domain": ".yandex.kz"},
+            {"name": "yandexuid", "value": "u1", "domain": ".yandex.kz"},
+            {"name": "sessionid2", "value": "s2", "domain": ".yandex.kz"},
+        ]),
+        encoding="utf-8",
+    )
+    loaded = uc.load_cookies(str(p))
+    assert loaded == {"Session_id": "s1", "yandexuid": "u1", "sessionid2": "s2"}
+    assert getattr(loaded, "base_url", None) == "https://disk.yandex.kz"
+    sess = uc.make_session(loaded)
+    assert sess.headers["Origin"] == "https://disk.yandex.kz"
+    assert sess.cookies.get("Session_id", domain=".yandex.kz") == "s1"
+
+
+def test_get_sk_uid_captcha_is_unavailable_not_auth_expired():
+    class CaptchaResp:
+        url = "https://disk.yandex.ru/showcaptcha?retpath=..."
+        status_code = 403
+        text = "<html>SmartCaptcha</html>"
+
+    class FakeSession:
+        def get(self, url, timeout=30):
+            return CaptchaResp()
+
+    with pytest.raises(uc.YandexUnavailableError):
+        uc.get_sk_uid(FakeSession())
+
+
+def test_get_sk_uid_guest_uid_zero_is_auth_expired():
+    class GuestResp:
+        url = "https://disk.yandex.ru/client/disk"
+        status_code = 200
+        text = '<html>{"sk":"u123","uid":"0"}</html>'
+
+    class FakeSession:
+        def get(self, url, timeout=30):
+            return GuestResp()
+
+    with pytest.raises(uc.AuthExpiredError):
+        uc.get_sk_uid(FakeSession())
+
+
+def test_get_sk_uid_escaped_and_photo_fallback():
+    seen = []
+
+    class Resp:
+        def __init__(self, url, text):
+            self.url = url
+            self.status_code = 200
+            self.text = text
+
+    class FakeSession:
+        def get(self, url, timeout=30):
+            seen.append(url)
+            if url.endswith("/client/disk"):
+                return Resp(url, "<html>no state here</html>")
+            return Resp(url, r'<html>\"sk\":\"esc_sk_9\",\"uid\":\"987654\"</html>')
+
+    sk, uid = uc.get_sk_uid(FakeSession())
+    assert (sk, uid) == ("esc_sk_9", "987654")
+    assert len(seen) == 2 and seen[1].endswith("/client/photo")
+
+
+def test_api_call_captcha_403_retries_and_bad_sk_raises_auth(monkeypatch):
+    monkeypatch.setattr(uc.time, "sleep", lambda _: None)
+    calls = []
+
+    class Resp:
+        def __init__(self, status_code, text, json_data=None):
+            self.status_code = status_code
+            self.text = text
+            self.headers = {}
+            self._json = json_data
+
+        def json(self):
+            return self._json
+
+    class CaptchaThenOk:
+        def post(self, url, params=None, json=None, timeout=120):
+            calls.append(1)
+            if len(calls) == 1:
+                return Resp(403, "<html>showcaptcha smartcaptcha</html>")
+            return Resp(200, "[]", [])
+
+    assert uc.api_call(CaptchaThenOk(), "sk", "1", "mpfs/list") == []
+    assert len(calls) == 2
+
+    class BadSk:
+        def post(self, url, params=None, json=None, timeout=120):
+            return Resp(200, '{"error":{"id":"bad_sk"}}', {"error": {"id": "bad_sk"}})
+
+    with pytest.raises(uc.AuthExpiredError):
+        uc.api_call(BadSk(), "old_sk", "1", "mpfs/list")
+
+
+def test_collect_via_list_refreshes_expired_sk_midway(unlim_db, monkeypatch):
+    ud = unlim_db
+    monkeypatch.setattr(ud, "LIST_PAGE", 2)
+    root = {"type": "dir", "path": "/photounlim"}
+    pages = {0: [root, _unlim_item("a.jpg", 10), _unlim_item("b.jpg", 20)],
+             2: [root, _unlim_item("c.jpg", 30)]}
+    sk_seen = []
+
+    def fake_api_call(s, sk, uid, method, params=None, retries=3):
+        sk_seen.append((params["offset"], sk))
+        if params["offset"] == 2 and sk == "old_sk":
+            raise uc.AuthExpiredError("HTTP 403")
+        return pages[params["offset"]]
+
+    monkeypatch.setattr(ud, "api_call", fake_api_call)
+    monkeypatch.setattr(ud, "get_sk_uid", lambda s: ("fresh_sk", "uid"))
+    assert ud.collect_via_list(object(), "old_sk", "uid") == 3
+    assert sk_seen == [(0, "old_sk"), (2, "old_sk"), (2, "fresh_sk")]

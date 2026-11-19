@@ -103,6 +103,9 @@
     } else if (f.complete && f.on_disk === false) {
       tail = '<span class="tiny">в папке скачивания её уже нет</span>';
     }
+    if (f.path && (f.files || f.excluded)) {
+      tail = `<span class="row" style="gap:6px"><button class="small ghost" data-action="fp-files" data-path="${esc(f.path)}">${App.icon('list')}Файлы</button>${tail}</span>`;
+    }
     return `<li class="fp-row"><div class="fp-top">${name}<span class="fp-badges">${badges}</span></div>${bar}
       <div class="fp-meta"><span>${meta}</span>${tail}</div></li>`;
   }
@@ -290,6 +293,151 @@
     App.html(byId('det-verify-list'), list);
   }
 
+  // ── «Список файлов»: скачанные и нескачанные, поиск, пагинация, выгрузка CSV/TXT ──
+  const FILE_BADGE = {
+    downloaded: ['ok', 'скачан'],
+    queued: ['', 'в очереди'],
+    deferred: ['wait', 'ждёт Яндекса'],
+    failed: ['err', 'не скачался'],
+    excluded: ['', 'не выбран'],
+    limited: ['wait', 'лимит Яндекса'],
+  };
+  const NOT_DONE_SUBS = ['not_downloaded', 'queued', 'deferred', 'failed'];
+  const files = { status: 'not_downloaded', q: '', folder: '', sort: 'default', page: 1, limit: 100, data: null, at: 0, seq: 0 };
+  let searchTimer = null;
+
+  function filesParams(extra = {}) {
+    const p = new URLSearchParams();
+    p.set('status', extra.status || files.status);
+    if (files.q) p.set('q', files.q);
+    if (source === 'disk' && files.folder) p.set('folder', files.folder);
+    if (extra.format) p.set('format', extra.format);
+    else {
+      p.set('sort', files.sort);
+      p.set('page', String(files.page));
+      p.set('limit', String(files.limit));
+    }
+    if (App.demo) p.set('demo', App.demo);
+    return p.toString();
+  }
+
+  function syncExportLinks() {
+    const csv = byId('det-export-csv');
+    const txt = byId('det-export-txt');
+    if (csv) csv.href = `/api/${source}/files/export?${filesParams({ format: 'csv' })}`;
+    if (txt) txt.href = `/api/${source}/files/export?${filesParams({ format: 'txt' })}`;
+  }
+
+  async function loadFiles() {
+    files.at = Date.now();
+    const want = source;
+    const seq = ++files.seq;
+    syncExportLinks();
+    const res = await App.api.get(`/api/${want}/files?${filesParams()}`);
+    if (want !== source || seq !== files.seq) return;
+    const data = res.ok && res.data ? res.data : null;
+    const error = data ? data.error : res.error || 'Не получилось загрузить список';
+    files.data = error ? { error, items: [], counts: {}, total: 0, page: 1, pages: 1 } : data;
+    paintFiles();
+  }
+
+  function paintFiles() {
+    const d = files.data;
+    const tabsBox = byId('det-files-tabs');
+    const subBox = byId('det-files-subtabs');
+    const foldBox = byId('det-files-folder');
+    const bodyBox = byId('det-files-body');
+    const pagerBox = byId('det-files-pager');
+    if (!bodyBox) return;
+    syncExportLinks();
+
+    const cnt = (d && d.counts) || {};
+    const mainActive = NOT_DONE_SUBS.includes(files.status) ? 'not_downloaded' : files.status;
+    const mainTabs = [
+      ['not_downloaded', 'Не скачанные', cnt.not_downloaded],
+      ['downloaded', 'Скачанные', cnt.downloaded],
+      ['all', 'Все', cnt.all],
+    ];
+    if (cnt.excluded || files.status === 'excluded') mainTabs.push(['excluded', 'Не выбраны', cnt.excluded]);
+    App.html(tabsBox, mainTabs.map(([st, label, n]) =>
+      `<button type="button" class="seg-tab${mainActive === st ? ' active' : ''}" data-action="files-filter" data-status="${st}">` +
+      `${esc(label)}${n != null ? ` <span class="cnt">${fmt.num(n)}</span>` : ''}</button>`).join(''));
+
+    if (mainActive === 'not_downloaded') {
+      const subs = [
+        ['not_downloaded', 'Все нескачанные', cnt.not_downloaded],
+        ['queued', 'В очереди', cnt.queued],
+        ['deferred', 'Ждут Яндекса', cnt.deferred],
+        ['failed', 'Не скачались', cnt.failed],
+      ];
+      App.html(subBox, subs.map(([st, label, n]) =>
+        `<button type="button" class="sub-tab${files.status === st ? ' active' : ''}" data-action="files-filter" data-status="${st}">` +
+        `${esc(label)}${n != null ? ` (${fmt.num(n)})` : ''}</button>`).join(''));
+      if (subBox && subBox.classList) subBox.classList.remove('hidden');
+    } else {
+      App.html(subBox, '');
+      if (subBox && subBox.classList) subBox.classList.add('hidden');
+    }
+
+    if (source === 'disk' && files.folder) {
+      App.html(foldBox, `<span class="folder-chip"><span class="name">Папка: ${esc(shownPath(files.folder))}</span>` +
+        `<button type="button" data-action="files-clear-folder" title="Показать весь Диск" aria-label="Сбросить папку">${App.icon('x')}</button></span>`);
+      if (foldBox && foldBox.classList) foldBox.classList.remove('hidden');
+    } else {
+      App.html(foldBox, '');
+      if (foldBox && foldBox.classList) foldBox.classList.add('hidden');
+    }
+
+    if (!d) { App.html(bodyBox, '<p class="muted">Загружаю…</p>'); App.html(pagerBox, ''); return; }
+    if (d.error) { App.html(bodyBox, `<p class="muted">Не получилось загрузить список: ${esc(d.error)}</p>`); App.html(pagerBox, ''); return; }
+    const items = d.items || [];
+    if (!items.length) {
+      const emptyText = files.q ? `По запросу «${files.q}» ничего не нашлось.`
+        : files.status === 'not_downloaded' ? 'Нескачанных файлов нет.'
+          : files.status === 'downloaded' ? 'Скачанных файлов пока нет.'
+            : 'Список файлов пуст.';
+      App.html(bodyBox, `<div class="empty">${App.icon(files.status === 'not_downloaded' && !files.q ? 'check' : 'info')}${esc(emptyText)}</div>`);
+      App.html(pagerBox, '');
+      return;
+    }
+
+    const fmtWhen = (ts) => {
+      if (!ts) return '';
+      try {
+        return new Date(ts * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+      } catch (e) { return fmt.hhmm(ts); }
+    };
+    const rows = items.map((x) => {
+      const [cls, label] = FILE_BADGE[x.state] || ['', x.state_label || x.state];
+      const detail = x.state === 'downloaded'
+        ? (x.downloaded_at ? fmtWhen(x.downloaded_at) : 'уже в папке')
+        : (x.reason || (x.state === 'queued' ? 'ждёт своей очереди' : ''));
+      const dirLine = x.dir && x.dir !== '/' ? `<div class="file-path">${esc(x.dir)}</div>` : '';
+      return `<tr><td class="name">${esc(x.name)}${x.preview ? ' <span class="badge">есть превью</span>' : ''}${dirLine}</td>` +
+        `<td>${x.size ? fmt.bytes(x.size) : '—'}</td>` +
+        `<td><span class="badge ${cls}">${esc(label)}</span></td>` +
+        `<td class="small muted">${esc(detail)}</td></tr>`;
+    }).join('');
+    App.html(bodyBox, `<div class="scroll"><table class="list"><thead><tr><th>Файл</th><th>Размер</th><th>Состояние</th><th>Подробности</th></tr></thead>` +
+      `<tbody>${rows}</tbody></table></div>`);
+
+    const total = d.total || 0;
+    const from = (d.page - 1) * d.limit + 1;
+    const to = Math.min(total, from + items.length - 1);
+    const pager = total > d.limit
+      ? `<span class="tiny">Показаны ${fmt.num(from)}–${fmt.num(to)} из ${fmt.num(total)}</span>` +
+        `<div class="row" style="gap:6px"><button type="button" class="small" data-action="files-page" data-page="${d.page - 1}"${d.page <= 1 ? ' disabled' : ''}>Назад</button>` +
+        `<span class="tiny">Стр. ${fmt.num(d.page)} из ${fmt.num(d.pages)}</span>` +
+        `<button type="button" class="small" data-action="files-page" data-page="${d.page + 1}"${d.page >= d.pages ? ' disabled' : ''}>Далее</button></div>`
+      : `<span class="tiny">Всего: ${fmt.files(total)}</span>`;
+    App.html(pagerBox, pager);
+  }
+
+  function scrollToFiles() {
+    const card = byId('det-files-card');
+    if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
   function taskLog(s) {
     const tasks = s.tasks || {};
     const keys = source === 'disk' ? ['disk'] : Object.keys(tasks).filter((k) => k.startsWith('unlim')).sort();
@@ -313,6 +461,25 @@
           <div class="card" id="det-folders-card">${head('folder', 'ok', 'Папки',
             'Скачанную целиком папку можно перенести на другой диск — программа помнит, что уже скачала, и не будет качать её заново')}
             <div id="det-folders"></div></div>
+          <div class="card" id="det-files-card">${head('list', 'info', 'Список файлов',
+            'Скачанные и ещё не скачанные файлы — с поиском и выгрузкой в Excel (CSV) или TXT')}
+            <div class="seg-tabs" id="det-files-tabs"></div>
+            <div class="sub-tabs hidden" id="det-files-subtabs"></div>
+            <div class="folder-filter-bar hidden" id="det-files-folder"></div>
+            <div class="files-toolbar">
+              <div class="search-wrap">${App.icon('search')}<input type="search" id="det-files-q" placeholder="Поиск по имени или пути…" autocomplete="off" spellcheck="false"></div>
+              <select id="det-files-sort" aria-label="Сортировка">
+                <option value="default">По умолчанию</option>
+                <option value="name">По имени</option>
+                <option value="size_desc">Сначала большие</option>
+                <option value="size_asc">Сначала маленькие</option>
+                <option value="date_desc">Сначала свежие</option>
+              </select>
+              <a class="btn small" id="det-export-csv" href="#">${App.icon('download')}Скачать CSV</a>
+              <a class="btn small ghost" id="det-export-txt" href="#">${App.icon('file')}TXT</a>
+            </div>
+            <div id="det-files-body"></div>
+            <div class="pager" id="det-files-pager"></div></div>
           <div class="card">${head('alert', 'wait', 'Что не скачалось и почему', 'Файлы, которые ждут Яндекса, программа повторяет сама')}<div id="det-problems"></div></div>
           <div class="card">${head('check', 'ok', 'Последние скачанные', 'Эти файлы уже лежат в вашей папке')}<div id="det-recent"></div></div>
           <div class="card" id="det-verify-card">${head('shield-check', 'info', 'Проверка скачанных файлов',
@@ -324,13 +491,44 @@
               <a class="btn" href="/api/logs/bundle">${App.icon('download')}Скачать отчёт для поддержки</a></div>
             <div class="console" id="det-log"></div></div></details></div>
         </div>`;
+      const qEl = byId('det-files-q');
+      if (qEl && qEl.addEventListener) {
+        qEl.addEventListener('input', () => {
+          clearTimeout(searchTimer);
+          searchTimer = setTimeout(() => {
+            files.q = (qEl.value || '').trim();
+            files.page = 1;
+            loadFiles();
+          }, 280);
+        });
+      }
+      const sortEl = byId('det-files-sort');
+      if (sortEl && sortEl.addEventListener) {
+        sortEl.addEventListener('change', () => {
+          files.sort = sortEl.value || 'default';
+          files.page = 1;
+          loadFiles();
+        });
+      }
     },
     show(params) {
       source = params.source === 'unlim' ? 'unlim' : 'disk';
       problems = null;
+      files.status = 'not_downloaded';
+      files.folder = '';
+      files.q = '';
+      files.sort = 'default';
+      files.page = 1;
+      files.data = null;
+      const qEl = byId('det-files-q');
+      if (qEl) qEl.value = '';
+      const sortEl = byId('det-files-sort');
+      if (sortEl) sortEl.value = 'default';
       App.text(byId('det-title'), App.SOURCE_NAMES[source]);
       paintProblems();
       loadProblems();
+      paintFiles();
+      loadFiles();
       // У Безлимита папок нет: все фото лежат в одной папке «_unlim»
       byId('det-folders-card').classList.toggle('hidden', source !== 'disk');
       if (source === 'disk') {
@@ -346,10 +544,12 @@
       App.text(byId('det-sub'), source === 'disk' ? 'Ваши папки и файлы с Диска — по ключу доступа.'
         : 'Фото и видео, которые телефон загружал в безлимит, — по доступу к Безлимиту.');
       App.html(byId('det-steps'), r.started_at ? App.steps(src) : '');
-      const c = (cls, v, l) => `<div class="counter ${cls}"><div class="v">${fmt.num(v)}</div><div class="l">${l}</div></div>`;
-      App.html(byId('det-counters'), c('', f.selected, 'выбрано') + c('ok', f.done, 'скачано') +
-        c('', (f.pending || 0) + (f.in_progress || 0), 'в очереди') + c(f.deferred ? 'wait' : '', f.deferred, 'ждут Яндекса') +
-        c(f.failed ? 'err' : '', f.failed, 'не скачались') + c('', f.excluded, 'не выбраны') + c('', f.preview_only, 'есть превью'));
+      const c = (cls, v, l, st) => (st
+        ? `<button type="button" class="counter clickable ${cls}" data-action="files-filter" data-status="${st}" data-scroll="1"><div class="v">${fmt.num(v)}</div><div class="l">${l}</div></button>`
+        : `<div class="counter ${cls}"><div class="v">${fmt.num(v)}</div><div class="l">${l}</div></div>`);
+      App.html(byId('det-counters'), c('', f.selected, 'выбрано', 'all') + c('ok', f.done, 'скачано', 'downloaded') +
+        c('', (f.pending || 0) + (f.in_progress || 0), 'в очереди', 'queued') + c(f.deferred ? 'wait' : '', f.deferred, 'ждут Яндекса', 'deferred') +
+        c(f.failed ? 'err' : '', f.failed, 'не скачались', 'failed') + c('', f.excluded, 'не выбраны', 'excluded') + c('', f.preview_only, 'есть превью'));
       const hosts = src.storage_hosts_down || 0;
       App.text(byId('det-hosts'), hosts
         ? `Файлы, которые ждут Яндекса, лежат на ${fmt.num(hosts)} ${fmt.plural(hosts, 'сервере', 'серверах', 'серверах')} ` +
@@ -367,9 +567,37 @@
       paintVerify(s);
       App.text(byId('det-log'), taskLog(s));
       if (Date.now() - problemsAt > 20000) loadProblems();
+      if (Date.now() - files.at > 30000) loadFiles();
       if (source === 'disk' && Date.now() - foldersAt > 30000) loadFolders();
     },
   };
+
+  App.action('files-filter', (btn) => {
+    files.status = btn.dataset.status || 'not_downloaded';
+    files.page = 1;
+    paintFiles();
+    loadFiles();
+    if (btn.dataset.scroll) scrollToFiles();
+  });
+  App.action('files-clear-folder', () => {
+    files.folder = '';
+    files.page = 1;
+    paintFiles();
+    loadFiles();
+  });
+  App.action('files-page', (btn) => {
+    const p = Number(btn.dataset.page) || 1;
+    if (p < 1) return;
+    files.page = p;
+    loadFiles();
+  });
+  App.action('fp-files', (btn) => {
+    files.folder = btn.dataset.path || '';
+    files.page = 1;
+    paintFiles();
+    loadFiles();
+    scrollToFiles();
+  });
 
   App.action('fp-open', (btn) => {
     folders = null;

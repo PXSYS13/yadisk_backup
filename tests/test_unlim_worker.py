@@ -1751,3 +1751,43 @@ def test_broken_cooldown_gives_way_to_a_new_pause(db, stored):
     _store_cooldown(db, repr(time.time() + 86400) if stored == "day" else stored)
     uw.set_shared_cooldown(uw.RATE_LIMIT_BASE_PAUSE_SEC)
     assert uw.RATE_LIMIT_BASE_PAUSE_SEC - 5 < uw.shared_cooldown_remaining() <= uw.RATE_LIMIT_BASE_PAUSE_SEC
+
+
+def test_direct_refreshes_expired_sk_and_retries_without_streak(db, quiet_worker, dirs, monkeypatch):
+    """sk протух посреди работы: воркер обновляет sk и сразу повторяет запрос, не засчитывая сбой."""
+    w = quiet_worker
+    w.sk = "old_sk"
+    seen_sk = []
+
+    class SkSession(_DirectSession):
+        def post(self, url, params=None, json=None, timeout=None):
+            seen_sk.append(json["sk"])
+            if json["sk"] == "old_sk":
+                return _UrlResp(status=403, text="bad sk")
+            return super().post(url, params=params, json=json, timeout=timeout)
+
+    w.session = SkSession({"1": b"a" * 10, "2": b"b" * 20})
+    monkeypatch.setattr(uw, "get_sk_uid", lambda s: ("fresh_sk", "u"))
+    w._process(uw.take_batch(1, size=10))
+    assert status_of(db, "1") == ("downloaded", 0)
+    assert status_of(db, "2") == ("downloaded", 0)
+    assert w._fail_streak == 0
+    assert seen_sk[:2] == ["old_sk", "fresh_sk"]
+
+
+def test_get_file_url_json_auth_error_is_auth_expired():
+    class FakeS:
+        def post(self, url, params=None, json=None, timeout=None):
+            return _UrlResp(data={"error": {"id": "bad_sk", "title": "Invalid sk"}})
+
+    url, err = uw.get_file_url(FakeS(), "old_sk", "1", "/photounlim/a.jpg")
+    assert url is None and err is not None and err.kind == "auth_expired"
+
+
+def test_prepare_zip_captcha_403_is_rate_limit():
+    class FakeS:
+        def post(self, url, params=None, json=None, timeout=None):
+            return _UrlResp(status=403, text="<html>SmartCaptcha showcaptcha</html>")
+
+    url, err = uw.prepare_zip(FakeS(), "sk", "1", ["/photounlim/a.jpg"])
+    assert url is None and err is not None and err.kind == "rate_limit"
