@@ -1,10 +1,82 @@
 {
   "_как_заполнять": "Донаты DonationAlerts (записи с id «da-…») добавляет tools/sync_supporters.py: --from-widget со страницей виджета «Последние оповещения», сохранённой из браузера, или GitHub Actions по ключу. Записи без id можно добавлять руками: name — имя, как человек подписался (без имени — «Аноним»), amount — сумма числом, currency — RUB/USD/EUR, date — ГГГГ-ММ-ДД, message — короткие слова или null. Скрыть донат целиком — добавьте его номер в hidden (da-123 → 123), скрыть только сообщение — в no_message. top_min_rub — с какой суммы в рублях (все донаты человека вместе) имя попадает в «Больше всех помогли»; анонимы туда не попадают. Программы людей подхватят список с GitHub в течение получаса после того, как он попадёт в main.",
-  "updated": "2026-11-12",
+  "updated": "2026-11-19",
   "top_min_rub": 500,
   "hidden": [],
   "no_message": [],
   "supporters": [
+    {
+      "id": "da-194401079",
+      "name": "Аноним",
+      "amount": 50,
+      "currency": "RUB",
+      "date": "2026-11-18",
+      "message": null
+    },
+    {
+      "id": "da-194395992",
+      "name": "Виталтий",
+      "amount": 300,
+      "currency": "RUB",
+      "date": "2026-11-18",
+      "message": null
+    },
+    {
+      "id": "da-194258521",
+      "name": "Даниил",
+      "amount": 800,
+      "currency": "RUB",
+      "date": "2026-11-15",
+      "message": null
+    },
+    {
+      "id": "da-194180550",
+      "name": "любитель пиццы",
+      "amount": 333,
+      "currency": "RUB",
+      "date": "2026-11-14",
+      "message": null
+    },
+    {
+      "id": "da-194176755",
+      "name": "Власенко Денис",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-11-14",
+      "message": null
+    },
+    {
+      "id": "da-194176235",
+      "name": "Я бомж временно стал, но спс за продукт)",
+      "amount": 100,
+      "currency": "RUB",
+      "date": "2026-11-14",
+      "message": null
+    },
+    {
+      "id": "da-194175412",
+      "name": "Suboshi",
+      "amount": 500,
+      "currency": "RUB",
+      "date": "2026-11-14",
+      "message": null
+    },
+    {
+      "id": "da-194131117",
+      "name": "Аноним",
+      "amount": 500,
+      "currency": "RUB",
+      "date": "2026-11-13",
+      "message": null
+    },
+    {
+      "id": "da-194093442",
+      "name": "Vitaly Spb",
+      "amount": 3000,
+      "currency": "RUB",
+      "date": "2026-11-12",
+      "message": null
+    },
     {
       "id": "da-194051615",
       "name": "Аноним",
