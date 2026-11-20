@@ -55,6 +55,24 @@ def task_kind(cmd: list[str]) -> str:
     }.get(script, script.removesuffix(".py") or "other")
 
 
+def _redact_cmd(cmd: list[str]) -> str:
+    """Скрывает имена выбранных папок Диска (--root=...) в журналах, уходящих в поддержку."""
+    out: list[str] = []
+    hide_next = False
+    for arg in cmd:
+        if hide_next:
+            out.append("<folder>")
+            hide_next = False
+        elif arg.startswith("--root="):
+            out.append("--root=<folder>")
+        elif arg == "--root":
+            out.append(arg)
+            hide_next = True
+        else:
+            out.append(arg)
+    return " ".join(out)
+
+
 class Task:
     """Один фоновый процесс + поток, читающий его stdout в кольцевой буфер и в файл.
 
@@ -74,6 +92,7 @@ class Task:
         # Когда процесс последний раз что-то напечатал — интерфейс показывает, что он жив
         self.last_line_at: float | None = None
         self.was_stopped = False
+        self._log_lock = threading.Lock()
         self.log: deque[str] = deque(maxlen=300)
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
@@ -86,7 +105,7 @@ class Task:
             if self.log_file.exists() and self.log_file.stat().st_size > TASK_LOG_MAX_BYTES:
                 os.replace(self.log_file, str(self.log_file) + ".1")
             f = open(self.log_file, "a", encoding="utf-8")
-            f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} старт: {' '.join(self.cmd)} =====\n")
+            f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} старт: {_redact_cmd(self.cmd)} =====\n")
             return f
         except OSError:
             return None
@@ -100,12 +119,17 @@ class Task:
                     if not re.match(r"^\d{2}:\d{2}:\d{2}\b", line):
                         ts = time.strftime("%H:%M:%S")
                         line = f"{ts}  {line}"
-                    self.log.append(line)
+                    with self._log_lock:
+                        self.log.append(line)
                     self.last_line_at = time.time()
                     if f is not None:
                         try:
                             f.write(line + "\n")
                         except OSError:
+                            try:
+                                f.close()
+                            except OSError:
+                                pass
                             f = None
         except Exception:
             pass
@@ -160,16 +184,22 @@ class Task:
         except Exception:
             pass
 
+    def log_lines(self, limit: int | None = None) -> list[str]:
+        with self._log_lock:
+            lines = list(self.log)
+        return lines[-limit:] if limit is not None else lines
+
     def snapshot(self) -> dict:
         return {
             "running": self.alive(),
+            "started_at": self.started_at,
             "elapsed": time.time() - self.started_at,
             "exit_code": self.proc.poll(),
             "was_stopped": self.was_stopped,
             "kind": self.kind,
             "finished_at": self.finished_at,
             "last_line_at": self.last_line_at,
-            "log_tail": list(self.log)[-80:],
+            "log_tail": self.log_lines(80),
             "log_file": self.log_file.name if self.log_file else None,
         }
 
@@ -206,7 +236,7 @@ class TaskManager:
                 text=True, encoding="utf-8", errors="replace",
                 env=env,
             )
-            log.info("задача %s запущена: %s %s (pid %s)", slot, script, " ".join(args), proc.pid)
+            log.info("задача %s запущена: %s (pid %s)", slot, _redact_cmd([script, *args]), proc.pid)
             self._tasks[slot] = Task(slot, proc, log_file=paths.TASK_LOG_DIR / f"{slot}.log",
                                      cmd=[script, *args])
             return True, f"Запущено: {slot}"
@@ -268,7 +298,7 @@ class TaskManager:
                 if slot in exclude or getattr(t, "kind", None) in exclude_kinds:
                     continue
                 if t.alive() or (t.finished_at is not None and now - t.finished_at <= recent_sec):
-                    tail = list(t.log)[-per_task:]
+                    tail = t.log_lines(per_task) if hasattr(t, "log_lines") else list(t.log)[-per_task:]
                     lines.extend([(slot, ln) for ln in tail] if with_slots else tail)
             return lines
 

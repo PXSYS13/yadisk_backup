@@ -46,7 +46,13 @@
     const box = byId('support-list');
     if (!box) return;
     if (!sp) {
-      App.html(box, `<div class="empty">${App.icon('hourglass')}Загружаю список…</div>`);
+      if (App.supportersError) {
+        App.html(box, `<div class="empty-box"><span class="icon-box">${App.icon('alert')}</span>
+          <p>Не получилось загрузить список: ${esc(App.supportersError)}</p>
+          <button type="button" class="small" data-action="supporters-retry">${App.icon('refresh')}Повторить</button></div>`);
+      } else {
+        App.html(box, `<div class="empty">${App.icon('hourglass')}Загружаю список…</div>`);
+      }
       App.text(byId('support-count'), '');
       App.text(byId('support-updated'), '');
       return;
@@ -93,7 +99,7 @@
               </div>
               <p class="tiny">Или наведите камеру телефона на QR-код — откроется та же страница DonationAlerts.</p>
             </div>
-            <img class="donate-qr" src="/static/donate-qr.png" width="132" height="132" alt="QR-код: поддержать проект через DonationAlerts (dalink.to/davronsvv)">
+            <img class="donate-qr" id="support-qr" src="/static/donate-qr.png" width="132" height="132" alt="QR-код: поддержать проект через DonationAlerts (dalink.to/davronsvv)">
           </div>
           <div class="support-flag" id="support-flag"></div>
         </section>
@@ -119,7 +125,12 @@
     update(s) {
       if (s.donation_url) byId('support-donate').href = s.donation_url;
       if (s.telegram_url) byId('support-telegram').href = s.telegram_url;
-      App.text(byId('footer-text'), `Бэкап Яндекс.Диска ${esc(s.app_version || '')}`);
+      const qr = byId('support-qr');
+      if (qr && s.app_version && !qr.dataset.ver) {
+        qr.dataset.ver = s.app_version;
+        qr.src = `/static/donate-qr.png?v=${encodeURIComponent(s.app_version)}`;
+      }
+      App.text(byId('footer-text'), `Бэкап Яндекс.Диска ${s.app_version || ''}`);
       paintAuthor();
       paintList();
     },
@@ -128,5 +139,10 @@
   App.action('supporters-more', () => {
     visible += PAGE;
     paintList();
+  });
+  App.action('supporters-retry', () => {
+    App.supportersError = null;
+    paintList();
+    App.loadSupporters();
   });
 })();

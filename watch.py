@@ -114,11 +114,11 @@ def main() -> int:
     history: deque[tuple[float, int, int]] = deque(maxlen=HISTORY_LEN)
     started_at = time.time()
 
-    print("Жду появления state.db...")
-    while not DB_FILE.exists():
-        time.sleep(1)
-
     try:
+        print("Жду появления state.db...")
+        while not DB_FILE.exists():
+            time.sleep(1)
+
         while True:
             data = fetch_state()
             now = time.time()
@@ -153,8 +153,8 @@ def main() -> int:
                 t0, f0, b0 = history[0]
                 dt = now - t0
                 if dt > 0:
-                    files_per_sec = (done - f0) / dt
-                    bytes_per_sec = (bytes_done - b0) / dt
+                    files_per_sec = max(0.0, (done - f0) / dt)
+                    bytes_per_sec = max(0.0, (bytes_done - b0) / dt)
                 else:
                     files_per_sec = 0
                     bytes_per_sec = 0

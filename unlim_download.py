@@ -41,9 +41,11 @@ from unlim_common import (
     connect_unlim_db,
     ensure_attempts_column,
     get_sk_uid,
+    get_unlim_verify_cache,
     load_cookies,
     make_session,
     reset_failed_files,
+    save_unlim_verify_cache,
     save_verify_problems,
 )
 from utils import (
@@ -404,6 +406,7 @@ def collect_via_photoslice(s, sk, uid) -> int | None:
     print(f"\nЗапрашиваю файлы для {len(todo)} кластеров...")
     bar = tqdm(total=len(todo), unit="cluster", disable=not sys.stderr.isatty())
     added_total = 0
+    failed_batches = 0
     try:
         for i in range(0, len(todo), CLUSTER_BATCH):
             batch = todo[i:i + CLUSTER_BATCH]
@@ -413,16 +416,19 @@ def collect_via_photoslice(s, sk, uid) -> int | None:
                 # Куки протухли посреди сбора — дальше бессмысленно, и это не «успех»
                 print(f"\n❌ auth_expired | Ошибка авторизации: {e}")
                 print("   Обновите cookies.json в Web UI или браузере и запустите сбор заново.")
-                return 2
+                return EXIT_AUTH
             except Exception as e:
                 if is_sqlite_disk_error(e):
                     raise  # база не пишется — следующие пачки не запишутся тоже
+                failed_batches += 1
                 log.error(f"batch {i}: {e}")
                 time.sleep(2)
             bar.update(len(batch))
             bar.set_postfix(files=added_total)
     finally:
         bar.close()
+    if failed_batches and added_total == 0:
+        return EXIT_OUTAGE
     return None
 
 
@@ -508,6 +514,13 @@ def _collect():
                 print(f"  ⚠️ Список через mpfs/list не получен ({list_error}) — пробую фотосрез")
             try:
                 code = collect_via_photoslice(s, sk, uid)
+            except AuthExpiredError as e:
+                if not _session_alive(s):
+                    print(f"\n❌ auth_expired | Ошибка авторизации: {e}")
+                    print("   Обновите cookies.json в Web UI или браузере и запустите сбор заново.")
+                    return EXIT_AUTH
+                list_error = list_error or str(e)
+                code = None
             except Exception as e:  # noqa: BLE001 — запасной путь не должен ронять сбор
                 if is_sqlite_disk_error(e):
                     return _db_disk_full(e)
@@ -567,7 +580,7 @@ def cmd_retry_failed():
     print(f"Возвращено в очередь: {n}")
 
 
-def cmd_verify() -> int:
+def cmd_verify(full: bool = False) -> int:
     """Проверяет скачанное из безлимита: файлы на месте, размер и MD5 совпадают с Яндексом.
 
     Что не нашлось или испорчено, запоминается в unlim_state.db (unlim_verify_problems):
@@ -586,11 +599,17 @@ def cmd_verify() -> int:
         finally:
             c.close()
 
+    cache = None if full else get_unlim_verify_cache(DB_FILE)
+
     def save(problems: list[tuple[str, str]]) -> None:
         if os.path.exists(DB_FILE):
             save_verify_problems(problems, DB_FILE)
 
-    return run_check(items, save)
+    def save_cache(entries: list[tuple[str, int, int, str]]) -> None:
+        if os.path.exists(DB_FILE):
+            save_unlim_verify_cache(entries, DB_FILE)
+
+    return run_check(items, save, cache=cache, save_cache=save_cache)
 
 
 def cmd_export(out_path: str | None = None, status: str = "not_downloaded", fmt: str = "csv") -> int:
@@ -625,6 +644,8 @@ def main():
                     help="Вернуть упавшие и зависшие файлы в очередь")
     ap.add_argument("--verify", action="store_true",
                     help="Проверить, что скачанные файлы на месте: размер и MD5")
+    ap.add_argument("--full", action="store_true",
+                    help="С --verify: пересчитать MD5 всех файлов с диска, игнорируя кэш")
     ap.add_argument("--export", nargs="?", const="", default=None, metavar="PATH",
                     help="Выгрузить список файлов безлимита (CSV/TXT)")
     ap.add_argument("--export-status", default="not_downloaded",
@@ -640,7 +661,7 @@ def main():
     elif args.retry_failed:
         cmd_retry_failed()
     elif args.verify:
-        return cmd_verify()
+        return cmd_verify(full=args.full)
     elif args.export is not None:
         return cmd_export(args.export or None, status=args.export_status, fmt=args.export_format)
     else:

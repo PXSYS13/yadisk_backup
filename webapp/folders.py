@@ -15,8 +15,10 @@ from fastapi import APIRouter
 from downloader import api_error_details, is_overdraft, list_disk_folders, make_browse_client
 from state import SELECTION_MARKERS
 from unlim_common import DEFERRED_MARKER
-from utils import remote_parts, sqlite_ro_uri, to_disk_path, to_long_path
+from utils import remote_parts, to_disk_path, to_long_path
 from webapp import config, paths
+from webapp.db_predicates import connect_ro, deferred_sql
+from webapp.demo import demo_on as _demo_on
 
 log = logging.getLogger("webui")
 router = APIRouter()
@@ -27,7 +29,7 @@ FOLDERS_SUMMARY_SEC = 60
 FOLDER_PROGRESS_LIMIT = 500
 
 # rest — путь внутри папки, cut — где кончается имя подпапки (0 — файл лежит прямо в папке)
-_FOLDER_PROGRESS_SQL = """
+_FOLDER_PROGRESS_SQL = f"""
 SELECT child, COUNT(*) AS n, MAX(deep) AS deep,
        SUM(done) AS done, SUM(deferred) AS deferred, SUM(failed) AS failed, SUM(excluded) AS excluded,
        SUM(CASE WHEN excluded THEN 0 ELSE size END) AS b_sel,
@@ -37,7 +39,7 @@ FROM (
            cut > 0 AND instr(substr(rest, cut + 1), '/') > 0 AS deep,
            COALESCE(size, 0) AS size,
            status = 'downloaded' OR (status = 'skipped' AND COALESCE(error, '') NOT IN (?, ?)) AS done,
-           status = 'pending' AND COALESCE(error, '') LIKE ? AS deferred,
+           status = 'pending' AND {deferred_sql()} AS deferred,
            status = 'failed' AS failed,
            status = 'skipped' AND COALESCE(error, '') IN (?, ?) AS excluded
     FROM (SELECT substr(remote_path, ?) AS rest, instr(substr(remote_path, ?), '/') AS cut,
@@ -80,16 +82,17 @@ def folder_progress(db_file: Path, parent: str = "disk:/", download_dir: str = "
                  "complete": 0, "total": 0, "more": 0, "empty": True}
     if not db_file.exists():
         return out
-    c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
-    c.row_factory = sqlite3.Row
+    c = None
     try:
+        c = connect_ro(db_file)
         n = len(prefix)
-        rows = c.execute(_FOLDER_PROGRESS_SQL, (*SELECTION_MARKERS, DEFERRED_MARKER + "%", *SELECTION_MARKERS,
+        rows = c.execute(_FOLDER_PROGRESS_SQL, (*SELECTION_MARKERS, DEFERRED_MARKER, *SELECTION_MARKERS,
                                                 n + 1, n + 1, n, prefix)).fetchall()
     except sqlite3.Error as e:
         return {"ok": False, "path": path, "msg": f"База Диска занята, попробуйте через минуту: {e}"}
     finally:
-        c.close()
+        if c is not None:
+            c.close()
     folders = []
     for r in rows:
         item = _progress_counts(r)
@@ -184,10 +187,6 @@ def demo_folder_progress(parent: str) -> dict:
             if path == "disk:/Фото" else None)
     return {"ok": True, "path": path, "folders": folders, "here": here, "more": 0, "empty": not folders,
             "complete": sum(1 for f in folders if f["complete"]), "total": len(folders)}
-
-
-def _demo_on(demo: str | None) -> bool:
-    return bool(demo) and os.environ.get("YADISK_DEMO") == "1"
 
 
 # ── Адреса ──

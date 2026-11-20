@@ -52,6 +52,7 @@ from webapp.listing import (
     write_listing,
 )
 from webapp.local_disk import LOW_FREE_BYTES, free_space
+from webapp.rescue_view import progress_meter
 from webapp.queue_db import (
     db_has_pending,
     db_has_rows,
@@ -258,6 +259,7 @@ class Rescue:
             self.partial = False
             self.retry_every = retry_every_sec()
             self._folders_done, self._folders_at = None, 0.0
+            progress_meter.reset()
             for b in self.branches.values():
                 b.reset()
             self._thread = threading.Thread(target=self._run, daemon=True)
@@ -506,6 +508,8 @@ class Rescue:
             if task is None:
                 task = tm.get(slot)
             elif not task.alive():
+                if task.thread.is_alive():
+                    task.thread.join(timeout=2.0)
                 code = task.proc.poll()
                 if on_finish_msg:
                     self._log(f"{on_finish_msg} (код {code})")
@@ -522,6 +526,9 @@ class Rescue:
             self._stop_evt.wait(1.0)
         if self._stopped() or any(t is not None and t.was_stopped for t in tasks):
             return None
+        for t in tasks:
+            if t is not None and t.thread.is_alive():
+                t.thread.join(timeout=2.0)
         return [t.proc.poll() for t in tasks if t is not None]
 
     def _run_step(self, b: Branch, slot: str, script: str, args: list[str], activity: str) -> int:
@@ -549,7 +556,9 @@ class Rescue:
     def _task_lines(self, slot: str) -> list[str]:
         """Журнал задачи слота — после шага из него читаются находки сбора (тесты подменяют)."""
         task = tm.get(slot)
-        return list(task.log) if task else []
+        if task is None:
+            return []
+        return task.log_lines() if hasattr(task, "log_lines") else list(task.log)
 
     def _scan_findings(self) -> tuple[list[str], list[str]]:
         """(пропавшие выбранные папки, найденные общие папки) — из строк `kind | {json}`."""
@@ -748,10 +757,11 @@ class Rescue:
         ready = False
         while not self._stopped():
             b.round += 1
-            if b.relist:  # «Обновить список» во время ожидания
-                b.relist = False
-                b.list_after = False
-                ready = False
+            with self._lock:
+                if b.relist:  # «Обновить список» во время ожидания
+                    b.relist = False
+                    b.list_after = False
+                    ready = False
             if not ready:
                 code = prepare(b)
                 if code == -1:
@@ -763,12 +773,15 @@ class Rescue:
                         return
                     continue
                 ready = True
-                b.prepared = True
+                with self._lock:
+                    b.prepared = True
             before = db_stats(*db)
             code = download(b)
             if code == -1:
                 return self._branch_stopped(b)
-            if b.relist and code not in HALT_CODES:
+            with self._lock:
+                want_relist = b.relist
+            if want_relist and code not in HALT_CODES:
                 # «Обновить список» нажали во время скачивания — собираем список сразу, без паузы
                 continue
             if b.list_after and code not in HALT_CODES:
@@ -843,12 +856,28 @@ class Rescue:
         if step == "prepare":
             return self._after_prepare_exit(b, code)
         stats = db_stats(*db)
+        if "error" in stats:
+            b.odd_rounds += 1
+            self._log(f"⚠️ {b.label}: не удалось прочитать базу после шага: {stats['error']} "
+                      f"({b.odd_rounds}/{RESCUE_STUCK_ROUNDS})")
+            if b.odd_rounds >= RESCUE_STUCK_ROUNDS:
+                with self._lock:
+                    b.state = "needs_action"
+                    b.action = "send_logs"
+                    b.reason = "Не получается прочитать базу данных — отправьте отчёт для поддержки"
+                self._event(b.name, "err", b.reason)
+                return False
+            self._event(b.name, "warn", "База данных временно занята — попробую ещё раз чуть позже")
+            return self._wait_round(b, 0, outage=False, kind="crash",
+                                    delay=min(self.retry_every, RESCUE_CRASH_RETRY_SEC))
         if before is not None:
             self._report_retry(b, before, stats)
-        if b.requeued:
+        with self._lock:
+            was_requeued = b.requeued
+            b.requeued = False
+        if was_requeued:
             # «Повторить ошибки» нажали во время скачивания: файлы уже в очереди — качаем их сразу,
             # а не считаем недошедший до конца очереди шаг обрывом
-            b.requeued = False
             if code in (0, EXIT_PARTIAL, EXIT_DEFERRED):
                 self._event(b.name, "run", "Файлы, которые не скачались, снова в очереди — качаю их")
                 return True
@@ -863,13 +892,15 @@ class Rescue:
             b.odd_rounds = 0
             return self._wait_round(b, deferred, outage=(code == EXIT_OUTAGE))
         if code in (0, EXIT_PARTIAL):
-            if b.relist:  # «Обновить список» нажали, пока шаг заканчивался
-                return True
+            with self._lock:
+                if b.relist:  # «Обновить список» нажали, пока шаг заканчивался
+                    return True
             failed = int(stats.get("failed") or 0)
-            b.state = "done"
-            b.activity = ""
-            b.reason = (f"Скачано почти всё: {failed} файлов не скачались" if failed
-                        else "Все файлы сохранены")
+            with self._lock:
+                b.state = "done"
+                b.activity = ""
+                b.reason = (f"Скачано почти всё: {failed} файлов не скачались" if failed
+                            else "Все файлы сохранены")
             self._log(f"✓ {b.label}: {b.reason}")
             self._event(b.name, "ok", f"Готово. Не скачалось: {files_text(failed)}" if failed
                         else "Готово: все файлы сохранены")
@@ -928,17 +959,21 @@ class Rescue:
         """Ждёт следующий раунд. kind: deferred — файлы на молчащих серверах, outage —
         Яндекс не отвечает, crash — процесс оборвался (повтор раньше). reason — чем
         заменить стандартный текст причины, resume — слово в ленту при возобновлении."""
-        if b.relist:  # «Обновить список» нажали, пока шаг заканчивался: собираем сразу, без паузы
-            return True
         kind = kind or ("deferred" if deferred and not outage else "outage")
-        b.state = "waiting"
-        b.wait_kind = kind
-        b.next_retry_at = time.time() + (self.retry_every if delay is None else delay)
-        at = hhmm(b.next_retry_at)
-        b.reason = reason or {"deferred": f"Ждут Яндекса: {files_text(deferred)}",
-                              "outage": "Яндекс сейчас не отвечает",
-                              "crash": "Скачивание прервалось — пробую ещё раз"}[kind]
-        b.activity = f"следующая попытка в {at}"
+        next_at = time.time() + (self.retry_every if delay is None else delay)
+        at = hhmm(next_at)
+        reason_text = reason or {"deferred": f"Ждут Яндекса: {files_text(deferred)}",
+                                 "outage": "Яндекс сейчас не отвечает",
+                                 "crash": "Скачивание прервалось — пробую ещё раз"}[kind]
+        with self._lock:
+            if b.relist:  # «Обновить список» нажали, пока шаг заканчивался: собираем сразу, без паузы
+                return True
+            # Поля ожидания ставим ДО state="waiting", чтобы status() не увидел "waiting" с next_retry_at=None
+            b.wait_kind = kind
+            b.next_retry_at = next_at
+            b.reason = reason_text
+            b.activity = f"следующая попытка в {at}"
+            b.state = "waiting"
         self._log(f"⏳ {b.label}: {b.reason}. Следующая попытка в {at}")
         if kind == "deferred":
             self._event(b.name, "wait", f"Всё доступное скачано. Ждут Яндекса: {files_text(deferred)}. Повтор в {at}")
@@ -946,19 +981,20 @@ class Rescue:
             self._event(b.name, "wait", f"Яндекс сейчас не отвечает. Повтор в {at}")
         manual = False
         while not self._stopped():
-            remaining = b.next_retry_at - time.time()
+            remaining = next_at - time.time()
             if remaining <= 0:
                 break
             if b.wake.wait(min(remaining, 1.0)):
                 manual = True
                 break
         b.wake.clear()
-        if not self._stopped():
-            # Ветка больше не ждёт — до того, как пропадёт время попытки: иначе, пока она
-            # считает базу перед скачиванием, Главная писала бы «Следующая попытка в .»
-            b.state = "checking"
-        b.next_retry_at = None
-        b.wait_kind = None
+        with self._lock:
+            if not self._stopped():
+                # Ветка больше не ждёт — до того, как пропадёт время попытки: иначе, пока она
+                # считает базу перед скачиванием, Главная писала бы «Следующая попытка в .»
+                b.state = "checking"
+            b.next_retry_at = None
+            b.wait_kind = None
         if self._stopped():
             self._branch_stopped(b)
             return False
@@ -987,12 +1023,13 @@ class Rescue:
         free = (free_space(config.get_config()["download_dir"]) or {}).get("free")
         reason = ("На диске закончилось место" if free is not None and free < LOW_FREE_BYTES
                   else "Не получается записать файлы в папку")
-        for x in self.branches.values():
-            if x.state != "off":
-                x.state = "needs_action"
-                x.action = "free_space"
-                x.reason = reason
-                x.activity = ""
+        with self._lock:
+            for x in self.branches.values():
+                if x.state != "off":
+                    x.state = "needs_action"
+                    x.action = "free_space"
+                    x.reason = reason
+                    x.activity = ""
         self._log(f"💾 {reason} — останавливаю скачивание. Освободите место или выберите другую папку")
         self._event(None, "err", f"{reason} — скачивание на паузе")
         with self._launch_lock:
@@ -1000,6 +1037,7 @@ class Rescue:
         for x in self.branches.values():
             x.wake.set()
         stop_and_wait(tm.stop_matching(SLOT_DISK) + tm.stop_matching(UNLIM_SLOT_PREFIX))
+        release_orphaned_unlim()
 
     # ── Диск ──
 
@@ -1085,8 +1123,8 @@ class Rescue:
             self._take_relist("disk")  # «Обновить список», нажатое во время этого сбора, исполнено
             total = int(db_stats(paths.DB_FILE, "files", "remote_path").get("total") or 0)
             self._event("disk", "ok", f"Список получен: {files_text(total)}")
-        elif code == EXIT_OVERDRAFT:
-            return code  # «качаю по уже собранному» не выйдет: Яндекс не даст и ссылок
+        elif code in HALT_CODES:
+            return code  # доступ, место или переполнение: «качаю по уже собранному» не поможет
         elif db_has_rows(paths.DB_FILE, "files"):
             self._log(f"⚠️ Диск: список не обновился (код {code}) — качаю по уже собранному")
             self._event("disk", "warn", "Список не обновился — качаю по уже собранному")
@@ -1206,6 +1244,8 @@ class Rescue:
             self._note_outside_try(None)
             total = int(db_stats(paths.UNLIM_DB_FILE, "unlim_files", "file_id").get("total") or 0)
             self._event("unlim", "ok", f"Список получен: {files_text(total)}")
+        elif code in HALT_CODES:
+            return code
         elif db_has_rows(paths.UNLIM_DB_FILE, "unlim_files"):
             if unlim_has_rows_outside(paths.UNLIM_DB_FILE):
                 self._note_outside_try(time.time())

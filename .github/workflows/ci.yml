@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   test:
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -18,6 +19,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -31,6 +37,10 @@ jobs:
 
       - name: Lint
         run: uv run --locked --python ${{ matrix.python-version }} ruff check .
+
+      - name: ShellCheck
+        if: runner.os == 'Linux'
+        run: shellcheck webui.sh webui.command
 
       - name: Tests
         run: uv run --locked --python ${{ matrix.python-version }} pytest -q

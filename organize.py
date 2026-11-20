@@ -30,12 +30,16 @@ import json
 import os
 import re
 import shutil
+import sqlite3
+import stat
 import struct
 import sys
 import time
 from collections import Counter, defaultdict
+from pathlib import Path
 
 from utils import (
+    CASE_INSENSITIVE_PATHS,
     DIR_ARCHIVE,
     DIR_AUDIO,
     DIR_DOC,
@@ -45,13 +49,20 @@ from utils import (
     DIR_PROGRAM,
     DIR_VIDEO,
     LINKS_DIRNAME,
+    MAX_NAME_LEN,
     PREVIEW_DIRNAME,
     SET_ASIDE_DIRNAME,
+    _strip_long_prefix,
     classify_dir,
     compute_md5,
     ensure_utf8_stdio,
     human_bytes,
     is_safe_dir,
+    keep_awake,
+    name_with_tag,
+    path_key,
+    sqlite_tx,
+    to_long_path,
 )
 
 # Папки, скачанные по ссылкам, — чужие подборки: их структуру не трогаем. Старые копии,
@@ -59,24 +70,30 @@ from utils import (
 SKIP_DIRS = {DIR_PHOTO, DIR_VIDEO, DIR_DOC, DIR_ARCHIVE, DIR_PROGRAM,
              DIR_AUDIO, DIR_OTHER, DIR_DUP, ".sync", "_unlim_tmp_zips", PREVIEW_DIRNAME, LINKS_DIRNAME,
              SET_ASIDE_DIRNAME}
+_SKIP_DIRS_KEYS = {d.casefold() for d in SKIP_DIRS} if CASE_INSENSITIVE_PATHS else set(SKIP_DIRS)
 # Недокачанные файлы и БД состояния — не трогаем
 SKIP_SUFFIXES = (".part", ".db", ".db-wal", ".db-shm")
+_VIDEO_EXTS = frozenset({".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm", ".m4v", ".3gp", ".mts", ".m2ts"})
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _is_skip_dir_name(name: str) -> bool:
+    return (name.casefold() if CASE_INSENSITIVE_PATHS else name) in _SKIP_DIRS_KEYS
 
 
 def is_project_dir(root: str) -> bool:
     """Папка проекта или её родитель: move-режим утащил бы state.db, .env и сами скрипты."""
     try:
-        return os.path.commonpath([os.path.abspath(root), PROJECT_DIR]) == os.path.abspath(root)
-    except ValueError:  # разные диски на Windows
+        r = path_key(os.path.realpath(to_long_path(root)))
+        p = path_key(os.path.realpath(to_long_path(PROJECT_DIR)))
+        return os.path.commonpath([r, p]) == r
+    except (OSError, ValueError):  # разные диски на Windows
         return False
 
 DATE_REGEXES = [
-    re.compile(r"(19\d{2}|20\d{2})[-_.](\d{2})[-_.](\d{2})"),
-    re.compile(r"(19\d{2}|20\d{2})(\d{2})(\d{2})"),
-    re.compile(r"IMG_(19\d{2}|20\d{2})(\d{2})(\d{2})"),
-    re.compile(r"VID-(19\d{2}|20\d{2})(\d{2})(\d{2})"),
+    re.compile(r"(?<!\d)(19\d{2}|20\d{2})[-_.](\d{2})[-_.](\d{2})(?!\d)"),
+    re.compile(r"(?<!\d)(19\d{2}|20\d{2})(\d{2})(\d{2})(?!\d)"),
 ]
 
 
@@ -148,7 +165,7 @@ def _first_exif_date(values: dict) -> tuple[int, int] | None:
 def _get_exif_date_jpeg(path: str) -> tuple[int, int] | None:
     """Извлекает дату съёмки из APP1 сегмента JPEG без внешних зависимостей."""
     try:
-        with open(path, "rb") as f:
+        with open(to_long_path(path), "rb") as f:
             header = f.read(2)
             if header != b"\xff\xd8":
                 return None
@@ -162,11 +179,11 @@ def _get_exif_date_jpeg(path: str) -> tuple[int, int] | None:
                 length = int.from_bytes(length_bytes, "big") - 2
                 if length <= 0:
                     continue
-                if marker == b"\xff\xe1":  # APP1 (Exif)
+                if marker == b"\xff\xe1":  # APP1 (Exif или XMP — ищем именно Exif)
                     data = f.read(length)
                     if data.startswith(b"Exif\x00\x00"):
                         return _first_exif_date(_exif_tiff_dates(data[6:]))
-                    break
+                    continue
                 else:
                     f.seek(length, os.SEEK_CUR)
     except Exception:
@@ -178,7 +195,7 @@ def _get_exif_date_pil(path: str) -> tuple[int, int] | None:
     """Извлекает дату съёмки через Pillow для форматов HEIC, TIFF, PNG, WebP и т.д."""
     try:
         from PIL import Image
-        with Image.open(path) as img:
+        with Image.open(to_long_path(path)) as img:
             exif = img.getexif()
             if not exif:
                 return None
@@ -198,6 +215,8 @@ def _get_exif_date_pil(path: str) -> tuple[int, int] | None:
 def get_exif_date(path: str) -> tuple[int, int] | None:
     """Извлекает дату съёмки из метаданных изображения (EXIF)."""
     ext = os.path.splitext(path)[1].lower()
+    if ext in _VIDEO_EXTS:
+        return None
     if ext in (".jpg", ".jpeg"):
         d = _get_exif_date_jpeg(path)
         if d:
@@ -214,7 +233,8 @@ def get_date(path: str) -> tuple[int, int]:
             try:
                 y = int(m.group(1))
                 mo = int(m.group(2))
-                if 1970 <= y <= 2035 and 1 <= mo <= 12:
+                day = int(m.group(3))
+                if 1970 <= y <= 2035 and 1 <= mo <= 12 and 1 <= day <= 31:
                     return y, mo
             except (ValueError, IndexError):
                 pass
@@ -224,7 +244,7 @@ def get_date(path: str) -> tuple[int, int]:
         return exif_date
     # 3. Fallback на mtime файла
     try:
-        t = time.localtime(os.path.getmtime(path))
+        t = time.localtime(os.path.getmtime(to_long_path(path)))
         return t.tm_year, t.tm_mon
     except OSError:
         return 1970, 1
@@ -240,14 +260,17 @@ def target_path(root: str, src: str, category: str) -> str:
     return os.path.join(sub, name)
 
 
-def unique_path(dst: str) -> str:
-    if not os.path.exists(dst):
+def unique_path(dst: str, counters: dict[str, int] | None = None) -> str:
+    if not os.path.lexists(to_long_path(dst)):
         return dst
-    base, ext = os.path.splitext(dst)
-    i = 1
+    folder, fname = os.path.split(dst)
+    key = path_key(dst)
+    i = counters.get(key, 1) if counters is not None else 1
     while True:
-        cand = f"{base}_{i}{ext}"
-        if not os.path.exists(cand):
+        cand = os.path.join(folder, name_with_tag(fname, f"_{i}", MAX_NAME_LEN))
+        if not os.path.lexists(to_long_path(cand)):
+            if counters is not None:
+                counters[key] = i + 1
             return cand
         i += 1
 
@@ -266,10 +289,11 @@ def _is_link_or_mount(path: str) -> bool:
     Прочие точки повторной обработки — не ссылки: ими помечены, например, папки OneDrive
     («Рабочий стол» и «Документы» с резервным копированием), и в них сортировка ходит.
     """
+    lp = to_long_path(path)
     try:
-        if os.path.islink(path) or os.path.ismount(path):
+        if os.path.islink(lp) or os.path.ismount(lp):
             return True
-        tag = getattr(os.lstat(path), "st_reparse_tag", 0)
+        tag = getattr(os.lstat(lp), "st_reparse_tag", 0)
     except OSError:
         return True
     return bool(tag & _REPARSE_TAG_NAME_SURROGATE)
@@ -282,18 +306,25 @@ def scan(root: str, tree: list | None = None) -> list[dict]:
     внутри не опустеет, и уборка её не удалит — отчёт не должен обещать обратное.
     """
     files = []
-    skip = {os.path.join(root, d) for d in SKIP_DIRS}
+    skip = {path_key(os.path.join(root, d)) for d in SKIP_DIRS}
     print(f"\n[1/4] Сканирую {root}...")
-    for dp, dirs, fns in os.walk(root):
+    for raw_dp, dirs, fns in os.walk(to_long_path(root)):
+        dp = _strip_long_prefix(raw_dp)
         if tree is not None:
             tree.append((dp, list(dirs), list(fns)))
-        dirs[:] = [d for d in dirs if os.path.join(dp, d) not in skip and not _is_link_or_mount(os.path.join(dp, d))]
+        dirs[:] = [
+            d for d in dirs
+            if path_key(os.path.join(dp, d)) not in skip and not _is_link_or_mount(os.path.join(dp, d))
+        ]
         for fn in fns:
             if fn.lower().endswith(SKIP_SUFFIXES):
                 continue
             full = os.path.join(dp, fn)
             try:
-                files.append({"path": full, "size": os.path.getsize(full)})
+                st = os.lstat(to_long_path(full))
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                files.append({"path": full, "size": st.st_size})
             except OSError:
                 pass
     print(f"  Найдено: {len(files)}")
@@ -402,7 +433,7 @@ def main():
     args = ap.parse_args()
 
     root = os.path.abspath(args.input)
-    if not os.path.isdir(root):
+    if not os.path.isdir(to_long_path(root)):
         sys.exit(f"Нет папки: {root}")
 
     # Та же проверка, что и в Web UI: корень диска, домашняя и системные папки — нельзя
@@ -417,6 +448,60 @@ def main():
     print(f"  Действие: {args.action}")
     print("=" * 60)
 
+    with keep_awake():
+        return _run_organize(root, args.action)
+
+
+def sync_moved_paths_in_dbs(moved_pairs: list[tuple[str, str]], db_dir: Path | None = None) -> int:
+    """Обновляет local_path перенесённых файлов в state.db и unlim_state.db.
+
+    Без этого после сортировки проверка скачанного (verify) считала бы перенесённые файлы
+    недостающими. Ошибки БД не прерывают сортировку.
+    """
+    if not moved_pairs:
+        return 0
+    base = Path(__file__).resolve().parent if db_dir is None else Path(db_dir)
+    moved_map = {path_key(src): dst for src, dst in moved_pairs}
+    total_updated = 0
+    for db_name, table, key_col in (
+        ("state.db", "files", "remote_path"),
+        ("unlim_state.db", "unlim_files", "file_id"),
+    ):
+        db_path = base / db_name
+        if not db_path.is_file():
+            continue
+        c = None
+        try:
+            c = sqlite3.connect(str(db_path), timeout=30, isolation_level=None)
+            if not c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone():
+                continue
+            updates: list[tuple[str, str]] = []
+            for key_val, lp in c.execute(
+                f"SELECT {key_col}, local_path FROM {table} "
+                f"WHERE local_path IS NOT NULL AND local_path <> ''"
+            ):
+                new_path = moved_map.get(path_key(lp))
+                if new_path and new_path != lp:
+                    updates.append((new_path, key_val))
+            if updates:
+                for start in range(0, len(updates), 5000):
+                    with sqlite_tx(c):
+                        c.executemany(
+                            f"UPDATE {table} SET local_path = ? WHERE {key_col} = ?",
+                            updates[start:start + 5000],
+                        )
+                total_updated += len(updates)
+        except sqlite3.Error as e:
+            print(_printable(f"  [warn] не удалось обновить пути в {db_name}: {e}"))
+        finally:
+            if c is not None:
+                c.close()
+    return total_updated
+
+
+def _run_organize(root: str, action: str) -> int:
     t0 = time.time()
     tree: list = []
     files = scan(root, tree)
@@ -442,7 +527,7 @@ def main():
 
     total_b = sum(f["size"] for f in files)
     # Прогноз для отчёта: какие папки опустеют и будут удалены, и пара примеров переносов
-    moving = {src for src, dst, _ in plan if os.path.normcase(src) != os.path.normcase(dst)}
+    moving = {src for src, dst, _ in plan if path_key(src) != path_key(dst)}
     gone = doomed_dirs(root, tree, moving, [dst for _, dst, _ in plan])
     examples = pick_examples(root, plan, moving)
     print("\n[4/4] СТАТИСТИКА:")
@@ -465,12 +550,12 @@ def main():
                for cat in [DIR_PHOTO, DIR_VIDEO, DIR_AUDIO, DIR_DOC, DIR_ARCHIVE, DIR_PROGRAM, DIR_OTHER]
                if cat_n[cat]}
     print("organize_summary | " + json.dumps({
-        "action": args.action, "root": root, "total": len(files), "total_bytes": total_b,
+        "action": action, "root": root, "total": len(files), "total_bytes": total_b,
         "duplicates": len(dups), "duplicates_bytes": dup_b, "shelves": shelves,
         "folders": len(gone), "examples": examples,
     }, ensure_ascii=False), flush=True)
 
-    if args.action == "report-only":
+    if action == "report-only":
         print("\n[INFO] Это только отчёт: файлы не перемещались. При перемещении папки, как на "
               "Диске, исчезнут: файлы разъедутся по папкам по типам, опустевшие папки удалятся.")
         return 0
@@ -479,15 +564,18 @@ def main():
     moved = 0
     err = 0
     last = time.time()
-    for src, dst, is_dup in plan:
-        if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(dst)):
+    uniq_counters: dict[str, int] = {}
+    moved_pairs: list[tuple[str, str]] = []
+    for src, dst, _is_dup in plan:
+        if path_key(os.path.abspath(src)) == path_key(os.path.abspath(dst)):
             continue  # Файл уже лежит в нужной папке
         try:
-            target = unique_path(dst)
-            if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(target)):
+            target = unique_path(dst, uniq_counters)
+            if path_key(os.path.abspath(src)) == path_key(os.path.abspath(target)):
                 continue
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            shutil.move(src, target)
+            os.makedirs(to_long_path(os.path.dirname(target)), exist_ok=True)
+            shutil.move(to_long_path(src), to_long_path(target))
+            moved_pairs.append((src, target))
             moved += 1
         except Exception as e:
             err += 1
@@ -497,19 +585,25 @@ def main():
             print(f"  progress: {moved}/{len(plan)} (err={err})")
             last = time.time()
 
+    db_updated = sync_moved_paths_in_dbs(moved_pairs)
+    if db_updated:
+        print(f"  Обновлено путей в базе: {db_updated}")
+
     cleaned = 0
     walked = []  # сверху вниз, без ссылок и junction; убираем снизу вверх
-    for dp, dirs, _fns in os.walk(root):
+    for raw_dp, dirs, _fns in os.walk(to_long_path(root)):
+        dp = _strip_long_prefix(raw_dp)
         dirs[:] = [d for d in dirs if not _is_link_or_mount(os.path.join(dp, d))]
         walked.append(dp)
     for dp in reversed(walked):
         rel = os.path.relpath(dp, root)
         first = rel.split(os.sep)[0] if rel != "." else ""
-        if first in SKIP_DIRS:
+        if _is_skip_dir_name(first):
             continue
         try:
-            if not os.listdir(dp) and dp != root:
-                os.rmdir(dp)
+            lp = to_long_path(dp)
+            if not os.listdir(lp) and path_key(dp) != path_key(root):
+                os.rmdir(lp)
                 cleaned += 1
         except OSError:
             pass

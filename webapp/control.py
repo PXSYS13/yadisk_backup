@@ -154,7 +154,7 @@ def api_set_dir(payload: DownloadDirPayload):
     if not ok:
         log.warning("папка отклонена: %r — %s", d, msg)
         raise HTTPException(400, msg)
-    config.env_set("DOWNLOAD_DIR", d)
+    config.env_set_verified("DOWNLOAD_DIR", d)
     log.info("папка скачивания сохранена: %s", d)
     return {"ok": True, "download_dir": d, "free_space": free_space(d)}
 
@@ -185,11 +185,16 @@ STILL_FULL = ("Диск всё ещё переполнен — Яндекс по
 
 def _continue_after_subscription() -> dict:
     """Ветка Диска ждала подписки: ключ снова работает — Диск качается дальше."""
-    if not access.check_token(config.get_config()["token"]).get("ok"):
-        return {"ok": False, "msg": STILL_FULL}
+    access.invalidate_token_cache()
+    tok = access.check_token(config.get_config()["token"])
+    if not tok.get("ok"):
+        if tok.get("overdraft"):
+            return {"ok": False, "msg": STILL_FULL}
+        return {"ok": False, "msg": tok.get("msg") or STILL_FULL}
     if rescue.resume_access("disk"):
         return {"ok": True, "msg": "Яндекс снова пускает программу к Диску — продолжаю"}
-    return _resp(rescue.start())
+    rescue.wait_finished(3)
+    return api_rescue_start()
 
 
 @router.post("/api/rescue/start")
@@ -226,19 +231,24 @@ def resume_after_restart() -> bool:
     """Программу закрыли посреди скачивания (окно, перезагрузка, пропал свет) — продолжаем сами,
     как просили в сообществе. Только если человек не нажимал «Остановить» и не выключил это
     в «Настройках». True — скачивание запущено."""
-    if os.environ.get("YADISK_DEMO") == "1" or rescue.is_running():
+    try:
+        if os.environ.get("YADISK_DEMO") == "1" or rescue.is_running():
+            return False
+        if not config.resume_pending() or not config.get_settings()["resume"]:
+            return False
+        res = api_rescue_start()
+        if res.get("ok"):
+            log.info("продолжаю скачивание после перезапуска программы")
+            print("  Скачивание шло, когда программу закрыли, — продолжаю его сам.")
+            rescue.note("run", "Программу закрыли посреди скачивания — продолжаю с того же места")
+            return True
+        log.info("после перезапуска скачивание не продолжил: %s", res.get("msg"))
+        rescue.note("warn", f"Не получилось продолжить скачивание после перезапуска: {res.get('msg')}")
         return False
-    if not config.resume_pending() or not config.get_settings()["resume"]:
+    except Exception as e:  # noqa: BLE001 — фоновый поток запуска не должен падать молча
+        log.exception("resume_after_restart")
+        rescue.note("warn", f"Не получилось продолжить скачивание после перезапуска: {e}")
         return False
-    res = api_rescue_start()
-    if res.get("ok"):
-        log.info("продолжаю скачивание после перезапуска программы")
-        print("  Скачивание шло, когда программу закрыли, — продолжаю его сам.")
-        rescue.note("run", "Программу закрыли посреди скачивания — продолжаю с того же места")
-        return True
-    log.info("после перезапуска скачивание не продолжил: %s", res.get("msg"))
-    rescue.note("warn", f"Не получилось продолжить скачивание после перезапуска: {res.get('msg')}")
-    return False
 
 
 class RetryFailedPayload(BaseModel):
@@ -257,7 +267,10 @@ def api_rescue_retry_failed(p: RetryFailedPayload):
         except sqlite3.Error as e:
             return {"ok": False, "msg": f"База Диска занята: {e}"}
     if p.source in ("unlim", "all") and paths.UNLIM_DB_FILE.exists():
-        n += reset_failed_files(str(paths.UNLIM_DB_FILE))
+        try:
+            n += reset_failed_files(str(paths.UNLIM_DB_FILE))
+        except sqlite3.Error as e:
+            return {"ok": False, "msg": f"База Безлимита занята: {e}"}
     if rescue.is_running():
         ok, msg = rescue.requeue_now(p.source)
         if ok is not None:
@@ -296,6 +309,7 @@ def api_rescue_relist(p: RelistPayload):
         return {"ok": False, "msg": VERIFY_BUSY}
     results = [rescue.relist(s) for s in sources]
     if any(ok is None for ok, _ in results):
+        rescue.wait_finished(3)
         return api_rescue_start()
     done = [msg for ok, msg in results if ok]
     return {"ok": bool(done), "msg": done[0] if done else results[0][1]}
@@ -341,13 +355,15 @@ def _link_folder(base: Path, link_id: int) -> Path | None:
     """Папка ссылки — только из базы и только внутри папки скачивания."""
     if not paths.LINKS_DB_FILE.exists():
         return None
-    c = sqlite3.connect(sqlite_ro_uri(paths.LINKS_DB_FILE), uri=True, timeout=5)
+    c = None
     try:
+        c = sqlite3.connect(sqlite_ro_uri(paths.LINKS_DB_FILE), uri=True, timeout=5)
         row = c.execute("SELECT local_dir, kind FROM links WHERE id=?", (link_id,)).fetchone()
     except sqlite3.Error:
         row = None
     finally:
-        c.close()
+        if c is not None:
+            c.close()
     if not row or not row[0]:
         return None
     path = base.joinpath(*row[0].split("/"))
@@ -390,7 +406,7 @@ def api_open_folder(p: OpenFolderPayload):
             raise HTTPException(400, "Неизвестная папка")
         if not os.path.isdir(to_long_path(str(path))):
             return {"ok": False, "msg": "Этой папки нет в папке скачивания — возможно, её перенесли или удалили"}
-    if not path.exists():
+    if not os.path.isdir(to_long_path(str(path))):
         return {"ok": False, "msg": "Папки пока нет — в ней ещё ничего не скачано"}
     try:
         if IS_WINDOWS:
@@ -572,7 +588,7 @@ def is_safe_organize_path(path: str) -> tuple[bool, str]:
         return ok, msg
     try:
         root = Path(path).resolve()
-        if root == paths.PROJECT or root in paths.PROJECT.parents:
+        if root == paths.PROJECT or root in paths.PROJECT.parents or _inside_program(path):
             return False, "Нельзя сортировать папку самого инструмента: уедут state.db, .env и скрипты"
     except OSError:
         return False, "Невалидный путь"

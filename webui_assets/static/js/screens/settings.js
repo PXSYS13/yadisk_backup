@@ -475,7 +475,11 @@
 
   App.action('settings-toggle', (input) => {
     // Флажок: событие click приходит до смены состояния — читаем после
-    setTimeout(() => App.run(null, () => App.api.post('/api/settings', { [input.dataset.option]: input.checked })), 0);
+    setTimeout(async () => {
+      const want = input.checked;
+      const res = await App.run(null, () => App.api.post('/api/settings', { [input.dataset.option]: want }));
+      if (!res || res.ok === false) input.checked = !want;
+    }, 0);
   });
 
   // Флажок уже переключился: checked — то, чего хочет человек. Разрешение спрашиваем сразу,

@@ -219,7 +219,7 @@
             <a class="btn" id="help-telegram" href="https://t.me/davronsv" target="_blank" rel="noopener">${I('send')}Написать в Telegram</a>
           </div></div>
         <div class="card"><details id="help-logs-box"><summary>Журналы программы — для поддержки</summary><div class="body">
-          <div class="row" style="margin-bottom:10px"><select id="help-log-select" style="max-width:360px"></select>
+          <div class="row" style="margin-bottom:10px"><select id="help-log-select" aria-label="Выбор журнала" style="max-width:360px"></select>
             <button data-action="help-log-show">Показать</button></div>
           <div class="console" id="help-log"></div></div></details></div>
       </div>`;
@@ -237,10 +237,15 @@
 
   async function loadLogs() {
     const res = await App.api.get('/api/logs');
-    if (!res.ok) return;
+    if (!res.ok) {
+      App.text(byId('help-log'), `Не получилось загрузить список журналов: ${res.error || 'ошибка'}`);
+      return;
+    }
     logsLoaded = true;
-    App.html(byId('help-log-select'), (res.data.logs || []).map((l) =>
-      `<option value="${esc(l.name)}">${esc(l.name)} · ${fmt.bytes(l.size)}</option>`).join(''));
+    const logs = res.data.logs || [];
+    App.html(byId('help-log-select'), logs.length
+      ? logs.map((l) => `<option value="${esc(l.name)}">${esc(l.name)} · ${fmt.bytes(l.size)}</option>`).join('')
+      : '<option value="">Журналов пока нет</option>');
   }
 
   App.action('help-log-show', async (btn) => {

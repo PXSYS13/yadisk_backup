@@ -5,6 +5,7 @@ YADISK_DEMO=1 и /api/status?demo=<состояние> (или /?demo=<сост�
 
 from __future__ import annotations
 
+import os
 import time
 
 from utils import hhmm
@@ -13,6 +14,11 @@ from webapp.rescue_view import build_rescue_status
 
 DEMO_STATES = ("setup", "ready", "listing", "downloading", "low_space", "waiting", "token", "cookies",
                "overdraft", "disk_full", "done", "done_partial", "stopped", "update")
+
+
+def demo_on(demo: str | None) -> bool:
+    """Включён ли демо-режим: передан параметр demo и в окружении задан YADISK_DEMO=1."""
+    return bool(demo) and os.environ.get("YADISK_DEMO") == "1"
 # update — как ready, и на GitHub «вышла» новая версия (/api/status.update — webapp.updates.demo)
 
 _DEMO_DISK_FILES = ("Документы/Договор аренды.pdf", "Фото/2023/Отпуск/IMG_2041.JPG",

@@ -80,7 +80,8 @@ def fetch_latest(url: str | None = None) -> dict | None:
         if len(body) > MAX_BYTES:
             return None
         data = json.loads(body.decode("utf-8"))
-    except Exception:  # обрыв посреди ответа приходит исключением urllib3, а не requests
+    except Exception as e:  # обрыв посреди ответа приходит исключением urllib3, а не requests
+        log.debug("проверка новой версии: %s: %s", type(e).__name__, e)
         return None
     if not isinstance(data, dict) or data.get("draft") or data.get("prerelease"):
         return None

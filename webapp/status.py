@@ -12,7 +12,7 @@ from fastapi import APIRouter
 
 from utils import APP_VERSION, DONATION_URL, LINKS_DIRNAME, TELEGRAM_CHANNEL, TELEGRAM_HANDLE, YOUTUBE_VIDEO_URL
 from webapp import access, config, diagnostics, paths, updates
-from webapp.demo import DEMO_STATES, demo_rescue
+from webapp.demo import DEMO_STATES, demo_on, demo_rescue
 from webapp.folders import disk_folders_summary
 from webapp.links import demo_links, links_status
 from webapp.local_disk import free_space, local_size
@@ -40,7 +40,7 @@ def api_status(demo: str | None = None):
     unlim_db = unlim_db_stats()
     pipe_st = rescue.status()
     free = free_space(cfg["download_dir"])
-    demo_data = demo_rescue(demo, cfg) if demo in DEMO_STATES and os.environ.get("YADISK_DEMO") == "1" else None
+    demo_data = demo_rescue(demo, cfg) if demo in DEMO_STATES and demo_on(demo) else None
     if demo_data:
         token, cookies = demo_data["token"], demo_data["cookies"]
         disk_db, unlim_db = demo_data["disk_db"], demo_data["unlim_db"]

@@ -36,6 +36,7 @@ from downloader import (
     make_client,
     overdraft_message,
     restore_dates,
+    restore_folder_dates,
     scan_exit_code,
     scan_media,
     scan_tree,
@@ -208,6 +209,7 @@ def _run_download(cfg: dict, state: State, workers: int, wait: bool = False) -> 
             state=state,
             download_dir=cfg["download_dir"],
             workers=workers,
+            counters=counters,
         )
     except sqlite3.OperationalError as e:
         if not is_sqlite_disk_error(e):
@@ -253,6 +255,7 @@ def _restore_dates(state: State, download_dir: str) -> None:
         print(restored_text(n), flush=True)
         print(restored_line(n), flush=True)
         log.info("даты с Яндекса возвращены: %d файлов", n)
+    restore_folder_dates(state, download_dir)
 
 
 def _deferred_text(state: State) -> str:
@@ -485,7 +488,7 @@ def cmd_download(cfg: dict, args: argparse.Namespace) -> int:
     if not args.wait:
         if (code := _require_token(cfg)) is not None:
             return code
-        with State(str(DB_FILE)) as state:
+        with keep_awake(), State(str(DB_FILE)) as state:
             if (code := _scan_if_empty(cfg, state, args)) is not None:
                 return code
             return _run_download(cfg, state, workers)
@@ -552,7 +555,7 @@ def cmd_retry_failed(cfg: dict, args: argparse.Namespace) -> int:
     if (code := _require_token(cfg)) is not None:
         return code
 
-    with State(str(DB_FILE)) as state:
+    with keep_awake(), State(str(DB_FILE)) as state:
         n = state.reset_failed_to_pending()
         print(f"Сброшено failed → pending: {n}")
         if n == 0:
@@ -594,15 +597,21 @@ def cmd_verify(cfg: dict, args: argparse.Namespace) -> int:
     «Скачать недостающие» и «Заменить повреждённые» вернут эти файлы в очередь. Код 0 — всё
     в порядке, 1 — нет.
     """
+    full = bool(getattr(args, "full", False))
     with State(str(DB_FILE)) as state:
         items = [VerifyItem(r["remote_path"], r["local_path"], r["size"], r["md5"])
                  for r in state.get_all_downloaded()]
+        cache = None if full else state.get_verify_cache()
 
     def save(problems: list[tuple[str, str]]) -> None:
         with State(str(DB_FILE)) as state:
             state.save_verify_problems(problems)
 
-    return run_check(items, save)
+    def save_cache(entries: list[tuple[str, int, int, str]]) -> None:
+        with State(str(DB_FILE)) as state:
+            state.save_verify_cache(entries)
+
+    return run_check(items, save, cache=cache, save_cache=save_cache)
 
 
 def cmd_export(cfg: dict, args: argparse.Namespace) -> int:
@@ -680,6 +689,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_stats.set_defaults(func=cmd_stats)
 
     p_verify = sub.add_parser("verify", help="Проверить, что скачанные файлы на месте: размер и MD5")
+    p_verify.add_argument("--full", action="store_true",
+                          help="Пересчитать MD5 всех файлов с диска, игнорируя кэш прошлых проверок")
     p_verify.set_defaults(func=cmd_verify)
 
     p_export = sub.add_parser("export", help="Выгрузить список скачанных или нескачанных файлов (CSV/TXT)")

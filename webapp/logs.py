@@ -7,6 +7,7 @@ import logging
 import os
 import platform
 import re
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -26,6 +27,20 @@ log = logging.getLogger("webui")
 router = APIRouter()
 
 _LOG_NAME_RE = re.compile(r"^(tasks/)?[A-Za-z0-9_.-]+\.(log|jsonl)(\.\d+)?$")
+_SECRET_PATTERNS = (
+    (re.compile(r"\by0_[A-Za-z0-9_-]{8,}"), "y0_<REDACTED>"),
+    (re.compile(r"(Authorization\s*[:=]\s*(?:OAuth|Bearer)\s+)\S+", re.IGNORECASE), r"\1<REDACTED>"),
+    (re.compile(r"\b((?:Session_id|sessionid2|yandexuid|sk)\s*=\s*)[^;\s\"'&,}]+", re.IGNORECASE), r"\1<REDACTED>"),
+    (re.compile(r"\b(uid=)\d+", re.IGNORECASE), r"\1<REDACTED>"),
+)
+
+
+def _scrub_support_text(text: str) -> str:
+    """Убирает подписанные ссылки и возможные секреты (токены, куки, uid) из отчёта."""
+    out = scrub_urls(text)
+    for pattern, repl in _SECRET_PATTERNS:
+        out = pattern.sub(repl, out)
+    return out
 
 
 def log_path(name: str) -> Path:
@@ -50,7 +65,10 @@ def list_logs() -> list[dict]:
         rel = p.relative_to(paths.LOG_DIR).as_posix()
         if not _LOG_NAME_RE.match(rel):
             continue
-        st = p.stat()
+        try:
+            st = p.stat()
+        except OSError:
+            continue
         out.append({"name": rel, "size": st.st_size, "mtime": st.st_mtime})
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return out
@@ -123,20 +141,31 @@ def build_support_bundle() -> Path:
             pass
     name = f"yadisk-logs-{time.strftime('%Y%m%d-%H%M%S')}.zip"
     bundle = paths.LOG_DIR / name
-    with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as zf:
-        for entry in list_logs():
+    fd, tmp_name = tempfile.mkstemp(prefix=".bundle-", suffix=".tmp", dir=str(paths.LOG_DIR))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for entry in list_logs():
+                try:
+                    _add_scrubbed(zf, paths.LOG_DIR / entry["name"], entry["name"])
+                except OSError as e:
+                    log.warning("пропущен журнал %s при сборке отчёта: %s", entry["name"], e)
+            info = json.dumps(support_info(), ensure_ascii=False, indent=2, default=str)
+            zf.writestr("support-info.json", _scrub_support_text(info))
+        os.replace(tmp, bundle)
+    finally:
+        if tmp.exists():
             try:
-                _add_scrubbed(zf, paths.LOG_DIR / entry["name"], entry["name"])
+                tmp.unlink()
             except OSError:
                 pass
-        info = json.dumps(support_info(), ensure_ascii=False, indent=2, default=str)
-        zf.writestr("support-info.json", scrub_urls(info))
     log.info("собран архив логов для поддержки: %s", name)
     return bundle
 
 
 def _add_scrubbed(zf: zipfile.ZipFile, path: Path, name: str) -> None:
-    """Журнал в архив построчно, без путей и параметров ссылок.
+    """Журнал в архив построчно, без путей, параметров ссылок и секретов.
 
     Подписанная ссылка на файл Яндекса — сама по себе доступ к нему; журналы прежних версий
     их ещё содержат, а отчёт люди выкладывают в чат и на GitHub.
@@ -146,7 +175,7 @@ def _add_scrubbed(zf: zipfile.ZipFile, path: Path, name: str) -> None:
     entry.compress_type = zf.compression
     with open(path, "rb") as src, zf.open(entry, "w") as dst:
         for line in src:
-            dst.write(scrub_urls(line.decode("utf-8", errors="replace")).encode("utf-8"))
+            dst.write(_scrub_support_text(line.decode("utf-8", errors="replace")).encode("utf-8"))
 
 
 @router.get("/api/logs")

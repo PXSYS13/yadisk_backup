@@ -18,8 +18,9 @@ from pydantic import BaseModel, Field
 from public_download import LinkError, PublicApi, add_link, link_key, normalize_public_url, poke, remove_link
 from public_download import connect_db as links_connect
 from unlim_common import DEFERRED_MARKER
-from utils import EXIT_DISK_FULL, LINKS_DIRNAME, files_text, hhmm, sqlite_ro_uri, sqlite_tx
+from utils import EXIT_DISK_FULL, LINKS_DIRNAME, files_text, hhmm, sqlite_tx
 from webapp import config, paths
+from webapp.db_predicates import connect_ro, deferred_sql, limited_sql
 from webapp.tasks import SLOT_LINKS, organize_moving, tm
 
 log = logging.getLogger("webui")
@@ -38,15 +39,14 @@ def links_rows() -> tuple[list[dict], dict]:
         return [], {}
     c = None
     try:
-        c = sqlite3.connect(sqlite_ro_uri(paths.LINKS_DB_FILE), uri=True, timeout=5)
-        c.row_factory = sqlite3.Row
+        c = connect_ro(paths.LINKS_DB_FILE, timeout=5)
         rows = [dict(r) for r in c.execute(
-            """
+            f"""
             SELECT l.id, l.name, l.kind, l.error_kind, l.error, l.limit_until, l.listed_at, l.added_at,
                    SUM(f.status IS NOT NULL AND f.status <> 'gone') AS total,
                    SUM(f.status = 'downloaded') AS done,
-                   SUM(f.status = 'pending' AND COALESCE(f.error, '') LIKE ?) AS deferred,
-                   SUM(f.status = 'pending' AND COALESCE(f.error, '') LIKE 'link_limit |%') AS limited,
+                   SUM(f.status = 'pending' AND {deferred_sql('f')}) AS deferred,
+                   SUM(f.status = 'pending' AND {limited_sql('f')}) AS limited,
                    SUM(f.status = 'pending') AS pending,
                    SUM(f.status = 'failed') AS failed,
                    SUM(CASE WHEN f.status IN ('pending', 'downloaded', 'failed') THEN COALESCE(f.size, 0) END) AS bytes_total,
@@ -55,7 +55,7 @@ def links_rows() -> tuple[list[dict], dict]:
              WHERE l.state = 'active'
              GROUP BY l.id ORDER BY l.added_at DESC, l.id DESC
             """,
-            (DEFERRED_MARKER + "%",),
+            (DEFERRED_MARKER,),
         )]
         meta = {k: v for k, v in c.execute("SELECT key, value FROM links_meta")}
         return rows, meta
@@ -183,21 +183,31 @@ def api_links_add(p: LinkAddPayload):
         public_url, sub = normalize_public_url(p.url)
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
-    conn = links_connect(paths.LINKS_DB_FILE)
+    conn = None
     try:
+        conn = links_connect(paths.LINKS_DB_FILE)
         existing = conn.execute("SELECT id, state FROM links WHERE url=?", (link_key(public_url, sub),)).fetchone()
         meta, note = None, ""
         if not existing or existing["state"] == "removed":
+            api = PublicApi(timeout=(5, 10))
             try:
-                meta = PublicApi(timeout=(5, 10)).meta(public_url, sub, limit=1)
+                meta = api.meta(public_url, sub, limit=1)
             except LinkError as e:
                 if e.link_level:
                     raise HTTPException(400, e.text) from None
                 note = "Яндекс сейчас не ответил — программа попробует сама"
+            finally:
+                close = getattr(getattr(api, "session", None), "close", None)
+                if callable(close):
+                    close()
         link_id, new = add_link(conn, public_url, sub, meta)
         poke(conn)
+    except sqlite3.Error as e:
+        log.warning("ошибка базы ссылок при добавлении: %s", e)
+        return {"ok": False, "msg": f"База ссылок занята: {e}"}
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     ok, msg = links_start()
     log.info("ссылка #%s: %s", link_id, "добавлена" if new else "уже в списке")
     text = ("Ссылка добавлена — начинаю скачивание" if new else "Эта ссылка уже в списке") + (f". {note}" if note else "")
@@ -209,12 +219,17 @@ def api_links_remove(p: LinkIdPayload):
     """«Убрать из списка»: файлы на диске остаются. Идущее скачивание пропустит ссылку само."""
     if p.id is None:
         raise HTTPException(400, "Не указано, какую ссылку убрать")
-    conn = links_connect(paths.LINKS_DB_FILE)
+    conn = None
     try:
+        conn = links_connect(paths.LINKS_DB_FILE)
         removed = remove_link(conn, p.id, purge=not tm.any_alive(SLOT_LINKS))
         poke(conn)
+    except sqlite3.Error as e:
+        log.warning("ошибка базы ссылок при удалении: %s", e)
+        return {"ok": False, "msg": f"База ссылок занята: {e}"}
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     log.info("ссылка #%s убрана из списка", p.id)
     return {"ok": removed, "msg": "Убрал ссылку из списка. Скачанные файлы остались в папке" if removed
             else "Такой ссылки в списке нет"}
@@ -223,8 +238,9 @@ def api_links_remove(p: LinkIdPayload):
 @router.post("/api/links/retry_now")
 def api_links_retry_now(p: LinkIdPayload):
     """«Попробовать сейчас»: не ждать раунда, вернуть упавшие и снять паузу лимита."""
-    conn = links_connect(paths.LINKS_DB_FILE)
+    conn = None
     try:
+        conn = links_connect(paths.LINKS_DB_FILE)
         only = " AND link_id=?" if p.id is not None else ""
         params = (p.id,) if p.id is not None else ()
         with sqlite_tx(conn):
@@ -234,8 +250,12 @@ def api_links_retry_now(p: LinkIdPayload):
         # Будить — только идущий процесс: новый начнёт с полного раунда и без этого, а
         # оставшийся флаг пропустил бы его первое ожидание
         poke(conn, wake=tm.any_alive(SLOT_LINKS))
+    except sqlite3.Error as e:
+        log.warning("ошибка базы ссылок при повторе: %s", e)
+        return {"ok": False, "msg": f"База ссылок занята: {e}"}
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     ok, msg = links_start()
     return {"ok": ok, "msg": "Пробую снова прямо сейчас" if ok else msg}
 
@@ -245,13 +265,18 @@ def api_links_relist(p: LinkIdPayload):
     """«Проверить новые файлы»: собрать список ссылки заново — владелец мог что-то добавить."""
     if p.id is None:
         raise HTTPException(400, "Не указано, какую ссылку проверить")
-    conn = links_connect(paths.LINKS_DB_FILE)
+    conn = None
     try:
+        conn = links_connect(paths.LINKS_DB_FILE)
         with sqlite_tx(conn):
             conn.execute("UPDATE links SET listed_at=NULL WHERE id=? AND state='active'", (p.id,))
         poke(conn, wake=tm.any_alive(SLOT_LINKS))
+    except sqlite3.Error as e:
+        log.warning("ошибка базы ссылок при обновлении списка: %s", e)
+        return {"ok": False, "msg": f"База ссылок занята: {e}"}
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     ok, msg = links_start()
     return {"ok": ok, "msg": "Проверяю, что нового по ссылке" if ok else msg}
 

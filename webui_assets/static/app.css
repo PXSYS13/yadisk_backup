@@ -625,7 +625,7 @@ fieldset.bare:disabled .tree,fieldset.bare:disabled .folders-summary{opacity:.6}
 
 /* ── Шаги настройки ── */
 .stepper{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:20px}
-.stepper .s{display:flex;align-items:center;gap:12px;min-height:56px;padding:12px 16px;border-radius:var(--radius-md);background:var(--surface);border:2px solid var(--border);cursor:pointer;transition:border-color .15s,background .15s}
+.stepper .s{display:flex;align-items:center;gap:12px;width:100%;text-align:left;font:inherit;min-height:56px;padding:12px 16px;border-radius:var(--radius-md);background:var(--surface);border:2px solid var(--border);cursor:pointer;transition:border-color .15s,background .15s}
 .stepper .s:hover{background:var(--surface-2)}
 .stepper .s .n{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-weight:600;font-size:14px;background:var(--surface-2);color:var(--text-3);flex:none}
 .stepper .s .n .i{width:15px;height:15px;stroke-width:3}
@@ -653,7 +653,7 @@ table.list td.name{word-break:break-all}
 /* «Список файлов» в «Подробнее» и «По ссылке»: вкладки, поиск, пагинация */
 .seg-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .seg-tab{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:6px 12px;border-radius:10px;border:1px solid var(--border);background:var(--surface-2);color:var(--text-2);font:inherit;font-size:14px;font-weight:500;cursor:pointer;transition:background .15s,border-color .15s,color .15s}
-.seg-tab:hover{color:var(--text);border-color:var(--border-2,var(--border))}
+.seg-tab:hover{color:var(--text);border-color:var(--border-strong,var(--border))}
 .seg-tab.active{background:var(--accent-soft);color:var(--accent-text);border-color:var(--accent-line,var(--accent))}
 .seg-tab .cnt{font-size:12px;opacity:.85;font-variant-numeric:tabular-nums}
 .sub-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}

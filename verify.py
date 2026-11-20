@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
 import time
 from collections.abc import Callable, Iterable
@@ -54,7 +55,7 @@ def _error_text(e: OSError) -> str:
 
 
 def _md5(path: str, on_chunk: Callable[[int], None]) -> str:
-    h = hashlib.md5()
+    h = hashlib.md5(usedforsecurity=False)
     with open(to_long_path(path), "rb") as f:
         while block := f.read(_CHUNK):
             h.update(block)
@@ -79,27 +80,40 @@ def _not_owners(todo: list[Item]) -> set[int]:
             continue
         path = todo[idx[0]].local_path
         try:
-            got = os.stat(to_long_path(path)).st_size
+            st = os.lstat(to_long_path(path))
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            got = st.st_size
         except OSError:
             continue  # файла нет или его не прочитать — это каждой строке скажет общий проход
         fits = [i for i in idx if todo[i].size is None or todo[i].size == got]
         owner = fits[0] if len(fits) == 1 else None
         if len(fits) > 1:
-            try:
-                actual = _md5(path, lambda _n: None)
-            except OSError:
-                actual = None
-            owner = next((i for i in fits if actual and is_md5(todo[i].md5) and todo[i].md5.lower() == actual), None)
+            if any(is_md5(todo[i].md5) for i in fits):
+                try:
+                    actual = _md5(path, lambda _n: None)
+                except OSError:
+                    actual = None
+                owner = next((i for i in fits if actual and is_md5(todo[i].md5) and todo[i].md5.lower() == actual), None)
+            else:
+                owner = fits[0]  # ни у одной записи нет MD5 — отдаём файл первой детерминированно
         out.update(i for i in idx if i != owner)
     return out
 
 
-def check_files(items: Iterable[Item],
-                on_progress: Callable[[dict], None] | None = None) -> tuple[dict, list[tuple[str, str]]]:
+def check_files(
+    items: Iterable[Item],
+    on_progress: Callable[[dict], None] | None = None,
+    *,
+    cache: dict[str, tuple[int, int, str]] | None = None,
+    save_cache: Callable[[list[tuple[str, int, int, str]]], None] | None = None,
+) -> tuple[dict, list[tuple[str, str]]]:
     """Проверяет скачанные файлы. Возвращает (сводку для verify_summary, проблемы [(ключ, вид)]).
 
     on_progress получает {"stage": "size"|"md5", "done", "total", "found"}, для MD5 ещё
-    bytes_done, bytes_total и eta_sec: после каждого файла и каждого прочитанного мегабайта.
+    bytes_done, bytes_total и eta_sec.
+    cache: path_key(local_path) → (size, mtime_ns, md5) для пропуска повторного чтения
+    неизменившихся файлов; save_cache сохраняет свежепосчитанные MD5.
     """
     t0 = time.monotonic()
     items = list(items)
@@ -109,6 +123,7 @@ def check_files(items: Iterable[Item],
     problems: list[tuple[str, str]] = []
     kind_bytes = dict.fromkeys(REQUEUE_KINDS, 0)
     reachable = 0
+    cached_hits = 0
 
     def found(kind: str, it: Item, **extra) -> None:
         counts[kind] += 1
@@ -123,39 +138,60 @@ def check_files(items: Iterable[Item],
             on_progress({**p, "found": sum(counts[k] for k in KINDS)})
 
     # 1. Размеры: по одному обращению к диску на файл
-    to_hash: list[tuple[Item, int]] = []
+    to_hash: list[tuple[Item, int, int]] = []
     taken = _not_owners(todo)
+    total_todo = len(todo)
+    # На больших списках (200k+) не дёргаем callback на каждом файле — раз в 200 файлов + края
+    size_stride = 200 if total_todo > 500 else 1
     for i, it in enumerate(todo, 1):
         if i - 1 in taken:
             found("missing", it, taken=True)  # на его месте файл другой записи
-            report(stage="size", done=i, total=len(todo))
+            if i == 1 or i == total_todo or i % size_stride == 0:
+                report(stage="size", done=i, total=total_todo)
             continue
         try:
-            got = os.stat(to_long_path(it.local_path)).st_size
+            st = os.lstat(to_long_path(it.local_path))
         except (FileNotFoundError, NotADirectoryError):
             found("missing", it)
         except OSError as e:  # нет прав, диск не готов
             found("unreadable", it, error=_error_text(e))
         else:
+            if not stat.S_ISREG(st.st_mode):
+                found("missing", it)
+                if i == 1 or i == total_todo or i % size_stride == 0:
+                    report(stage="size", done=i, total=total_todo)
+                continue
+            got = st.st_size
             reachable += 1
             if it.size is not None and got != it.size:
                 found("size", it, local_size=got)
             elif is_md5(it.md5):
-                to_hash.append((it, got))
+                hit = cache.get(path_key(it.local_path)) if cache else None
+                if hit is not None and hit[0] == got and hit[1] == st.st_mtime_ns and is_md5(hit[2]):
+                    cached_hits += 1
+                    if hit[2].lower() == it.md5.lower():
+                        counts["ok"] += 1
+                    else:
+                        found("md5", it)
+                else:
+                    to_hash.append((it, got, st.st_mtime_ns))
             else:
                 counts["ok"] += 1
                 counts["no_md5"] += 1
-        report(stage="size", done=i, total=len(todo))
+        if i == 1 or i == total_todo or i % size_stride == 0:
+            report(stage="size", done=i, total=total_todo)
 
-    # 2. MD5 — только у файлов, чей размер совпал
-    bytes_total = sum(got for _, got in to_hash)
+    # 2. MD5 — только у файлов, чей размер совпал (и которых нет в verify_cache)
+    bytes_total = sum(got for _, got, _ in to_hash)
     bytes_done = 0
     hashed = 0
     t_md5 = time.monotonic()
+    new_cache: list[tuple[str, int, int, str]] = []
 
     def md5_progress() -> None:
         spent = time.monotonic() - t_md5
-        eta = round((bytes_total - bytes_done) * spent / bytes_done) if spent >= 5 and bytes_done else None
+        remaining = max(0, bytes_total - bytes_done)
+        eta = round(remaining * spent / bytes_done) if spent >= 5 and bytes_done else None
         report(stage="md5", done=hashed, total=len(to_hash), bytes_done=bytes_done,
                bytes_total=bytes_total, eta_sec=eta)
 
@@ -164,7 +200,7 @@ def check_files(items: Iterable[Item],
         bytes_done += n
         md5_progress()
 
-    for it, got in to_hash:
+    for it, got, mtime_ns in to_hash:
         start = bytes_done
         try:
             actual = _md5(it.local_path, on_chunk)
@@ -173,6 +209,7 @@ def check_files(items: Iterable[Item],
         except OSError as e:
             found("unreadable", it, error=_error_text(e))
         else:
+            new_cache.append((it.local_path, got, mtime_ns, actual))
             if actual == it.md5.lower():
                 counts["ok"] += 1
             else:
@@ -181,11 +218,18 @@ def check_files(items: Iterable[Item],
         hashed += 1
         md5_progress()
 
+    if save_cache is not None and new_cache:
+        try:
+            save_cache(new_cache)
+        except Exception:  # noqa: BLE001 — кэш не должен ломать проверку
+            pass
+
     summary = {
         "checked": len(todo),
         "ok": counts["ok"],
         **{k: counts[k] for k in KINDS},
         "no_md5": counts["no_md5"],
+        "cached": cached_hits,
         # У строк безлимита из старых версий не записано, где лежит файл: проверить нечем
         "unchecked": len(items) - len(todo),
         "bytes": sum(it.size or 0 for it in todo),
@@ -240,7 +284,9 @@ class Progress:
                               unit_divisor=1024, leave=False) if md5 else
                          tqdm(total=p["total"], desc="Все ли файлы на месте", unit="file", leave=False))
         if self._bar is not None:
-            self._bar.update((p["bytes_done"] if md5 else p["done"]) - self._bar.n)
+            delta = (p["bytes_done"] if md5 else p["done"]) - self._bar.n
+            if delta > 0:
+                self._bar.update(delta)
 
     def close(self) -> None:
         if self._bar is not None:
@@ -277,7 +323,13 @@ def print_report(summary: dict) -> None:
     print(summary_line(s), flush=True)
 
 
-def run_check(items: list[Item], save_problems: Callable[[list[tuple[str, str]]], None]) -> int:
+def run_check(
+    items: list[Item],
+    save_problems: Callable[[list[tuple[str, str]]], None],
+    *,
+    cache: dict[str, tuple[int, int, str]] | None = None,
+    save_cache: Callable[[list[tuple[str, int, int, str]]], None] | None = None,
+) -> int:
     """Проверка для CLI: прогресс, запись проблем в базу, итог. 0 — всё в порядке, 1 — есть проблемы.
 
     save_problems(пары (ключ, вид)) заменяет в базе список для «Скачать недостающие» и «Заменить повреждённые».
@@ -294,7 +346,7 @@ def run_check(items: list[Item], save_problems: Callable[[list[tuple[str, str]]]
     # Сверка MD5 большой папки идёт часами: компьютер не должен уснуть посреди неё
     with keep_awake():
         try:
-            summary, problems = check_files(items, progress)
+            summary, problems = check_files(items, progress, cache=cache, save_cache=save_cache)
         finally:
             progress.close()
     # Сначала база, потом итог: кнопки возврата в очередь появляются в интерфейсе по строке итога

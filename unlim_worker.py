@@ -39,16 +39,25 @@ import sys
 import time
 import zipfile
 import zlib
-from collections import Counter, defaultdict
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import closing
 from dataclasses import dataclass
-from typing import NamedTuple
 
 import requests
 
 from file_dates import DateRow, restore_all, restored_line, restored_text, set_file_time
 from storage_fetch import FetchFailure, fetch_preview, fetch_to_file, preview_failure_text
+from unlim_match import (  # noqa: F401 — реэкспорт для обратной совместимости
+    ExtractedItem,
+    FetchResult,
+    RejectedItem,
+    SplitResult,
+    _batch_name,
+    _batch_size,
+    _clean_stem,
+    split_by_extracted,
+)
 
 from unlim_common import (
     BASE,
@@ -67,6 +76,7 @@ from unlim_common import (
     count_failed,
     ensure_unlim_schema,
     get_sk_uid,
+    is_captcha_response,
     is_json_auth_error,
     make_cid,
     make_session as common_make_session,
@@ -84,6 +94,7 @@ from utils import (
     EXIT_OUTAGE,
     EXIT_PARTIAL,
     IS_WINDOWS,
+    MAX_NAME_LEN,
     TELEGRAM_CHANNEL,
     categorize,
     deferred_round_text,
@@ -96,6 +107,7 @@ from utils import (
     keep_awake,
     local_copy_matches,
     local_error_kind,
+    name_with_tag,
     preview_path_for,
     previews_enabled,
     remove_preview,
@@ -202,12 +214,16 @@ def check_disk_space(target_dir: str, min_bytes: int = MIN_FREE_BYTES) -> tuple[
         return True, -1
 
 
-def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATCH_BYTES) -> list[dict]:
+def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATCH_BYTES,
+               exclude_ids: Iterable[str] | None = None) -> list[dict]:
     """Атомарно забирает пачку pending с контролем как количества, так и суммарного веса.
 
     Если первый файл уже тяжёлый (>= LARGE_FILE_THRESHOLD) или имел сбои (attempts > 0) —
     забирает ровно 1 файл, изолируя проблемные файлы в индивидуальные загрузки.
+    exclude_ids — файлы, уже отложенные этим воркером в текущем раунде (без dead_host):
+    не крутим их по кругу до следующего раунда.
     """
+    skip = set(exclude_ids) if exclude_ids else set()
     with _tx() as c:
         cols = _columns(c)
         has_attempts = "attempts" in cols
@@ -232,17 +248,20 @@ def take_batch(worker_id: int, size: int = BATCH_SIZE, max_bytes: int = MAX_BATC
             order_parts.append("assigned_at ASC NULLS FIRST")
         order_parts.append("rowid ASC")
 
+        fetch_limit = max(size * 2, 40) + len(skip)
         rows = list(c.execute(
             f"SELECT file_id, name, size, {md5_col}, {att_col} "
             f"FROM unlim_files WHERE status='pending'{dead_filter} "
             f"ORDER BY {', '.join(order_parts)} "
             f"LIMIT ?",
-            (max(size * 2, 40),),
+            (fetch_limit,),
         ))
 
         items: list[dict] = []
         total_size = 0
         for r in rows:
+            if skip and str(r["file_id"]) in skip:
+                continue
             file_size = int(r["size"] or 0)
             attempts = int(r["attempts"] or 0)
             item = {"file_id": r["file_id"], "name": r["name"], "size": file_size,
@@ -290,21 +309,41 @@ def _release_to_pending(file_ids: list[str], worker_id: int | None = None) -> No
         )
 
 
-def mark_done(file_ids: list[str], paths: dict[str, str] | None = None) -> None:
+def mark_done(file_ids: list[str], paths: dict[str, str] | None = None,
+              worker_id: int | None = None, dated_ids: set[str] | None = None) -> None:
     """Помечает файлы скачанными; paths — file_id → локальный путь (если известен).
 
     Оригинал на месте — страховочное превью больше не нужно: оно удаляется (drop_previews).
+    Если передан worker_id, обновляем только свою строку (или без владельца), чтобы проснувшийся
+    после сна воркер не перетёр local_path, уже скачанный соседом.
+    dated_ids — file_id, которым set_file_time только что выставил дату (чтобы restore_dates их не перепроверял).
     """
     if not file_ids:
         return
     paths = paths or {}
+    dated_set = dated_ids or set()
     with _tx() as c:
         cols = _columns(c)
         host_reset = ", storage_host=NULL" if "storage_host" in cols else ""
+        can_date = "dated" in cols and "file_time" in cols
+        dated_sql = ", dated=CASE WHEN ? THEN file_time ELSE dated END" if can_date else ""
+        if worker_id is not None and "worker_id" in cols:
+            owner_sql = " AND (worker_id=? OR worker_id IS NULL)"
+            params = [
+                (paths.get(i), *( (1 if i in dated_set else 0,) if can_date else () ), i, worker_id)
+                for i in file_ids
+            ]
+        else:
+            owner_sql = ""
+            params = [
+                (paths.get(i), *( (1 if i in dated_set else 0,) if can_date else () ), i)
+                for i in file_ids
+            ]
         c.executemany(
             "UPDATE unlim_files SET status='downloaded', local_path=COALESCE(?, local_path), "
-            f"downloaded_at=CURRENT_TIMESTAMP, worker_id=NULL, error=NULL{host_reset} WHERE file_id=?",
-            [(paths.get(i), i) for i in file_ids],
+            f"downloaded_at=CURRENT_TIMESTAMP, worker_id=NULL, error=NULL{host_reset}{dated_sql} "
+            f"WHERE file_id=? AND status <> 'downloaded'{owner_sql}",
+            params,
         )
         previews = []
         if "preview_path" in cols:
@@ -375,7 +414,7 @@ def sweep_previews() -> int:
     был открыт в программе просмотра).
     """
     try:
-        with _tx() as c:
+        with closing(connect_unlim_db(DB_FILE)) as c:
             if "preview_path" not in _columns(c):
                 return 0
             rows = [(r[0], r[1]) for r in c.execute(
@@ -502,8 +541,9 @@ def recover_stuck(worker_id: int | None = None, timeout_sec: int = STUCK_TIMEOUT
             ).rowcount
         recovered += c.execute(
             "UPDATE unlim_files SET status='pending', worker_id=NULL "
-            "WHERE status='in_progress' AND "
-            "(julianday(CURRENT_TIMESTAMP) - julianday(assigned_at)) * 86400 > ?",
+            "WHERE status='in_progress' AND ("
+            "assigned_at IS NULL OR "
+            "(julianday(CURRENT_TIMESTAMP) - julianday(assigned_at)) * 86400 > ?)",
             (timeout_sec,),
         ).rowcount
         return recovered
@@ -519,17 +559,19 @@ def last_downloaded_file(exclude: str = "") -> str | None:
 
     По нему проверяется ответ «такого файла нет» — см. Worker._confirm_gone.
     """
-    c = connect_unlim_db(DB_FILE)
+    c = None
     try:
+        c = connect_unlim_db(DB_FILE)
         order = "downloaded_at DESC, rowid DESC" if "downloaded_at" in _columns(c) else "rowid DESC"
         row = c.execute(
             f"SELECT file_id FROM unlim_files WHERE status='downloaded' AND file_id<>? ORDER BY {order} LIMIT 1",
             (exclude,),
         ).fetchone()
-    except sqlite3.OperationalError:
+    except sqlite3.Error:
         return None
     finally:
-        c.close()
+        if c is not None:
+            c.close()
     return str(row[0]) if row else None
 
 
@@ -582,13 +624,15 @@ def set_shared_cooldown(seconds: float) -> float:
 
 def shared_cooldown_remaining() -> float:
     """Сколько секунд ещё действует общая пауза (0 — паузы нет). Испорченную запись стирает."""
-    c = connect_unlim_db(DB_FILE)
+    c = None
     try:
+        c = connect_unlim_db(DB_FILE)
         row = c.execute("SELECT value FROM unlim_meta WHERE key='cooldown_until'").fetchone()
-    except sqlite3.OperationalError:  # старая БД без таблицы — паузы нет
+    except sqlite3.Error:  # старая БД без таблицы или недоступна — паузы нет
         return 0.0
     finally:
-        c.close()
+        if c is not None:
+            c.close()
     if not row:
         return 0.0
     until = _cooldown_until(row[0])
@@ -619,20 +663,28 @@ def mark_host_dead(host: str, ttl: float = DEAD_HOST_TTL_SEC) -> None:
 
 
 def is_host_dead(host: str) -> bool:
-    c = connect_unlim_db(DB_FILE)
+    c = None
     try:
+        c = connect_unlim_db(DB_FILE)
         row = c.execute("SELECT value FROM unlim_meta WHERE key=?", (f"dead_host:{host}",)).fetchone()
-    except sqlite3.OperationalError:  # старая БД без таблицы
+    except sqlite3.Error:  # старая БД без таблицы
         return False
     finally:
-        c.close()
-    return bool(row) and float(row[0]) > time.time()
+        if c is not None:
+            c.close()
+    if not row:
+        return False
+    try:
+        until = float(row[0])
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(until) and until > time.time()
 
 
 def queue_summary() -> str:
     """Состояние очереди одной строкой — для старта воркера и логов."""
     try:
-        with _tx() as c:
+        with closing(connect_unlim_db(DB_FILE)) as c:
             rows = c.execute(
                 "SELECT status, COUNT(*) AS n, COALESCE(SUM(size), 0) AS b FROM unlim_files GROUP BY status"
             ).fetchall()
@@ -792,7 +844,7 @@ def get_file_url(s, sk, uid, path: str) -> tuple[str | None, PrepareError | None
         log.warning(f"url {err}")
         return None, err
     # На частые запросы Яндекс отвечает капчей — это лимит, а не протухшие куки
-    if "captcha" in str(getattr(r, "text", "") or "").lower()[:2000]:
+    if is_captcha_response(r):
         err = PrepareError("rate_limit", f"Яндекс показал капчу: слишком частые запросы (HTTP {r.status_code}){trace}",
                            r.status_code, _retry_after_sec(r))
         log.warning(f"url {err}")
@@ -853,7 +905,7 @@ def prepare_zip(s, sk, uid, paths: list[str]) -> tuple[str | None, PrepareError 
         return None, err
 
     trace = response_trace(r)
-    if "captcha" in str(getattr(r, "text", "") or "").lower()[:2000]:
+    if is_captcha_response(r):
         err = PrepareError("rate_limit", f"Яндекс показал капчу: слишком частые запросы (HTTP {r.status_code}){trace}",
                            r.status_code, _retry_after_sec(r))
         log.warning(f"prepare {err}")
@@ -987,7 +1039,7 @@ def _place_file(tmp: str, dst: str) -> str:
 
     Занятое имя не затирается никогда — ни файл, ни папка, ни ссылка (см. _move_no_clobber).
     """
-    base, ext = os.path.splitext(dst)
+    folder, fname = os.path.split(dst)
     src, cand, i = tmp, dst, 0
     try:
         while True:
@@ -1000,44 +1052,13 @@ def _place_file(tmp: str, dst: str) -> str:
                 src = _copy_beside(tmp, dst)  # временная папка на другом диске
                 continue
             i += 1
-            cand = f"{base}_{i}{ext}"
+            cand = os.path.join(folder, name_with_tag(fname, f"_{i}", MAX_NAME_LEN))
     finally:
         if src != tmp:
             remove_quiet(to_long_path(src))  # копия, если перенести её не удалось
     if src != tmp:
         remove_quiet(to_long_path(tmp))
     return cand
-
-
-def _clean_stem(name: str) -> tuple[str, str]:
-    """'photo (1).jpg' → ('photo', '.jpg'): Яндекс дописывает суффиксы при коллизиях имён в ZIP."""
-    base = os.path.basename(name).lower()
-    stem, ext = os.path.splitext(base)
-    clean = re.sub(r"[\s_]*\(\d+\)$|_+\d+$", "", stem).strip()
-    return clean, ext
-
-
-class ExtractedItem(NamedTuple):
-    """Запись архива, которую удалось распаковать."""
-
-    name: str
-    size: int
-    dst: str = ""
-
-
-class RejectedItem(NamedTuple):
-    """Запись архива, которую не записать в эту папку (длинный путь, FAT32): виноват файл, не диск."""
-
-    name: str
-    size: int
-    reason: str  # «local_file | …» — так же, как в режиме direct
-
-
-class FetchResult(NamedTuple):
-    extracted: list[ExtractedItem]
-    total_bytes: int
-    failure: FetchFailure | None = None
-    rejected: tuple[RejectedItem, ...] = ()
 
 
 _NOT_ZIP_CONTENT_TYPES = ("text/html", "application/json", "text/plain")
@@ -1071,7 +1092,11 @@ def _download_zip_to(s, url: str, tmp: str, zip_path: str, worker_id: int, batch
                     "not_zip",
                     f"вместо ZIP пришёл {ctype.split(';')[0]}: {snippet.decode('utf-8', 'replace')!r}{trace}",
                 )
-            content_len = int(headers.get("Content-Length", 0) or 0)
+            try:
+                content_len = int(headers.get("Content-Length", 0) or 0)
+            except (TypeError, ValueError):
+                content_len = 0
+            content_encoded = bool(headers.get("Content-Encoding"))
             log.info("w%d b%d: архив %s%s, качаю%s", worker_id, batch_idx,
                      ctype.split(";")[0] or "без типа",
                      f" {human_bytes(content_len)}" if content_len else "", trace)
@@ -1090,6 +1115,10 @@ def _download_zip_to(s, url: str, tmp: str, zip_path: str, worker_id: int, batch
                         print(f"[w{worker_id}] b{batch_idx}: качаю архив {human_bytes(written)}{total_str}...", flush=True)
                         if on_progress:
                             on_progress()
+        if content_len and not content_encoded and written != content_len:
+            return FetchFailure(
+                "connection", f"архив оборвался: скачано {written} байт из {content_len}{trace}",
+            )
         os.replace(tmp, zip_path)
         if not zipfile.is_zipfile(zip_path):
             with open(zip_path, "rb") as f:
@@ -1303,93 +1332,7 @@ def download_file(
     return "", failure
 
 
-# ── Сопоставление «что просили» ↔ «что приехало» ────────────────────────────
-
-
-class SplitResult(NamedTuple):
-    done: list[str]        # file_id, которые реально приехали
-    missing: list[str]     # file_id, которых в архиве не оказалось
-    paths: dict[str, str]  # file_id → локальный путь распакованного файла
-
-
-def _batch_name(item: dict) -> str:
-    return os.path.basename(item.get("name") or "").lower()
-
-
-def _batch_size(item: dict) -> int:
-    return int(item.get("size") or 0)
-
-
-def split_by_extracted(batch: list[dict], extracted: Iterable[tuple]) -> SplitResult:
-    """Делит пачку на реально приехавшие и не приехавшие файлы.
-
-    1. Точное совпадение по (имя файла, размер).
-    2. Совпадение по базовому имени (вариации вроде 'photo (1).jpg') + расширению + размеру.
-    3. Фоллбэк только для одинакового расширения и размера (не путаем разные форматы).
-
-    extracted принимает кортежи (имя, размер) или (имя, размер, путь).
-    """
-    unused: list[ExtractedItem] = [ExtractedItem(*it) for it in extracted]
-    done: list[str] = []
-    paths: dict[str, str] = {}
-
-    def stage(
-        pending: list[dict],
-        key_batch: Callable[[dict], tuple],
-        key_item: Callable[[ExtractedItem], tuple],
-    ) -> list[dict]:
-        """Сопоставляет pending с ещё не использованными записями архива по ключу,
-        с учётом кратности. Возвращает несопоставленные."""
-        nonlocal unused
-        buckets: dict[tuple, list[int]] = defaultdict(list)
-        for idx, it in enumerate(unused):
-            buckets[key_item(it)].append(idx)
-        taken: set[int] = set()
-        rest: list[dict] = []
-        for item in pending:
-            idxs = buckets.get(key_batch(item))
-            if not idxs:
-                rest.append(item)
-                continue
-            idx = idxs.pop(0)
-            taken.add(idx)
-            fid = str(item["file_id"])
-            done.append(fid)
-            if unused[idx].dst:
-                paths[fid] = unused[idx].dst
-        unused = [it for idx, it in enumerate(unused) if idx not in taken]
-        return rest
-
-    # Архив приезжает с санитизированными именами (см. safe_extract_dst) —
-    # сравниваем в том же виде
-    def norm_name(name: str) -> str:
-        return sanitize_component(os.path.basename(name)).lower()
-
-    # 1. Точное совпадение (имя, размер)
-    pending = stage(
-        batch,
-        lambda b: (norm_name(b.get("name") or ""), _batch_size(b)),
-        lambda it: (norm_name(it.name), int(it.size or 0)),
-    )
-    # 2. Нормализованный стэм: 'a (1).jpg' ↔ 'a.jpg'
-    if pending:
-        pending = stage(
-            pending,
-            lambda b: (*_clean_stem(norm_name(b.get("name") or "")), _batch_size(b)),
-            lambda it: (*_clean_stem(norm_name(it.name)), int(it.size or 0)),
-        )
-    # 3. Фоллбэк: только расширение + размер
-    if pending:
-        pending = stage(
-            pending,
-            lambda b: (os.path.splitext(_batch_name(b))[1], _batch_size(b)),
-            lambda it: (os.path.splitext(it.name.lower())[1], int(it.size or 0)),
-        )
-
-    return SplitResult(done, [str(b["file_id"]) for b in pending], paths)
-
-
-# ── Цикл воркера ────────────────────────────────────────────────────────────
+# ── Цикл воркера (сопоставление вынесено в unlim_match.py) ──────────────────
 
 
 # Категория сбоя → как объяснить человеку серию одинаковых отказов
@@ -1445,6 +1388,8 @@ class Worker:
         self.previews = 0  # сохранено страховочных превью за запуск
         self._last_heartbeat = 0.0
         self._current_ids: list[str] = []
+        # Файлы, отложенные этим воркером в текущем раунде (без dead_host) — не берём их повторно
+        self._deferred_this_round: set[str] = set()
 
     def say(self, msg: str) -> None:
         print(f"[w{self.id}] {msg}", flush=True)
@@ -1456,35 +1401,40 @@ class Worker:
             self.session = make_session()
         except CookiesFormatError as e:
             self.say(f"auth_expired | {e}")
-            sys.exit(EXIT_AUTH)
+            self._exit(EXIT_AUTH)
         except (ValueError, OSError) as e:  # битый JSON, не тот файл, нет прав на чтение
             self.say(f"auth_expired | Не получается прочитать cookies.json ({e}). "
                      f"Обновите доступ к Безлимиту в «Настройках».")
-            sys.exit(EXIT_AUTH)
+            self._exit(EXIT_AUTH)
         try:
             self.sk, self.uid = get_sk_uid(self.session)
         except AuthExpiredError as e:
             self.say(f"auth_expired | КРИТИЧЕСКАЯ ОШИБКА: {e}")
             self.say("Куки устарели. Обновите cookies.json в Web UI или браузере.")
-            sys.exit(EXIT_AUTH)
+            self._exit(EXIT_AUTH)
         except YandexUnavailableError as e:
             self.say(f"server_50x | Яндекс не отвечает, вход проверить не удалось: {e}. Повторю позже.")
-            sys.exit(EXIT_OUTAGE)
+            self._exit(EXIT_OUTAGE)
         except UnlimError as e:
             # Страница пришла без sk/uid: капча или новая вёрстка — не падение с кодом 1
             self.say(f"server_50x | Не удалось войти в веб-версию Диска: {e}. Повторю позже.")
-            sys.exit(EXIT_OUTAGE)
-        self.say(f"авторизован uid={self.uid}")
+            self._exit(EXIT_OUTAGE)
+        self.say("авторизован в веб-версии Диска")
 
-    def _refresh_auth(self) -> bool:
-        """sk живёт недолго — после сбоя обновляем. True, если сессия по кукам жива."""
+    def _refresh_auth_state(self) -> str:
+        """Обновляет sk: 'ok' — сессия жива, 'expired' — куки отклонены, 'unavailable' — сбой сети/капча."""
         try:
             self.sk, self.uid = get_sk_uid(self.session)
-            return True
+            return "ok"
         except AuthExpiredError:
-            return False
-        except Exception:
-            return True  # сеть/формат — не доказательство протухших кук
+            return "expired"
+        except Exception as e:
+            log.warning("w%d: не удалось обновить sk (сеть/капча): %s", self.id, e)
+            return "unavailable"
+
+    def _refresh_auth(self) -> bool:
+        """sk живёт недолго — после сбоя обновляем. True, если сессия по кукам не отклонена."""
+        return self._refresh_auth_state() != "expired"
 
     # ── основной цикл ──
 
@@ -1498,8 +1448,15 @@ class Worker:
                     self.say(f"rate_limit | общая пауза по лимиту Яндекса (429): жду ещё {int(wait)} с")
                 time.sleep(min(wait, 30))
                 continue
-            batch = take_batch(self.id, self.batch_size)
+            batch = take_batch(self.id, self.batch_size, exclude_ids=self._deferred_this_round)
             if not batch:
+                if empty_polls == 0:
+                    # Соседний воркер мог упасть посреди пачки — забираем его зависшие строки
+                    try:
+                        if recover_stuck() > 0:
+                            continue
+                    except sqlite3.Error:
+                        pass
                 empty_polls += 1
                 if empty_polls >= EMPTY_POLLS_BEFORE_EXIT:
                     break
@@ -1622,7 +1579,7 @@ class Worker:
         if expected > 0 and local_copy_matches(dst, expected, item.get("md5")):
             # Уже лежит в папке (прошлый запуск или архив) — второй раз не качаем. По MD5, а не
             # только по имени и размеру: «IMG_0001.JPG» того же размера бывает и другим фото
-            mark_done([fid], {fid: dst})
+            mark_done([fid], {fid: dst}, worker_id=self.id)
             self._on_file_done(fid, expected)
             return "done"
         if why := too_big_for_folder(EXTRACT_DIR, expected):
@@ -1656,11 +1613,13 @@ class Worker:
             # файла — откладываем до следующего раунда, а не сжигаем попытки
             failure = FetchFailure("storage_down", f"Яндекс не отдал файл после повтора: {failure}", failure.host)
             mark_deferred([fid], failure.host, str(failure), self.id)
+            self._deferred_this_round.add(fid)
             self.say(f"batch {self.batch_idx}: ⏳ Файл {name} отложен: {failure}")
             self._save_preview(item, name)
             return "deferred"
         if failure is not None and failure.is_storage:
             mark_deferred([fid], failure.host, str(failure), self.id)
+            self._deferred_this_round.add(fid)
             if failure.kind == "storage_down":
                 mark_host_dead(failure.host)
                 self.say(f"storage_down | Сервер хранения Яндекса {failure.host} не отвечает (файл {name}). "
@@ -1682,8 +1641,8 @@ class Worker:
             return "failed"
 
         size = os.path.getsize(to_long_path(path))
-        set_file_time(path, item.get("file_time"))  # дата съёмки, а не время скачивания
-        mark_done([fid], {fid: path})
+        dated_ok = set_file_time(path, item.get("file_time"))  # дата съёмки, а не время скачивания
+        mark_done([fid], {fid: path}, worker_id=self.id, dated_ids={fid} if dated_ok else None)
         self._on_file_done(fid, size)
         return "done"
 
@@ -1773,15 +1732,20 @@ class Worker:
             # (так было с массовым скачиванием). Проверяем сессию отдельно и только
             # потом печатаем причину: строку «auth_expired |» Web UI показывает как
             # «доступ устарел», и при живых куках она людей обманывает.
-            if self._refresh_auth():
-                err = PrepareError("refused", f"Яндекс отклонил запрос (HTTP {err.status}), "
+            auth_state = self._refresh_auth_state()
+            if auth_state == "ok":
+                status_txt = f"HTTP {err.status}" if err.status is not None else "JSON auth error"
+                err = PrepareError("refused", f"Яндекс отклонил запрос ({status_txt}), "
                                               f"хотя сессия жива: скачивание ограничено на стороне Яндекса", err.status)
+            elif auth_state == "unavailable":
+                err = PrepareError("server_50x", "Яндекс временно не ответил при перепроверке сессии — "
+                                                 "повторю позже", err.status)
             else:
                 _release_to_pending([it["file_id"] for it in batch], self.id)
                 self.say("auth_expired | КРИТИЧЕСКАЯ ОШИБКА: Авторизация отклонена Яндексом (401/403).")
                 self.say("Куки устарели. Обновите cookies.json в Web UI или браузере и перезапустите процесс.")
                 self._exit(EXIT_AUTH)
-        elif not self._refresh_auth():
+        elif self._refresh_auth_state() == "expired":
             # sk живёт недолго — его обновляем после любого сбоя. Вход на Диск не прошёл
             # (редирект на паспорт) — значит, протухли куки, а не Яндекс отказывает
             _release_to_pending([it["file_id"] for it in batch], self.id)
@@ -1869,11 +1833,13 @@ class Worker:
 
         # Копиям — дата с Яндекса (съёмки или загрузки), а не время распаковки
         times = {str(it.get("file_id")): it.get("file_time") for it in batch}
+        dated_ids: set[str] = set()
         for fid, path in res.paths.items():
-            set_file_time(path, times.get(fid))
+            if set_file_time(path, times.get(fid)):
+                dated_ids.add(fid)
         # Помечаем downloaded ТОЛЬКО те файлы, которые реально нашлись в архиве.
         # Остальные возвращаем в очередь — иначе бэкап «зелёный», а файлов нет.
-        mark_done(res.done, res.paths)
+        mark_done(res.done, res.paths, worker_id=self.id, dated_ids=dated_ids)
         done_set = set(res.done)
         done_bytes = sum(_batch_size(it) for it in batch if str(it.get("file_id")) in done_set)
         self.total_files += len(res.done)

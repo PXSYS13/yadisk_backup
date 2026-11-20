@@ -9,6 +9,7 @@
   let lastSummary = null;
   let lastResult = null;
   let clickedAt = 0;      // когда нажали кнопку — журнал более старой задачи не читаем
+  let prevTaskStart = 0;  // started_at задачи, которая уже была до нажатия кнопки
 
   function parseLog(lines) {
     let summary = null, result = null, progress = '';
@@ -78,13 +79,16 @@
       const task = (s.tasks || {}).organize;
       const busy = !!(task && task.running);
       const rescueOn = !!(s.pipeline && s.pipeline.running);
-      const startedMs = task ? Date.now() - (task.elapsed || 0) * 1000 : 0;
-      const fresh = task && (!clickedAt || startedMs >= clickedAt - 3000);
+      const taskStart = task && typeof task.started_at === 'number' ? task.started_at : 0;
+      const startedMs = taskStart ? taskStart * 1000 : (task ? Date.now() - (task.elapsed || 0) * 1000 : 0);
+      const fresh = task && (taskStart && prevTaskStart ? taskStart > prevTaskStart
+        : (!clickedAt || startedMs >= clickedAt - 3000));
       const parsed = fresh ? parseLog(task.log_tail) : { summary: null, result: null, progress: '' };
       if (parsed.summary) lastSummary = parsed.summary;
       if (parsed.result) lastResult = parsed.result;
+      const curPath = input.value.trim();
       byId('sort-report-btn').disabled = busy;
-      byId('sort-apply-btn').disabled = busy || rescueOn || !lastSummary || reportFor !== input.value.trim();
+      byId('sort-apply-btn').disabled = busy || rescueOn || !lastSummary || reportFor !== curPath;
       byId('sort-stop-btn').classList.toggle('hidden', !busy);
       App.text(byId('sort-note'), busy ? `Идёт… ${parsed.progress}`
         : rescueOn ? 'Разложить файлы можно после окончания скачивания — иначе программа скачает их заново.'
@@ -99,8 +103,15 @@
         card.classList.remove('hidden');
         App.text(byId('sort-out-title'), 'Что получится');
         App.html(byId('sort-out'), summaryHtml(lastSummary));
+      } else {
+        card.classList.add('hidden');
       }
     },
+  };
+
+  const currentOrgStart = () => {
+    const t = App.state.status && App.state.status.tasks && App.state.status.tasks.organize;
+    return (t && typeof t.started_at === 'number') ? t.started_at : 0;
   };
 
   App.action('sort-report', (btn) => {
@@ -108,6 +119,7 @@
     const path = byId('sort-path').value.trim();
     if (!path) { App.toast('Укажите папку', 'err'); return; }
     reportFor = path;
+    prevTaskStart = currentOrgStart();
     clickedAt = Date.now();
     App.run(btn, () => App.api.post('/api/organize', { input: path, action: 'report-only' }), { okToast: false });
   });
@@ -121,6 +133,7 @@
         ' Сами файлы не удаляются, одинаковые уедут в «_duplicates». Вернуть всё как было автоматически нельзя.' });
     if (!yes) return;
     lastResult = null;
+    prevTaskStart = currentOrgStart();
     clickedAt = Date.now();
     App.run(btn, () => App.api.post('/api/organize', { input: path, action: 'move' }), { okToast: false });
   });

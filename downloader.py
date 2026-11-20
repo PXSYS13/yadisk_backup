@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -25,23 +26,52 @@ from dataclasses import dataclass
 import requests
 import yadisk
 from urllib.parse import urlsplit
-from tenacity import (
-    retry,
-    retry_if_exception,
-    stop_after_attempt,
-    wait_exponential,
-)
 from tqdm import tqdm
 
-from file_dates import restore_all, set_file_time
+from disk_api import (  # noqa: F401 — реэкспорт для обратной совместимости
+    BROWSE_CAP,
+    BROWSE_TIMEOUT,
+    DEFAULT_N_RETRIES,
+    DEFAULT_TIMEOUT,
+    LIST_N_RETRIES,
+    NON_RETRYABLE,
+    OVERDRAFT_DAYS,
+    OVERDRAFT_ERROR,
+    RATE_LIMIT_WAIT_SEC,
+    SERVER_ERRORS,
+    SERVER_ERROR_WAIT_SEC,
+    TIMEOUT_ERRORS,
+    FetchError,
+    RepeatedPages,
+    RootNotFound,
+    StorageUnavailable,
+    _FOLDER_DATE_FIELDS,
+    _FOLDER_FIELDS,
+    _created_ts,
+    _entry_ts,
+    _is_retryable,
+    _modified_ts,
+    _parent_remote_dir,
+    _retry,
+    _share_flags,
+    _top_folder,
+    _wait_policy,
+    account_info,
+    api_error_details,
+    describe_account,
+    is_overdraft,
+    list_disk_folders,
+    make_browse_client,
+    make_client,
+    overdraft_account,
+    overdraft_message,
+    scan_exit_code,
+)
+from file_dates import apply_folder_dates, restore_all, set_file_time
 from state import DEFERRED_MARKER, State
 from storage_fetch import DeadHosts, FetchFailure, fetch_preview, fetch_to_file, preview_failure_text
 from utils import (
     APP_VERSION,
-    EXIT_AUTH,
-    EXIT_DISK_FULL,
-    EXIT_OUTAGE,
-    EXIT_OVERDRAFT,
     MAX_DISK_WORKERS,
     SKIP_PATH_PREFIXES,  # noqa: F401 — реэкспорт: корзину никогда не качаем
     categorize,
@@ -60,10 +90,10 @@ from utils import (
     file_size_safe,
     human_bytes,
     is_local_disk_error,
-    is_sqlite_disk_error,
     remove_preview,
     remove_quiet,
     resolve_local_path,
+    scrub_urls,
     short_hash,
     to_disk_path,
     to_long_path,
@@ -93,237 +123,24 @@ DEAD_HOSTS = DeadHosts()
 OnFile = Callable[[str, int], None]
 
 
-# ── клиент и retry-политика ─────────────────────────────────────────────────
-
-
-# Ошибки, повторять которые бессмысленно: токен не станет валидным, удалённый файл
-# не появится, папка не станет файлом, а исчерпанный лимит скачиваний файла не вернётся
-# через минуту, сколько ни жди.
-NON_RETRYABLE = (
-    yadisk.exceptions.UnauthorizedError,
-    yadisk.exceptions.ForbiddenError,
-    yadisk.exceptions.NotFoundError,
-    yadisk.exceptions.WrongResourceTypeError,
-    yadisk.exceptions.BadRequestError,
-    yadisk.exceptions.ResourceDownloadLimitExceededError,
-)
-# Сбои на стороне Яндекса (50x) — короткая фиксированная пауза
-SERVER_ERRORS = (
-    yadisk.exceptions.InternalServerError,
-    yadisk.exceptions.BadGatewayError,
-    yadisk.exceptions.GatewayTimeoutError,
-    yadisk.exceptions.UnavailableError,
-)
-# Таймауты: yadisk заворачивает сетевые таймауты в свой RequestTimeoutError
-TIMEOUT_ERRORS = (TimeoutError, yadisk.exceptions.RequestTimeoutError)
-
-# Пауза при 429 — Яндекс просит подождать, экспонента с 1 секунды тут не поможет
-RATE_LIMIT_WAIT_SEC = 60.0
-SERVER_ERROR_WAIT_SEC = 5.0
-# Через клиент идут только запросы к API (ссылки, списки, сведения о файле), сами файлы
-# качает storage_fetch. Ответ API дольше минуты — уже сбой: ждать по 5 минут и повторять
-# его 4 раза внутри yadisk, да ещё 7 раз через tenacity, значило висеть часами
-DEFAULT_TIMEOUT = (15.0, 60.0)
-# Свои повторы yadisk для одиночных запросов (ссылка на файл, сведения о файле): один. Файл,
-# которому Яндекс так и не выдал ссылку, ждёт следующего раунда, а не висит здесь
-DEFAULT_N_RETRIES = 1
-# Для списков — три, как до 2.8: listdir листает папку страницами по 500, и страница, которой
-# не хватило повторов, начинает всю папку заново. С одним повтором при ~20% сбоев большая
-# папка почти никогда не дочитывалась и выпадала из списка, а сбор кончался кодом 3
-LIST_N_RETRIES = 3
-
-
-def make_client(token: str) -> yadisk.Client:
-    """Клиент REST API с единым таймаутом. Закрывать через .close() или contextlib.closing."""
-    return yadisk.Client(token=token, default_args={"timeout": DEFAULT_TIMEOUT, "n_retries": DEFAULT_N_RETRIES})
-
-
-# Дерево папок в Настройках: человек ждёт ответа, долгие таймауты и повторы ему не нужны
-BROWSE_TIMEOUT = (10.0, 20.0)
-# Сколько элементов папки читаем ради подпапок: API не обещает «сначала папки»
-BROWSE_CAP = 5000
-
-
-def make_browse_client(token: str) -> yadisk.Client:
-    """Клиент для дерева папок: короткий таймаут и один повтор."""
-    return yadisk.Client(token=token, default_args={"timeout": BROWSE_TIMEOUT, "n_retries": 1})
-
-
-def account_info(client: yadisk.Client) -> dict:
-    """Всё полезное, что API Яндекса сообщает об аккаунте: логин, место, безлимит, корзина, тариф."""
-    info = client.get_disk_info()
-    user = getattr(info, "user", None)
-
-    def g(obj, name, default=None):
-        v = getattr(obj, name, None) if obj is not None else None
-        return default if v is None else v
-
-    used = int(g(info, "used_space", 0))
-    total = int(g(info, "total_space", 0))
-    reg = g(user, "reg_time") or g(info, "reg_time")
-    return {
-        "login": g(user, "login", "?"),
-        "display_name": g(user, "display_name", ""),
-        "uid": str(g(user, "uid", "")),
-        "country": g(user, "country", ""),
-        "used": used,
-        "total": total,
-        "free": max(0, total - used),
-        "trash": int(g(info, "trash_size", 0)),
-        "photo_unlim": int(g(info, "photounlim_size", 0)),
-        "is_paid": bool(g(info, "is_paid", False)),
-        "unlimited_autoupload_enabled": bool(g(info, "unlimited_autoupload_enabled", False)),
-        "max_file_size": int(g(info, "max_file_size", 0)),
-        "reg_time": reg.isoformat() if hasattr(reg, "isoformat") else (str(reg) if reg else None),
-        "photo_unlim_until": g(info, "free_photounlim_end_date"),
-    }
-
-
-def describe_account(acc: dict) -> str:
-    """Одна строка про аккаунт — для консоли и логов."""
-    name = f" ({acc['display_name']})" if acc.get("display_name") else ""
-    tariff = "платный" if acc.get("is_paid") else "бесплатный"
-    return (
-        f"Аккаунт {acc.get('login', '?')}{name}: занято {human_bytes(acc.get('used', 0))} "
-        f"из {human_bytes(acc.get('total', 0))}, безлимит {human_bytes(acc.get('photo_unlim', 0))}, "
-        f"корзина {human_bytes(acc.get('trash', 0))}, {tariff} тариф"
-    )
-
-
-def api_error_details(e: BaseException) -> str:
-    """Что ещё сообщил API: код ошибки yadisk и HTTP-статус. Пусто, если ничего."""
-    parts = []
-    error_type = getattr(e, "error_type", None)
-    if error_type:
-        parts.append(f"error_type={error_type}")
-    status = getattr(getattr(e, "response", None), "status", None)
-    if status:
-        parts.append(f"http={status}")
-    return f" [{', '.join(parts)}]" if parts else ""
-
-
-# Так Яндекс отвечает на любой запрос REST API, когда файлы занимают больше места, чем есть:
-# подписка закончилась (у аккаунта владельца в ноябре 2026 в место стал считаться и Безлимит). Сведения о Диске он
-# при этом отдаёт, а список и ссылки — нет. Новый ключ не поможет, помогает только место
-OVERDRAFT_ERROR = "DiskAPIDisabledForOverdraftUserError"
-# Справка Яндекс 360: переполненный Диск 44 дня можно скачивать, потом его блокируют
-OVERDRAFT_DAYS = 44
-
-
-def is_overdraft(e: BaseException) -> bool:
-    """Яндекс закрыл программам доступ к Диску: он переполнен."""
-    return isinstance(e, yadisk.exceptions.ForbiddenError) and getattr(e, "error_type", None) == OVERDRAFT_ERROR
-
-
-def overdraft_account(client: yadisk.Client) -> dict | None:
-    """Сколько занято и сколько есть — Яндекс говорит это и переполненному Диску. Никогда не бросает."""
-    try:
-        return account_info(client)
-    except Exception as e:  # noqa: BLE001 — цифры только поясняют, без них текст тоже верен
-        log.warning("сведения о переполненном Диске: %s%s", type(e).__name__, api_error_details(e))
-        return None
-
-
-def overdraft_message(acc: dict | None) -> str:
-    """Что случилось и что делать — для консоли и журнала."""
-    used = (f" (занято {human_bytes(acc['used'])} из {human_bytes(acc['total'])})"
-            if acc and acc.get("total") else "")
-    return (f"Диск переполнен{used}: Яндекс закрыл программам доступ к нему. Так бывает, когда "
-            f"закончилась подписка на место. Скачивать файлы Яндекс разрешает {OVERDRAFT_DAYS} дня "
-            f"после переполнения, потом блокирует Диск. Продлите подписку хотя бы на месяц — "
-            f"программа продолжит с того же места. Новый ключ доступа не поможет.")
-
-
-def _is_retryable(exc: BaseException) -> bool:
-    """Решает, стоит ли retry-ить исключение."""
-    if isinstance(exc, NON_RETRYABLE) or is_local_disk_error(exc):
-        return False
-    if isinstance(exc, yadisk.exceptions.YaDiskError):
-        return True
-    return isinstance(exc, OSError)  # ConnectionError и TimeoutError — его подклассы
-
-
-_wait_exponential = wait_exponential(multiplier=1, min=1, max=60)
-
-
-def _wait_policy(retry_state) -> float:
-    """429 → ждём минуту, 50x ошибки хранилища Яндекса → 5 сек, остальное → экспонента."""
-    exc = retry_state.outcome.exception() if retry_state.outcome else None
-    if isinstance(exc, yadisk.exceptions.TooManyRequestsError):
-        log.warning(
-            "Яндекс вернул 429 TooManyRequests (лимит запросов). Жду %.0f сек... Новости: %s",
-            RATE_LIMIT_WAIT_SEC,
-            TELEGRAM_CHANNEL,
-        )
-        return RATE_LIMIT_WAIT_SEC
-    if isinstance(exc, SERVER_ERRORS):
-        log.warning(
-            "Сбой серверов Яндекса (%s, дата-центр). Проблема на стороне Яндекса. Пауза %.0f сек... Статус: %s",
-            type(exc).__name__,
-            SERVER_ERROR_WAIT_SEC,
-            TELEGRAM_CHANNEL,
-        )
-        return SERVER_ERROR_WAIT_SEC
-    return _wait_exponential(retry_state)
-
-
-_retry = retry(
-    retry=retry_if_exception(_is_retryable),
-    wait=_wait_policy,
-    stop=stop_after_attempt(7),
-    reraise=True,
-)
-
-
-# ── обход дерева ────────────────────────────────────────────────────────────
+# ── обход дерева (клиент и retry-политика вынесены в disk_api.py) ──────────
 
 
 _normalize_remote = to_disk_path  # прежнее имя: 'disk:/foo/bar', как возвращает API
 _is_skipped = in_trash  # прежнее имя: путь в корзине
 
 
-class RepeatedPages(Exception):
-    """Плоский список Диска прислал уже присланную страницу снова — дальше по нему не дойти."""
-
-    def __init__(self, offset: int):
-        super().__init__(f"Яндекс повторяет страницы плоского списка файлов (с {offset}-го файла)")
-        self.offset = offset
-
-
-class RootNotFound(Exception):
-    """Выбранной папки больше нет на Диске: её переименовали, перенесли или удалили."""
-
-    def __init__(self, path: str):
-        super().__init__(path)
-        self.path = path
-
-
 # on_note(вид, имена): сбор списка сообщает о находках, которые стоит показать человеку
 OnNote = Callable[[str, list[str]], None]
-
-
-def _modified_ts(entry) -> float | None:
-    """Когда файл менялся на Диске — секунды эпохи; None, если API не сказал."""
-    when = getattr(entry, "modified", None)
-    try:
-        return when.timestamp() if when is not None else None
-    except (AttributeError, OverflowError, OSError, ValueError):
-        return None
 
 
 def _register_file(entry, batch: list, on_file: OnFile | None) -> int:
     """Кладёт файл API в пачку для БД и дёргает колбэк. Возвращает размер в байтах."""
     size = int(entry.size) if entry.size is not None else None
-    batch.append((entry.path, size, getattr(entry, "md5", None), _modified_ts(entry)))
+    batch.append((entry.path, size, getattr(entry, "md5", None), _modified_ts(entry), _created_ts(entry)))
     if on_file:
         on_file(entry.path, size or 0)
     return size or 0
-
-
-def _top_folder(path: str) -> str | None:
-    """'disk:/Фото/2020/a.jpg' → 'Фото'; файл в корне Диска → None."""
-    rest = to_disk_path(path).removeprefix("disk:/")
-    return rest.split("/", 1)[0] if "/" in rest else None
 
 
 def scan_tree(
@@ -346,6 +163,8 @@ def scan_tree(
         listed: set[str] = set()
         try:
             files, total = scan_all_files(client, state, on_file=on_file, seen_top=seen_top, known=listed)
+        except (yadisk.exceptions.UnauthorizedError, sqlite3.Error):
+            raise
         except Exception as e:
             if is_overdraft(e):
                 raise  # папки ответят тем же: Диск переполнен
@@ -353,6 +172,7 @@ def scan_tree(
         else:
             listed.clear()  # больше не нужен, а на большом Диске это сотни мегабайт
             more_files, more_bytes = _scan_shared_folders(client, state, seen_top, on_file, on_dir, on_note)
+            collect_folder_dates(client, state)
             return files + more_files, total + more_bytes
         return _walk(client, state, root, _new_files_only(on_file, listed), on_dir, on_note=on_note)
     return _walk(client, state, root, on_file, on_dir, strict_root=True, on_note=on_note)
@@ -372,25 +192,6 @@ def _new_files_only(on_file: OnFile | None, counted: set[str]) -> OnFile | None:
             on_file(path, size)
 
     return notify
-
-
-def scan_exit_code(e: BaseException) -> int | None:
-    """Код выхода для ошибки, оборвавшей сбор списка; None — неизвестная ошибка.
-
-    2 — Яндекс не принял токен, 3 — Яндекс недоступен или просит подождать (повторить
-    позже), 4 — базу не записать на локальный диск, 6 — Диск переполнен. Без этого любая
-    такая ошибка давала код 1, который Web UI читал как «скачивание закончилось с ошибками».
-    """
-    if is_overdraft(e):
-        return EXIT_OVERDRAFT
-    if isinstance(e, yadisk.exceptions.UnauthorizedError):
-        return EXIT_AUTH
-    if isinstance(e, (yadisk.exceptions.RequestError, yadisk.exceptions.TooManyRequestsError,
-                      requests.RequestException, RepeatedPages, *SERVER_ERRORS, *TIMEOUT_ERRORS)):
-        return EXIT_OUTAGE
-    if is_sqlite_disk_error(e):
-        return EXIT_DISK_FULL
-    return None
 
 
 def _walk(
@@ -428,6 +229,12 @@ def _walk(
             continue
         except yadisk.exceptions.UnauthorizedError:
             raise  # пробрасываем выше — токен битый
+        except yadisk.exceptions.ForbiddenError as e:
+            if is_overdraft(e):
+                raise
+            # Отозванный доступ к отдельной общей папке — не сбой Яндекса, повтор не поможет
+            log.warning("Нет доступа к папке %s (403): %s — пропускаю", cur, e)
+            continue
         except Exception as e:
             if is_overdraft(e):
                 # Не «папка не прочиталась»: так непрочитанным стал бы весь Диск, а сбор — кодом 3
@@ -439,12 +246,15 @@ def _walk(
             continue
 
         dir_files: list = []
+        dir_folders: list[tuple[str, float | None, float | None]] = []
         for entry in entries:
             if _is_skipped(entry.path):  # вид 'disk:/foo/bar'
                 continue
             if entry.type == "dir":
                 if on_dir:
                     on_dir(entry.path)
+                dir_folders.append((to_disk_path(entry.path).rstrip("/"),
+                                    _created_ts(entry), _modified_ts(entry)))
                 queue.append(entry.path)
             elif entry.type == "file":
                 files_count += 1
@@ -452,6 +262,8 @@ def _walk(
 
         if dir_files:
             state.mark_pending_batch(dir_files)
+        if dir_folders and hasattr(state, "save_folders_batch"):
+            state.save_folders_batch(dir_folders)
 
     return files_count, bytes_total
 
@@ -465,21 +277,65 @@ def _list_dir(client: yadisk.Client, path: str) -> list:
 
 # ── общие папки и дерево папок для Настроек ─────────────────────────────────
 
-_FOLDER_FIELDS = ["name", "path", "type", "share"]
+# За один проход после плоского сканирования дозапрашиваем даты не более чем для 500 родительских папок;
+# остальные папки получают даты из запасного расчёта по файлам (derive_folder_dates_from_files)
+FOLDER_DATES_MAX_PARENTS = 500
+
+
+def collect_folder_dates(
+    client: yadisk.Client,
+    state: State,
+    max_parents: int = FOLDER_DATES_MAX_PARENTS,
+) -> int:
+    """Дособирает точные даты (created, modified) папок Диска после плоского get_files().
+
+    Одно обращение к родителю (listdir с минимальным набором fields) отдаёт даты всех его подпапок.
+    Ошибки сети/лимита не фатальны: для оставшихся папок есть запасной расчёт по датам файлов.
+    """
+    if not (hasattr(state, "unique_parent_folders") and hasattr(state, "known_folder_paths")
+            and hasattr(state, "save_folders_batch")):
+        return 0
+    all_dirs = state.unique_parent_folders()
+    if not all_dirs:
+        return 0
+    known = state.known_folder_paths()
+    missing = all_dirs - known
+    if not missing:
+        return 0
+    parents = sorted({_parent_remote_dir(d) for d in missing})[:max_parents]
+    saved = 0
+    batch: list[tuple[str, float | None, float | None]] = []
+    for parent in parents:
+        try:
+            entries = list(client.listdir(parent, max_items=None, fields=_FOLDER_DATE_FIELDS,
+                                          n_retries=LIST_N_RETRIES))
+        except yadisk.exceptions.UnauthorizedError:
+            raise
+        except Exception as e:  # noqa: BLE001 — сбор дат папок не должен ронять скан файлов
+            if is_overdraft(e):
+                break
+            log.debug("даты папок: пропуск %s (%s)", parent, e)
+            continue
+        for entry in entries:
+            if getattr(entry, "type", None) != "dir" or _is_skipped(entry.path):
+                continue
+            cr, mod = _created_ts(entry), _modified_ts(entry)
+            if cr is not None or mod is not None:
+                batch.append((to_disk_path(entry.path).rstrip("/"), cr, mod))
+        if len(batch) >= 200:
+            state.save_folders_batch(batch)
+            saved += len(batch)
+            batch.clear()
+    if batch:
+        state.save_folders_batch(batch)
+        saved += len(batch)
+    return saved
 
 
 @_retry
 def _list_root_with_share(client: yadisk.Client) -> list:
     """Корень Диска с признаком общего доступа (share есть только у общих папок)."""
     return list(client.listdir("disk:/", max_items=None, fields=_FOLDER_FIELDS, n_retries=LIST_N_RETRIES))
-
-
-def _share_flags(entry) -> tuple[bool, bool | None]:
-    """(общая ли папка, своя ли она). У чужой общей папки is_owned == False."""
-    share = getattr(entry, "share", None)
-    if share is None:
-        return False, None
-    return True, getattr(share, "is_owned", None)
 
 
 def shared_with_me_dirs(client: yadisk.Client) -> list:
@@ -507,12 +363,27 @@ def _scan_shared_folders(
     список. Если попадают — их верхняя папка уже в seen_top и лишнего обхода нет.
     """
     try:
-        shared = shared_with_me_dirs(client)
+        root_entries = _list_root_with_share(client)
     except yadisk.exceptions.UnauthorizedError:
         raise
     except Exception as e:  # noqa: BLE001 — список уже собран, это только дополнение
         log.warning("Не смог проверить общие папки в корне Диска: %s", e)
         return 0, 0
+    # Попутно сохраняем даты всех корневых папок Диска — без единого лишнего запроса
+    if hasattr(state, "save_folders_batch"):
+        top_folders = [
+            (to_disk_path(e.path).rstrip("/"), _created_ts(e), _modified_ts(e))
+            for e in root_entries
+            if getattr(e, "type", None) == "dir" and not _is_skipped(e.path)
+            and (_created_ts(e) is not None or _modified_ts(e) is not None)
+        ]
+        if top_folders:
+            state.save_folders_batch(top_folders)
+    shared = []
+    for entry in root_entries:
+        is_shared, owned = _share_flags(entry)
+        if entry.type == "dir" and is_shared and owned is False:
+            shared.append(entry)
     # Папка лежит в корне Диска, поэтому её имя и есть верхняя папка её файлов
     missing = [d for d in shared if d.name not in seen_top]
     if not missing:
@@ -528,30 +399,6 @@ def _scan_shared_folders(
         files_count += n
         bytes_total += b
     return files_count, bytes_total
-
-
-def list_disk_folders(
-    client: yadisk.Client, path: str = "disk:/", cap: int = BROWSE_CAP,
-) -> tuple[list[dict], bool]:
-    """Подпапки path для дерева в Настройках и признак «показаны не все».
-
-    Элементы: {name, path, shared, owned}. Порядок «сначала папки» API не обещает,
-    поэтому читаем до cap элементов папки. Корзину не показываем.
-    """
-    folders: list[dict] = []
-    seen = 0
-    for entry in client.listdir(to_disk_path(path), limit=1000, max_items=cap + 1,
-                                fields=_FOLDER_FIELDS):
-        seen += 1
-        if seen > cap:
-            break
-        if entry.type != "dir" or _is_skipped(entry.path):
-            continue
-        shared, owned = _share_flags(entry)
-        folders.append({"name": entry.name, "path": entry.path,
-                        "shared": shared, "owned": bool(owned)})
-    folders.sort(key=lambda f: (f["name"].casefold(), f["name"]))
-    return folders, seen > cap
 
 
 # ── плоский обход через get_files ───────────────────────────────────────────
@@ -632,6 +479,7 @@ def _scan_flat(
     bytes_total = 0
     batch: list = []
 
+    db_failed = False
     try:
         for entry in _iter_files(client, media_type=media_type, known=known):
             if entry.type != "file" or _is_skipped(entry.path):
@@ -641,11 +489,15 @@ def _scan_flat(
             files_count += 1
             bytes_total += _register_file(entry, batch, on_file)
             if len(batch) >= SCAN_PAGE_SIZE:
-                state.mark_pending_batch(batch)
+                try:
+                    state.mark_pending_batch(batch)
+                except sqlite3.Error:
+                    db_failed = True
+                    raise
                 batch.clear()
     finally:
         # Оборвался список — уже присланное всё равно в базу: эти файлы скачаются
-        if batch:
+        if batch and not db_failed:
             state.mark_pending_batch(batch)
 
     return files_count, bytes_total
@@ -698,6 +550,7 @@ class DownloadJob:
     storage_host: str | None = None   # сервер хранения, на котором файл был отложен
     preview_path: str | None = None   # уже сохранённое страховочное превью
     modified: float | None = None     # когда файл менялся на Диске — это время получит копия
+    created: float | None = None      # когда файл создан на Диске — CreationTime / birthtime
     downloaded_at: str | None = None  # когда файл скачивали раньше: значит, на его месте — наша копия
     legacy_part: str | None = None    # «<файл>.part» версий до 2.8: путь не занят файлом Диска, можно убрать
 
@@ -712,22 +565,7 @@ class DownloadResult:
     duration_ms: int
     storage_host: str = ""
     preview_path: str = ""  # превью, сохранённое для отложенного фото
-
-
-class StorageUnavailable(Exception):
-    """Сервер хранения файла молчит — файл откладывается, а не считается ошибкой."""
-
-    def __init__(self, failure: FetchFailure):
-        super().__init__(str(failure))
-        self.failure = failure
-
-
-class FetchError(Exception):
-    """Файл не скачался после повторов; failure.kind — категория для текста ошибки."""
-
-    def __init__(self, failure: FetchFailure):
-        super().__init__(failure.text)
-        self.failure = failure
+    dated: bool = False     # дата файла уже выставлена сразу после скачивания
 
 
 def _ensure_local_dirs(local_path: str) -> None:
@@ -775,7 +613,7 @@ def _save_preview(client: yadisk.Client, job: DownloadJob, local_path: str, down
         failure = fetch_preview(_thread_http(), url, to_long_path(dst),
                                 headers={"Authorization": f"OAuth {token}"} if token else None)
     except Exception as e:  # noqa: BLE001 — превью — бонус, скачивание не должно падать из-за него
-        log.warning("превью %s: %s", job.remote_path, e)
+        log.warning("превью %s: %s", job.remote_path, scrub_urls(e))
         return ""
     if failure is not None:
         missing, text = preview_failure_text(failure)
@@ -933,6 +771,48 @@ def restore_dates(state: State, download_dir: str, say: Callable[[str], None] | 
         return 0
 
 
+def restore_folder_dates(state: State, download_dir: str) -> int:
+    """Синхронизирует даты создания и изменения локальных папок Диска снизу вверх.
+
+    Использует точные даты папок из таблицы folders, а для отсутствующих — запасной расчёт
+    по датам файлов внутри папки. Пустые папки не создаются; ошибки не прерывают скачивание.
+    """
+    if not os.path.isdir(to_long_path(download_dir)):
+        return 0
+    try:
+        exact = state.get_folder_dates()
+        fallback = state.derive_folder_dates_from_files()
+        merged: list[tuple[str, float | None, float | None]] = []
+        for remote_dir in set(exact) | set(fallback):
+            ec, em = exact.get(remote_dir, (None, None))
+            fc, fm = fallback.get(remote_dir, (None, None))
+            created = ec if ec is not None else fc
+            modified = em if em is not None else fm
+            if created is None and modified is None:
+                continue
+            local_dir = resolve_local_path(download_dir, remote_dir)
+            merged.append((local_dir, created, modified))
+        updated = apply_folder_dates(merged)
+        if updated:
+            log.info("даты папок Диска синхронизированы: %d", updated)
+        return updated
+    except Exception as e:  # noqa: BLE001 — даты папок не должны ломать скачивание
+        log.warning("даты папок: %s", e)
+        return 0
+
+
+def _free_beside(local_path: str, remote_path: str) -> str:
+    """Свободный путь рядом, не затирающий уже существующие посторонние файлы или папки."""
+    folder, name = os.path.split(local_path)
+    h = short_hash(remote_path)
+    cand = avoid_case_collision(os.path.join(folder, name_with_tag(name, f"_{h}")))
+    n = 1
+    while os.path.lexists(to_long_path(cand)):
+        n += 1
+        cand = avoid_case_collision(os.path.join(folder, name_with_tag(name, f"_{h}_{n}")))
+    return cand
+
+
 def _beside(local_path: str, remote_path: str) -> str:
     """Свободное имя рядом: «Договор.pdf» → «Договор_a1b2c3.pdf» (хеш пути на Диске)."""
     folder, name = os.path.split(local_path)
@@ -1027,9 +907,9 @@ def _download_one(
     start = time.monotonic()
 
     def finish(status: str, local: str | None = None, bytes_written: int = 0,
-               error: str | None = None, storage_host: str = "") -> DownloadResult:
+               error: str | None = None, storage_host: str = "", dated: bool = False) -> DownloadResult:
         return DownloadResult(job, status, local, bytes_written, error,
-                              int((time.monotonic() - start) * 1000), storage_host)
+                              int((time.monotonic() - start) * 1000), storage_host, dated=dated)
 
     part_path: str | None = None
     try:
@@ -1058,11 +938,11 @@ def _download_one(
         remove_quiet(part_path)
         _download_with_retry(client, job.remote_path, part_path, job)
         if beside and not _is_leftover(local_path, part_path):
-            local_path = beside
+            local_path = _free_beside(local_path, job.remote_path)
         os.replace(part_path, to_long_path(local_path))
-        # Копии — дата изменения файла на Диске, а не время скачивания: так его видят
+        # Копии — дата изменения (и создания) файла на Диске, а не время скачивания: так его видят
         # проводник, Finder и сортировка по датам. Не получилось — не беда, файл на месте
-        set_file_time(local_path, job.modified)
+        dated = set_file_time(local_path, job.modified, created=job.created)
     except StorageUnavailable as e:
         if part_path:
             remove_quiet(part_path)
@@ -1081,13 +961,13 @@ def _download_one(
             remove_quiet(part_path)
         return finish("failed", error=_describe_download_error(e))
 
-    return finish("downloaded", local_path, file_size_safe(local_path) or 0)
+    return finish("downloaded", local_path, file_size_safe(local_path) or 0, dated=dated)
 
 
 # Каждому потоку — свой клиент. Шарить yadisk.Client между потоками небезопасно.
 _thread_local = threading.local()
 # Реестр всех созданных клиентов — чтобы закрыть сокеты после остановки пула
-_all_clients: list[yadisk.Client] = []
+_all_clients: list = []
 _all_clients_lock = threading.Lock()
 
 
@@ -1108,6 +988,8 @@ def _close_all_clients() -> None:
     with _all_clients_lock:
         clients = list(_all_clients)
         _all_clients.clear()
+    _thread_local.client = None
+    _thread_local.http = None
     for cli in clients:
         try:
             cli.close()
@@ -1145,6 +1027,7 @@ def _jobs_from_state(state: State) -> Iterator[DownloadJob]:
             storage_host=row["storage_host"] if "storage_host" in keys else None,
             preview_path=row["preview_path"] if "preview_path" in keys else None,
             modified=row["modified"] if "modified" in keys else None,
+            created=row["created"] if "created" in keys else None,
             downloaded_at=row["downloaded_at"] if "downloaded_at" in keys else None,
             legacy_part=_legacy_part(row["remote_path"], local_path, taken),
         )
@@ -1168,6 +1051,7 @@ def download_all(
     download_dir: str,
     workers: int = 4,
     jobs: Iterable[DownloadJob] | None = None,
+    counters: dict[str, int] | None = None,
 ) -> dict[str, int]:
     """Скачивает pending файлы из state в пул потоков с ограниченной очередью в памяти.
 
@@ -1190,7 +1074,11 @@ def download_all(
     state.assign_local_paths(download_dir)
     _sweep_previews(state, download_dir)
 
-    counters = {"downloaded": 0, "skipped": 0, "failed": 0, "deferred": 0, "bytes": 0}
+    if counters is None:
+        counters = {"downloaded": 0, "skipped": 0, "failed": 0, "deferred": 0, "bytes": 0}
+    else:
+        for k in ("downloaded", "skipped", "failed", "deferred", "bytes"):
+            counters.setdefault(k, 0)
     jobs_iter, total_files, total_bytes = _job_source(state, jobs)
     if total_files == 0:
         log.info("Нет файлов для скачивания.")
@@ -1256,6 +1144,7 @@ def download_all(
                     f"{DEFERRED_MARKER}сервер хранения {job.storage_host} недавно не отвечал",
                     0, job.storage_host,
                 ), counters, file_bar, byte_bar, download_dir)
+                plain_report()
                 continue
             futures[pool.submit(worker, job)] = job
             return True
@@ -1284,6 +1173,7 @@ def download_all(
                 return "auth"
         return None
 
+    pool_joined = True
     try:
         while len(futures) < max_in_flight and submit_next():
             pass
@@ -1330,15 +1220,18 @@ def download_all(
         except KeyboardInterrupt:
             print("\nCtrl+C — отменяю очередь, дожидаюсь только текущих файлов...", file=sys.stderr)
             log.warning("Ctrl+C — отменяю оставшиеся задачи и закрываю пул...")
+            pool_joined = False
             pool.shutdown(wait=False, cancel_futures=True)
             raise
         except BaseException:
+            pool_joined = False
             pool.shutdown(wait=False, cancel_futures=True)
             raise
         else:
             pool.shutdown(wait=True)
     finally:
-        _close_all_clients()
+        if pool_joined:
+            _close_all_clients()
         file_bar.close()
         byte_bar.close()
         elapsed = max(0.001, time.monotonic() - started)
@@ -1367,7 +1260,14 @@ def _apply_result(
     """
     preview = None
     if res.status == "downloaded":
-        preview = state.mark_downloaded(res.job.remote_path, res.local_path or "")
+        dated_val = res.job.modified if res.dated and res.job.modified is not None else None
+        if dated_val is not None:
+            try:
+                preview = state.mark_downloaded(res.job.remote_path, res.local_path or "", dated=dated_val)
+            except TypeError:
+                preview = state.mark_downloaded(res.job.remote_path, res.local_path or "")
+        else:
+            preview = state.mark_downloaded(res.job.remote_path, res.local_path or "")
         counters["downloaded"] += 1
         counters["bytes"] += res.bytes_written
         byte_bar.update(res.bytes_written)

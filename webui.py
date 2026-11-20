@@ -126,6 +126,26 @@ def main():
         server.run(sockets=[sock])
     except KeyboardInterrupt:
         pass
+    finally:
+        from webapp.rescue import rescue
+        from webapp.tasks import (
+            SLOT_DISK,
+            SLOT_LINKS,
+            SLOT_ORGANIZE,
+            UNLIM_SLOT_PREFIX,
+            stop_and_wait,
+            tm,
+        )
+        if diagnostics.health_monitor is not None:
+            diagnostics.health_monitor.stop()
+        if rescue.is_running():
+            rescue.stop()
+        stop_and_wait(
+            tm.stop_matching(SLOT_DISK)
+            + tm.stop_matching(UNLIM_SLOT_PREFIX)
+            + tm.stop_matching(SLOT_LINKS)
+            + tm.stop_matching(SLOT_ORGANIZE)
+        )
 
 
 if __name__ == "__main__":

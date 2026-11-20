@@ -51,7 +51,7 @@
     downloaded: ['ok', 'скачан'], queued: ['', 'в очереди'], deferred: ['wait', 'ждёт Яндекса'],
     failed: ['err', 'не скачался'], limited: ['wait', 'лимит Яндекса'],
   };
-  const lf = { linkId: null, linkName: '', status: 'not_downloaded', q: '', page: 1, limit: 100, data: null, seq: 0 };
+  const lf = { linkId: null, linkName: '', status: 'not_downloaded', q: '', page: 1, limit: 100, data: null, at: 0, seq: 0 };
   let lfTimer = null;
 
   function lfParams(extra = {}) {
@@ -74,12 +74,14 @@
 
   async function loadLinkFiles() {
     if (!lf.linkId) return;
+    lf.at = Date.now();
     const seq = ++lf.seq;
     syncLfExport();
     const res = await App.api.get(`/api/links/files?${lfParams()}`);
     if (seq !== lf.seq) return;
     const data = res.ok && res.data ? res.data : null;
     const error = data ? data.error : res.error || 'Не получилось загрузить список';
+    if (!error && data && data.page) lf.page = data.page;
     lf.data = error ? { error, items: [], counts: {}, total: 0, page: 1, pages: 1 } : data;
     paintLinkFiles();
   }
@@ -113,13 +115,28 @@
       App.html(pager, '');
       return;
     }
+    const fmtWhen = (ts) => {
+      if (!ts) return '';
+      try {
+        return new Date(ts * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+      } catch (e) { return fmt.hhmm(ts); }
+    };
     const rows = items.map((x) => {
       const [cls, label] = FILE_BADGE[x.state] || ['', x.state_label || x.state];
+      const detail = x.state === 'downloaded'
+        ? (x.downloaded_at ? fmtWhen(x.downloaded_at) : 'уже в папке')
+        : (x.reason || (x.state === 'queued' ? 'ждёт своей очереди' : ''));
       const dirLine = x.dir && x.dir !== '/' ? `<div class="file-path">${esc(x.dir)}</div>` : '';
-      return `<tr><td class="name">${esc(x.name)}${dirLine}</td><td>${x.size ? fmt.bytes(x.size) : '—'}</td>` +
-        `<td><span class="badge ${cls}">${esc(label)}</span></td><td class="small muted">${esc(x.reason || '')}</td></tr>`;
+      return `<tr><td class="name">${esc(x.name)}${x.preview ? ' <span class="badge">есть превью</span>' : ''}${dirLine}</td><td>${x.size ? fmt.bytes(x.size) : '—'}</td>` +
+        `<td><span class="badge ${cls}">${esc(label)}</span></td><td class="small muted">${esc(detail)}</td></tr>`;
     }).join('');
+    const prevScroll = body.querySelector ? body.querySelector('.scroll') : null;
+    const savedScrollTop = prevScroll ? prevScroll.scrollTop : 0;
     App.html(body, `<div class="scroll"><table class="list"><thead><tr><th>Файл</th><th>Размер</th><th>Состояние</th><th>Подробности</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+    if (savedScrollTop) {
+      const nextScroll = body.querySelector ? body.querySelector('.scroll') : null;
+      if (nextScroll) nextScroll.scrollTop = savedScrollTop;
+    }
     const total = d.total || 0;
     const from = (d.page - 1) * d.limit + 1;
     const to = Math.min(total, from + items.length - 1);
@@ -253,7 +270,20 @@
           <h3>${esc(L.problem.text)}</h3><p>Освободите место или выберите другую папку — скачивание продолжится с того же места.</p>
           <div class="row actions"><button class="primary" data-action="links-resume">${icon('play')}Попробовать снова</button>
           <button data-action="go-access" data-field="folder">${icon('folder')}Выбрать другую папку</button></div></div></div>` : '');
-      paintList(L.items || []);
+      const items = L.items || [];
+      paintList(items);
+      if (lf.linkId) {
+        if (!items.some((it) => Number(it.id) === Number(lf.linkId))) {
+          clearTimeout(lfTimer);
+          lfTimer = null;
+          lf.linkId = null;
+          lf.data = null;
+          ++lf.seq;
+          paintLinkFiles();
+        } else if (Date.now() - lf.at > 30000) {
+          loadLinkFiles();
+        }
+      }
       App.text(byId('links-folder'), L.folder || '');
       byId('links-copy').dataset.path = L.folder || '';
     },
@@ -291,12 +321,15 @@
   });
 
   App.action('links-remove', async (btn) => {
+    const id = Number(btn.dataset.id);
     const yes = await App.confirm({ title: `Убрать «${btn.dataset.name || 'ссылку'}» из списка?`, ok: 'Убрать из списка',
       text: 'Файлы, которые уже скачались, останутся в папке. Программа просто перестанет качать эту ссылку.' });
-    if (yes) App.run(btn, () => App.api.post('/api/links/remove', { id: Number(btn.dataset.id) }));
+    if (yes) App.run(btn, () => App.api.post('/api/links/remove', { id }));
   });
 
   App.action('links-files', (btn) => {
+    clearTimeout(lfTimer);
+    lfTimer = null;
     lf.linkId = Number(btn.dataset.id) || null;
     lf.linkName = btn.dataset.name || '';
     lf.status = 'not_downloaded';
@@ -311,6 +344,9 @@
     if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
   App.action('links-files-close', () => {
+    clearTimeout(lfTimer);
+    lfTimer = null;
+    ++lf.seq;
     lf.linkId = null;
     lf.data = null;
     paintLinkFiles();

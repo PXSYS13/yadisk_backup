@@ -99,7 +99,13 @@ def run_probe(probe: Probe, token: str | None = None, session: requests.Session 
         r = s.get(probe.url, headers=headers, timeout=REQUEST_TIMEOUT, allow_redirects=False)
         latency = int((time.monotonic() - t0) * 1000)
         ok = r.status_code in probe.ok_statuses
-        return Sample(time.time(), ok, r.status_code, latency, None if ok else f"HTTP {r.status_code}")
+        err: str | None = None if ok else f"HTTP {r.status_code}"
+        if ok and r.status_code in (301, 302, 303, 307, 308):
+            loc = str((getattr(r, "headers", None) or {}).get("Location") or "").lower()
+            if "showcaptcha" in loc:
+                ok = False
+                err = "капча (SmartCaptcha)"
+        return Sample(time.time(), ok, r.status_code, latency, err)
     except requests.exceptions.Timeout:
         return Sample(time.time(), False, None, int((time.monotonic() - t0) * 1000), "таймаут")
     except requests.exceptions.ConnectionError as e:
@@ -137,11 +143,11 @@ def summarize(probe: Probe, samples: list[Sample], now: float) -> dict:
     last = samples[-1] if samples else None
     recent = [s for s in samples if now - s.ts <= 600]
     lat = [s.latency_ms for s in recent if s.ok] or [s.latency_ms for s in samples[-10:] if s.ok]
-    if last is None:
+    if last is None or (now - last.ts > 600):
         state = STATE_UNKNOWN
     else:
-        # Состояние — по последним 3 пробам, чтобы одиночный глюк сети не красил всё в красный
-        tail = samples[-3:]
+        # Состояние — по последним 3 свежим пробам, чтобы одиночный глюк сети не красил всё в красный
+        tail = (recent or samples)[-3:]
         states = [s.state for s in tail]
         if all(st == STATE_DOWN for st in states):
             state = STATE_DOWN
@@ -295,6 +301,10 @@ class HealthMonitor:
 
     def stop(self) -> None:
         self._stop.set()
+        try:
+            self._session.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── отчёт ──
 

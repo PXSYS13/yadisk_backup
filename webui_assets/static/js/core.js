@@ -226,7 +226,7 @@
       const detail = data && (data.detail || data.msg);
       return { ok: false, data, error: typeof detail === 'string' ? detail : `Ошибка ${resp.status}` };
     }
-    if (data && data.ok === false) return { ok: false, data, error: data.msg || 'Не получилось' };
+    if (data && data.ok === false) return { ok: false, data, error: data.msg || data.error || 'Не получилось' };
     return { ok: true, data };
   }
   App.api = {
@@ -259,7 +259,10 @@
     toastTimer = setTimeout(() => el.classList.add('hidden'), ms);
   };
 
+  let activeConfirmClose = null;
   App.confirm = ({ title, text, ok = 'Да', cancel = 'Отмена', danger = false }) => new Promise((resolve) => {
+    if (activeConfirmClose) activeConfirmClose(false);
+    const prevFocus = document.activeElement;
     const root = App.byId('dialog-root');
     root.innerHTML = `<div class="dialog-backdrop" data-dialog-close="1">
       <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
@@ -270,20 +273,37 @@
           <button type="button" class="${danger ? 'danger' : 'primary'}" data-dialog-answer="1">${App.esc(ok)}</button>
         </div>
       </div></div>`;
+    let closed = false;
     const close = (answer) => {
+      if (closed) return;
+      closed = true;
+      if (activeConfirmClose === close) activeConfirmClose = null;
       document.removeEventListener('keydown', onKey);
       root.innerHTML = '';
+      if (prevFocus && typeof prevFocus.focus === 'function') prevFocus.focus();
       resolve(answer);
     };
-    const onKey = (e) => { if (e.key === 'Escape') close(false); };
+    activeConfirmClose = close;
+    const onKey = (e) => {
+      if (e.key === 'Escape') { close(false); return; }
+      if (e.key === 'Tab') {
+        const focusables = [...root.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+          .filter((el) => !el.disabled);
+        if (!focusables.length) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    };
     document.addEventListener('keydown', onKey);
     root.querySelector('.dialog-backdrop').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-dialog-answer]');
       if (btn) close(btn.dataset.dialogAnswer === '1');
       else if (e.target.dataset.dialogClose) close(false);
     });
-    const okBtn = root.querySelector('[data-dialog-answer="1"]');
-    if (okBtn) okBtn.focus();
+    const focusBtn = root.querySelector(danger ? '[data-dialog-answer="0"]' : '[data-dialog-answer="1"]');
+    if (focusBtn) focusBtn.focus();
   });
 
   // ── Действия: <button data-action="имя"> → App.actions.имя(кнопка, событие) ──
@@ -322,7 +342,10 @@
     for (const a of document.querySelectorAll('#tabs a')) {
       const tabRoute = a.dataset.route;
       const owner = route === 'details' || route === 'setup' ? 'home' : route;
-      a.classList.toggle('active', tabRoute === owner);
+      const on = tabRoute === owner;
+      a.classList.toggle('active', on);
+      if (on) a.setAttribute('aria-current', 'page');
+      else a.removeAttribute('aria-current');
     }
     window.scrollTo({ top: 0 });
   };
@@ -368,12 +391,16 @@
   };
   // ── «Нас поддерживают»: список ведёт автор на GitHub, программа держит его час ──
   App.supporters = null;
+  App.supportersError = null;
   App.loadSupporters = async () => {
+    App.supportersError = null;
     const res = await App.api.get('/api/supporters' + (App.demo ? '?demo=1' : ''));
     if (res.ok) {
       App.supporters = res.data;
-      App.render();
+    } else {
+      App.supportersError = res.error || 'Не получилось загрузить список';
     }
+    App.render();
   };
 
   App.startPolling = () => {

@@ -36,6 +36,7 @@ TODO*
 support-info.json
 yadisk-logs-*.zip
 /debug_*.py
+/diag_*.py
 /scratch*
 
 # Python кеш

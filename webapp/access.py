@@ -38,9 +38,25 @@ router = APIRouter()
 
 # Кэш для check_token: хранит только ОДИН токен (последний проверенный).
 # Так не накапливаются старые токены в памяти.
-_token_check_cache: dict = {"token": None, "at": 0, "data": None}
+_token_cache_lock = threading.Lock()
+_token_check_cache: dict = {"token": None, "at": 0.0, "data": None}
 _TOKEN_TTL = 30  # секунд
 _token_refreshing = threading.Event()
+_cookies_cache_lock = threading.Lock()
+_cookies_cache: dict = {"key": None, "at": 0.0, "data": None}
+_COOKIES_TTL = 5.0
+
+
+def invalidate_token_cache() -> None:
+    """Сбрасывает кэш проверки ключа — например, после удаления ключа или продления подписки."""
+    with _token_cache_lock:
+        _token_check_cache.update({"token": None, "at": 0.0, "data": None})
+
+
+def invalidate_cookies_cache() -> None:
+    """Сбрасывает кэш разбора cookies.json."""
+    with _cookies_cache_lock:
+        _cookies_cache.update({"key": None, "at": 0.0, "data": None})
 
 
 def normalize_token(raw: str) -> str:
@@ -92,9 +108,11 @@ def check_token(token: str) -> dict:
         return {"ok": False, "msg": "Токен не задан"}
     # Кэш — не дёргать Яндекс каждые 1.5 сек!
     now = time.time()
-    if (_token_check_cache["token"] == token
-            and now - _token_check_cache["at"] < _TOKEN_TTL):
-        return _token_check_cache["data"]
+    with _token_cache_lock:
+        if (_token_check_cache["token"] == token
+                and now - _token_check_cache["at"] < _TOKEN_TTL
+                and _token_check_cache["data"] is not None):
+            return _token_check_cache["data"]
     try:
         # Человек ждёт ответа (первый экран, «Сохранить мои файлы», отчёт): короткие таймауты.
         # С таймаутами скачивания проверка во время сбоя Яндекса висела бы до получаса
@@ -111,7 +129,8 @@ def check_token(token: str) -> dict:
         data = {"ok": False, "unreachable": True,
                 "msg": f"Яндекс не ответил на проверку токена ({type(e).__name__}). Повторю позже."}
         log.warning("проверка токена не удалась: %s: %s%s", type(e).__name__, e, api_error_details(e))
-    _token_check_cache.update({"token": token, "at": now, "data": data})
+    with _token_cache_lock:
+        _token_check_cache.update({"token": token, "at": time.time(), "data": data})
     return data
 
 
@@ -121,19 +140,29 @@ def token_snapshot(token: str) -> dict:
     /api/status опрашивается раз в 1,5 с: ждать ответа Яндекса там нельзя — во время
     сбоев проверка висит минутами, и весь интерфейс замирает.
     """
-    cached = _token_check_cache
-    if cached["token"] == token and cached["data"] is not None:
-        if time.time() - cached["at"] >= _TOKEN_TTL and not _token_refreshing.is_set():
+    with _token_cache_lock:
+        hit = _token_check_cache["token"] == token and _token_check_cache["data"] is not None
+        cached_at = _token_check_cache["at"]
+        cached_data = _token_check_cache["data"]
+    if hit:
+        if time.time() - cached_at >= _TOKEN_TTL and not _token_refreshing.is_set():
             _token_refreshing.set()
 
             def refresh():
                 try:
-                    check_token(token)
+                    # Если пока шёл сетевой запрос, человек сохранил другой токен — старый кэш не возвращаем
+                    with _token_cache_lock:
+                        if _token_check_cache["token"] not in (None, token):
+                            return
+                    fresh = check_token(token)
+                    with _token_cache_lock:
+                        if _token_check_cache["token"] == token:
+                            _token_check_cache["data"] = fresh
                 finally:
                     _token_refreshing.clear()
 
             threading.Thread(target=refresh, daemon=True).start()
-        return cached["data"]
+        return cached_data
     return check_token(token)  # первый раз — синхронно
 
 
@@ -216,21 +245,30 @@ def verify_cookies(arr: list) -> dict:
 
 
 def check_cookies() -> dict:
-    if not paths.COOKIES_FILE.exists():
+    try:
+        st = paths.COOKIES_FILE.stat()
+    except FileNotFoundError:
         return {"ok": False, "msg": "cookies.json не загружен", "count": 0}
+    except OSError as e:
+        return {"ok": False, "msg": f"Ошибка: {e}", "count": 0}
+    cache_key = (str(paths.COOKIES_FILE), st.st_mtime_ns, st.st_size)
+    now = time.monotonic()
+    with _cookies_cache_lock:
+        if _cookies_cache["key"] == cache_key and now - _cookies_cache["at"] < _COOKIES_TTL and _cookies_cache["data"]:
+            return dict(_cookies_cache["data"])
     try:
         text = paths.COOKIES_FILE.read_text(encoding="utf-8-sig")
     except Exception as e:
         return {"ok": False, "msg": f"Ошибка: {e}", "count": 0}
     raw = parse_cookies_text(text)
     if not isinstance(raw, list):
-        return {"ok": False, "msg": "Формат не Cookie-Editor", "count": 0}
-    rep = cookies_report(raw)
-    try:
+        rep = {"ok": False, "msg": "Формат не Cookie-Editor", "count": 0}
+    else:
+        rep = cookies_report(raw)
         # Когда сохранены: доступ, который запуск отверг, снова годен, только если файл новее отказа
-        rep["saved_at"] = paths.COOKIES_FILE.stat().st_mtime
-    except OSError:
-        pass
+        rep["saved_at"] = st.st_mtime
+    with _cookies_cache_lock:
+        _cookies_cache.update({"key": cache_key, "at": now, "data": dict(rep)})
     return rep
 
 
@@ -322,8 +360,16 @@ class CookiesPayload(BaseModel):
 
 @router.post("/api/config/token/check")
 def api_check_token(payload: TokenPayload):
-    """Проверка без сохранения."""
-    return check_token(normalize_token(payload.token))
+    """Проверка без сохранения (не перезаписывает кэш сохранённого ключа)."""
+    tok = normalize_token(payload.token)
+    with _token_cache_lock:
+        prev = dict(_token_check_cache)
+    res = check_token(tok)
+    if prev["token"] and prev["token"] != tok:
+        with _token_cache_lock:
+            if _token_check_cache["token"] == tok:
+                _token_check_cache.update(prev)
+    return res
 
 
 @router.post("/api/config/token")
@@ -351,6 +397,7 @@ def _resume_branch(source: str) -> None:
 def api_clear_token():
     if paths.ENV_FILE.exists():
         config.env_set("YA_DISK_TOKEN", "", quote_mode="never")
+    invalidate_token_cache()
     log.info("токен удалён пользователем")
     return {"ok": True}
 
@@ -401,7 +448,8 @@ def api_set_cookies(payload: CookiesPayload):
     try:
         _atomic_write_cookies(arr)
     except Exception as e:
-        raise HTTPException(500, f"Не удалось сохранить cookies.json: {e}")
+        raise HTTPException(500, f"Не удалось сохранить cookies.json: {e}") from e
+    invalidate_cookies_cache()
     log.info("cookies сохранены: %d шт (%s)", len(arr), val.get("base", "yandex.ru"))
     _resume_branch("unlim")
     return {"ok": True, "check": check_cookies(), "saved_count": len(arr), "live": live}
@@ -410,9 +458,23 @@ def api_set_cookies(payload: CookiesPayload):
 @router.post("/api/cookies/clear")
 def api_clear_cookies():
     if paths.COOKIES_FILE.exists():
-        try:
-            paths.COOKIES_FILE.unlink()
-        except OSError as e:
-            return {"ok": False, "msg": str(e)}
+        last_err: OSError | None = None
+        for attempt in range(5):
+            try:
+                paths.COOKIES_FILE.unlink()
+                last_err = None
+                break
+            except FileNotFoundError:
+                last_err = None
+                break
+            except PermissionError as e:
+                last_err = e
+                if attempt < 4:
+                    time.sleep(0.15)
+            except OSError as e:
+                return {"ok": False, "msg": str(e)}
+        if last_err is not None:
+            return {"ok": False, "msg": str(last_err)}
+    invalidate_cookies_cache()
     log.info("cookies удалены пользователем")
     return {"ok": True}

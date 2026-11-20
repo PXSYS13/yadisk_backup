@@ -36,6 +36,26 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 import requests
 from dotenv import load_dotenv
 
+from file_dates import set_file_time
+from public_db import (  # noqa: F401 — реэкспорт для обратной совместимости
+    SCHEMA,
+    _apply_link_folder_dates,
+    _fallback_name,
+    _parse_ts,
+    _upsert_files,
+    _upsert_folders,
+    add_link,
+    drop_previews,
+    ensure_schema,
+    link_folder_name,
+    link_key,
+    meta_get,
+    meta_set,
+    poke,
+    purge_removed,
+    remove_link,
+    sweep_previews,
+)
 from state import DEFERRED_MARKER
 from storage_fetch import DeadHosts, FetchFailure, fetch_preview, fetch_to_file
 from utils import (
@@ -65,7 +85,6 @@ from utils import (
     path_key,
     preview_path_for,
     previews_enabled,
-    remove_preview,
     remove_quiet,
     resolve_local_path,
     retry_every_sec,
@@ -98,7 +117,7 @@ RELIST_SEC = 24 * 3600
 WAKE_POLL_SEC = 2.0
 PROGRESS_EVERY_SEC = 2.0
 # Хост ссылки на файл: только серверы Яндекса
-_HREF_HOSTS = (".yandex.net", ".yandex.ru")
+_HREF_HOSTS = (".yandex.net", ".yandex.ru", ".yandex.com", ".yandex.kz", ".yandex.by", ".yandex.uz", ".yandex.com.tr")
 # Лимит скачиваний по публичной ссылке Яндекс снимает в полночь по Москве
 MSK = timezone(timedelta(hours=3))
 
@@ -113,42 +132,6 @@ _ALBUM_ITEM_ID = re.compile(r"[a-f\d]{24}", re.I)
 _CAPTCHA_TEXT = "Яндекс попросил проверку на робота — программа попробует снова позже"
 
 log = logging.getLogger("public_download")
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS links (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    url TEXT NOT NULL UNIQUE,
-    public_url TEXT NOT NULL,
-    root_path TEXT NOT NULL DEFAULT '/',
-    name TEXT,
-    kind TEXT,
-    local_dir TEXT,
-    added_at REAL,
-    listed_at REAL,
-    gen INTEGER NOT NULL DEFAULT 0,
-    state TEXT NOT NULL DEFAULT 'active',
-    error_kind TEXT,
-    error TEXT,
-    limit_until REAL
-);
-CREATE TABLE IF NOT EXISTS link_files (
-    link_id INTEGER NOT NULL,
-    path TEXT NOT NULL,
-    size INTEGER,
-    md5 TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    local_path TEXT,
-    error TEXT,
-    storage_host TEXT,
-    preview_path TEXT,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    gen INTEGER NOT NULL DEFAULT 0,
-    downloaded_at TEXT,
-    PRIMARY KEY (link_id, path)
-);
-CREATE INDEX IF NOT EXISTS idx_link_files_status ON link_files(link_id, status);
-CREATE TABLE IF NOT EXISTS links_meta (key TEXT PRIMARY KEY, value TEXT);
-"""
 
 
 # ── Ссылка из письма или мессенджера ────────────────────────────────────────
@@ -192,11 +175,6 @@ def normalize_public_url(text: str) -> tuple[str, str]:
     public_url = f"https://{host}/{kind}/{parts[1]}"
     sub = "/" + "/".join(parts[2:]) if kind == "d" and len(parts) > 2 else "/"
     return public_url, sub
-
-
-def link_key(public_url: str, sub_path: str) -> str:
-    """Уникальный адрес ссылки в базе: публичная ссылка плюс подпапка."""
-    return public_url + (sub_path if sub_path not in ("", "/") else "")
 
 
 # ── Публичный API Яндекса ───────────────────────────────────────────────────
@@ -319,7 +297,27 @@ class PublicApi:
 
 # Ссылки на превью фото альбомов из их списка: (адрес альбома, ID фото) → ссылка. Список собирает
 # главный поток, а превью сохраняют потоки скачивания. Только в памяти: ссылки временные
+_MAX_ALBUM_PREVIEWS = 10_000
 _album_previews: dict[tuple[str, str], str] = {}
+_album_previews_lock = threading.Lock()
+
+
+def _album_preview_get(key: tuple[str, str]) -> str | None:
+    with _album_previews_lock:
+        return _album_previews.get(key)
+
+
+def _album_preview_set(key: tuple[str, str], url: str) -> None:
+    with _album_previews_lock:
+        if len(_album_previews) >= _MAX_ALBUM_PREVIEWS and key not in _album_previews:
+            # Ограничиваем память: старые подписанные ссылки всё равно протухают
+            _album_previews.pop(next(iter(_album_previews)))
+        _album_previews[key] = url
+
+
+def _album_preview_drop(key: tuple[str, str]) -> None:
+    with _album_previews_lock:
+        _album_previews.pop(key, None)
 
 
 @contextmanager
@@ -505,13 +503,15 @@ class PublicAlbumApi(PublicApi):
         stem, ext = os.path.splitext(name)
         preview = meta.get("xxxlPreview") or meta.get("defaultPreview")
         return {"type": "file", "id": item_id, "path": f"/{stem}__{item_id}{ext}", "size": size,
-                "md5": _album_md5(meta), "preview": preview if isinstance(preview, str) else None}
+                "md5": _album_md5(meta), "preview": preview if isinstance(preview, str) else None,
+                "modified": meta.get("etime") or meta.get("mtime"),
+                "created": meta.get("ctime") or meta.get("etime")}
 
     def _preview(self, public_url: str, path: str) -> dict:
         """Превью фото — из списка альбома. Нет его там — со страницы фото, но не больше
         ALBUM_PREVIEW_PAGES страниц на поток за раунд: ради превью сотни страниц не открываем."""
         item_id = self._item_id(path)
-        url = _album_previews.get((public_url, item_id))
+        url = _album_preview_get((public_url, item_id))
         if url or self._preview_pages <= 0:
             return {"preview": url}
         self._preview_pages -= 1
@@ -554,7 +554,7 @@ class PublicAlbumApi(PublicApi):
             state["seen"].update(ids)
             for f in files:
                 if f["preview"]:
-                    _album_previews[(public_url, f["id"])] = f["preview"]
+                    _album_preview_set((public_url, f["id"]), f["preview"])
             if not completed:
                 last = items[-1]
                 cursor = last.get("albumItemId") if isinstance(last, dict) else None
@@ -577,6 +577,30 @@ class PublicAlbumApi(PublicApi):
 
 
 _thread_local = threading.local()
+_all_sessions: list = []
+_all_sessions_lock = threading.Lock()
+
+
+def _track_session(obj) -> None:
+    with _all_sessions_lock:
+        _all_sessions.append(obj)
+
+
+def _close_thread_sessions() -> None:
+    """Закрывает все сессии потоков после завершения ThreadPoolExecutor."""
+    with _all_sessions_lock:
+        items = list(_all_sessions)
+        _all_sessions.clear()
+    _thread_local.api = None
+    _thread_local.http = None
+    for obj in items:
+        try:
+            if hasattr(obj, "close"):
+                obj.close()
+            elif hasattr(obj, "session") and obj.session is not None:
+                obj.session.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _thread_api() -> PublicApi:
@@ -584,6 +608,7 @@ def _thread_api() -> PublicApi:
     api = getattr(_thread_local, "api", None)
     if api is None:
         api = _thread_local.api = PublicApi()
+        _track_session(api.session)
     return api
 
 
@@ -592,14 +617,11 @@ def _thread_http() -> requests.Session:
     http = getattr(_thread_local, "http", None)
     if http is None:
         http = _thread_local.http = _new_session()
+        _track_session(http)
     return http
 
 
-# ── База ссылок ─────────────────────────────────────────────────────────────
-
-
-def ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA)
+# ── База ссылок (схема и CRUD вынесены в public_db.py) ──────────────────────
 
 
 def connect_db(path: str | os.PathLike | None = None) -> sqlite3.Connection:
@@ -610,109 +632,12 @@ def connect_db(path: str | os.PathLike | None = None) -> sqlite3.Connection:
     return conn
 
 
-def meta_get(conn: sqlite3.Connection, key: str) -> str | None:
-    row = conn.execute("SELECT value FROM links_meta WHERE key=?", (key,)).fetchone()
-    return row[0] if row else None
-
-
-def meta_set(conn: sqlite3.Connection, key: str, value: str | None) -> None:
-    if value is None:
-        conn.execute("DELETE FROM links_meta WHERE key=?", (key,))
-    else:
-        conn.execute("INSERT INTO links_meta (key, value) VALUES (?, ?) "
-                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
-
-
-def poke(conn: sqlite3.Connection, wake: bool = False) -> None:
-    """Сообщить идущему скачиванию: список ссылок изменился (и, если wake, — не ждать раунда)."""
-    meta_set(conn, "changed", str(time.time()))
-    if wake:
-        meta_set(conn, "wake", str(time.time()))
-
-
-def link_folder_name(conn: sqlite3.Connection, name: str) -> str:
-    """Папка ссылки внутри папки скачивания: '_ссылки/<имя>', уникальная без учёта регистра."""
-    text = (name or "").strip()
-    base = (sanitize_component(text)[:80].rstrip(" .") if text else "") or "Ссылка"
-    taken = {r[0].casefold() for r in conn.execute("SELECT local_dir FROM links WHERE local_dir IS NOT NULL")}
-    candidate, n = base, 2
-    while f"{LINKS_DIRNAME}/{candidate}".casefold() in taken:
-        candidate = f"{base} ({n})"
-        n += 1
-    return f"{LINKS_DIRNAME}/{candidate}"
-
-
-def _fallback_name(public_url: str, sub_path: str) -> str:
-    tail = [p for p in sub_path.split("/") if p]
-    return tail[-1] if tail else public_url.rstrip("/").rsplit("/", 1)[-1]
-
-
-def add_link(conn: sqlite3.Connection, public_url: str, sub_path: str = "/",
-             meta: dict | None = None) -> tuple[int, bool]:
-    """Добавляет ссылку или возвращает убранную из списка. (id, появилась ли она в списке)."""
-    url = link_key(public_url, sub_path)
-    name = (meta or {}).get("name") or _fallback_name(public_url, sub_path)
-    kind = (meta or {}).get("type")
-    with sqlite_tx(conn):
-        row = conn.execute("SELECT id, state FROM links WHERE url=?", (url,)).fetchone()
-        if row:
-            if row["state"] != "removed":
-                return row["id"], False
-            conn.execute("UPDATE links SET state='active', error_kind=NULL, error=NULL, limit_until=NULL, "
-                         "listed_at=NULL WHERE id=?", (row["id"],))
-            return row["id"], True
-        cur = conn.execute(
-            "INSERT INTO links (url, public_url, root_path, name, kind, local_dir, added_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (url, public_url, sub_path or "/", name, kind, link_folder_name(conn, name), time.time()),
-        )
-    return int(cur.lastrowid), True
-
-
-def remove_link(conn: sqlite3.Connection, link_id: int, purge: bool) -> bool:
-    """Убирает ссылку из списка. Файлы на диске остаются. purge — сразу забыть её файлы."""
-    with sqlite_tx(conn):
-        n = conn.execute("UPDATE links SET state='removed' WHERE id=? AND state<>'removed'", (link_id,)).rowcount
-        if purge:
-            conn.execute("DELETE FROM link_files WHERE link_id=?", (link_id,))
-    return bool(n)
-
-
-def purge_removed(conn: sqlite3.Connection) -> None:
-    with sqlite_tx(conn):
-        conn.execute("DELETE FROM link_files WHERE link_id IN (SELECT id FROM links WHERE state='removed')")
-
-
 def label(link) -> str:
     """Как ссылка выглядит в журнале: без адреса."""
     return f"#{link['id']} «{link['name'] or 'ссылка'}»"
 
 
 # ── Список файлов ссылки ────────────────────────────────────────────────────
-
-
-def _upsert_files(conn: sqlite3.Connection, link_id: int, gen: int, items: list[tuple]) -> None:
-    if not items:
-        return
-    with sqlite_tx(conn):
-        conn.executemany(
-            """
-            INSERT INTO link_files (link_id, path, size, md5, status, gen) VALUES (?, ?, ?, ?, 'pending', ?)
-            ON CONFLICT(link_id, path) DO UPDATE SET
-                size = excluded.size,
-                md5 = COALESCE(excluded.md5, link_files.md5),
-                gen = excluded.gen,
-                status = CASE
-                    WHEN link_files.status = 'gone' THEN 'pending'
-                    WHEN link_files.status = 'downloaded'
-                         AND excluded.md5 IS NOT NULL AND link_files.md5 IS NOT NULL
-                         AND excluded.md5 <> link_files.md5
-                    THEN 'pending'
-                    ELSE link_files.status
-                END
-            """,
-            [(link_id, path, size, md5, gen) for path, size, md5 in items],
-        )
 
 
 def list_link(api: PublicApi, conn: sqlite3.Connection, link, on_found=None) -> int:
@@ -726,43 +651,77 @@ def list_link(api: PublicApi, conn: sqlite3.Connection, link, on_found=None) -> 
     found = 0
     skipped = 0  # фото альбома, о которых Яндекс отдал не всё
     batch: list[tuple] = []
+    folder_batch: list[tuple[str, float | None, float | None]] = []
     first = api.meta(link["public_url"], root)
     kind = first.get("type") or "dir"
     name = first.get("name") or link["name"]
     if kind == "file":
         # Ссылка на файл внутри папки (…/d/KEY/Папка/файл.jpg) хранит путь файла: с «/»
         # Яндекс отдал бы всю папку по ссылке, а не этот файл
-        batch.append((root, first.get("size"), first.get("md5")))
+        batch.append((root, first.get("size"), first.get("md5"),
+                      _parse_ts(first.get("modified")), _parse_ts(first.get("created"))))
         found = 1
     else:
+        folder_batch.append((root, _parse_ts(first.get("created")), _parse_ts(first.get("modified"))))
         queue: deque[str] = deque([root])
+        seen_dirs: set[str] = {root}
         while queue:
             path = queue.popleft()
             offset = 0
+            seen_in_dir: set[str] = set()
             while True:
-                data = first if path == root and offset == 0 else api.meta(link["public_url"], path, offset=offset)
+                if path == root and offset == 0:
+                    data = first
+                else:
+                    for att in range(3):
+                        try:
+                            data = api.meta(link["public_url"], path, offset=offset)
+                            break
+                        except LinkError as e:
+                            if e.link_level or e.hold or e.kind not in ("server_50x", "rate_limit", "timeout", "network") or att == 2:
+                                raise
+                            time.sleep(5 if e.kind == "rate_limit" else 2 * (att + 1))
                 emb = data.get("_embedded") or {}
                 items = emb.get("items") or []
+                new_in_page = 0
                 for it in items:
-                    if it.get("type") == "dir" and it.get("path"):
-                        queue.append(it["path"])
-                    elif it.get("type") == "file" and it.get("path"):
-                        batch.append((it["path"], it.get("size"), it.get("md5")))
+                    it_path = it.get("path")
+                    if not it_path or it_path in seen_in_dir:
+                        continue
+                    seen_in_dir.add(it_path)
+                    new_in_page += 1
+                    if it.get("type") == "dir":
+                        folder_batch.append((it_path, _parse_ts(it.get("created")), _parse_ts(it.get("modified"))))
+                        if it_path not in seen_dirs:
+                            seen_dirs.add(it_path)
+                            queue.append(it_path)
+                    elif it.get("type") == "file":
+                        ft = _parse_ts(it.get("modified") or it.get("etime") or it.get("mtime"))
+                        cr = _parse_ts(it.get("created") or it.get("ctime"))
+                        batch.append((it_path, it.get("size"), it.get("md5"), ft, cr))
                         found += 1
                 if len(batch) >= 200:
                     _upsert_files(conn, link["id"], gen, batch)
                     batch.clear()
+                if len(folder_batch) >= 200:
+                    _upsert_folders(conn, link["id"], folder_batch)
+                    folder_batch.clear()
                 if on_found:
                     on_found(found)
                 skipped += emb.get("skipped", 0)
                 offset += len(items) + emb.get("skipped", 0)
-                total = emb.get("total")
+                raw_total = emb.get("total")
+                try:
+                    total = int(raw_total) if raw_total is not None else None
+                except (TypeError, ValueError):
+                    total = None
                 if "completed" in emb:
                     if emb["completed"]:
                         break
-                elif not items or (total is not None and offset >= int(total)) or (total is None and len(items) < LIST_LIMIT):
+                elif not items or new_in_page == 0 or (total is not None and offset >= total) or (total is None and len(items) < LIST_LIMIT):
                     break
     _upsert_files(conn, link["id"], gen, batch)
+    _upsert_folders(conn, link["id"], folder_batch)
     if skipped:
         print(f"Пропущено {files_text(skipped)} ({label(link)}): Яндекс отдал о них не всё — "
               f"проверю их при следующем сборе списка", flush=True)
@@ -798,6 +757,8 @@ class Job:
     local_dir: str
     kind: str | None
     local: str = ""  # место на диске на этот проход (Round._assign_targets)
+    file_time: float | None = None
+    created: float | None = None
 
 
 @dataclass
@@ -824,9 +785,15 @@ def local_target(download_dir: str, job: Job) -> str:
     return resolve_local_path(base, job.path)
 
 
+def _normalize_href(href: str) -> str:
+    return "https:" + href if isinstance(href, str) and href.startswith("//") else href
+
+
 def _href_allowed(href: str) -> bool:
-    host = (urlsplit(href).hostname or "").lower()
-    return urlsplit(href).scheme == "https" and any(host.endswith(h) for h in _HREF_HOSTS)
+    norm = _normalize_href(href)
+    parsed = urlsplit(norm)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and any(host.endswith(h) for h in _HREF_HOSTS)
 
 
 def _save_preview(api: PublicApi, job: Job, local: str, download_dir: str) -> str:
@@ -840,42 +807,15 @@ def _save_preview(api: PublicApi, job: Job, local: str, download_dir: str) -> st
         url = api.meta(job.public_url, job.path, limit=1, preview_size="XXXL").get("preview")
         if not url or not _href_allowed(url):
             return ""
-        failure = fetch_preview(_thread_http(), url, to_long_path(dst))
+        failure = fetch_preview(_thread_http(), _normalize_href(url), to_long_path(dst))
     except Exception as e:  # noqa: BLE001 — превью — бонус
         log.warning("превью #%s: %s", job.link_id, type(e).__name__)  # текст ошибки мог бы унести адрес
         return ""
+    if failure is not None and _is_album(job.public_url):
+        _item_id = _album_item(job.path)[1]
+        if _item_id:
+            _album_preview_drop((job.public_url, _item_id))
     return "" if failure is not None else dst
-
-
-def drop_previews(conn: sqlite3.Connection, download_dir: str, previews: list[tuple[int, str, str]]) -> int:
-    """Удаляет превью файлов, чьи оригиналы скачаны: (link_id, path, путь превью). Сколько удалено.
-
-    Никогда не бросает: уборка не должна ронять скачивание. Неудалённое превью (файл
-    открыт в программе просмотра) остаётся записанным, его уберёт следующий раунд.
-    """
-    try:
-        gone = [p for p in previews if remove_preview(p[2], download_dir)]
-        if gone:
-            with sqlite_tx(conn):
-                conn.executemany("UPDATE link_files SET preview_path=NULL "
-                                 "WHERE link_id=? AND path=? AND preview_path=?", gone)
-        if len(gone) < len(previews):
-            log.warning("не удалено превью: %d (файл занят или лежит не в «_превью»)", len(previews) - len(gone))
-        return len(gone)
-    except Exception as e:  # noqa: BLE001 — уборка не должна ронять скачивание
-        log.warning("уборка превью: %s", type(e).__name__)  # в тексте ошибки — путь с именем ссылки
-        return 0
-
-
-def sweep_previews(conn: sqlite3.Connection, download_dir: str) -> int:
-    """Превью уже скачанных файлов, которые не удалились в прошлый раз, — удалить."""
-    try:
-        rows = conn.execute("SELECT link_id, path, preview_path FROM link_files "
-                            "WHERE status='downloaded' AND preview_path IS NOT NULL").fetchall()
-    except sqlite3.Error as e:
-        log.warning("уборка превью: %s", e)
-        return 0
-    return drop_previews(conn, download_dir, [(r[0], r[1], r[2]) for r in rows])
 
 
 def _download_file(job: Job, download_dir: str, dead: DeadHosts) -> Result:
@@ -918,12 +858,14 @@ def _download_file(job: Job, download_dir: str, dead: DeadHosts) -> Result:
             if not _href_allowed(href):
                 return Result(job, "failed", error="refused | Яндекс прислал ссылку не на свой сервер — файл пропущен",
                               api_ok=True)
+            href = _normalize_href(href)
             written, _host, failure = fetch_to_file(
                 _thread_http(), href, part, expected_size=job.size, expected_md5=job.md5,
                 host_is_dead=dead.is_dead, reject_pages=False,
             )
             if failure is None:
                 os.replace(part, to_long_path(local))
+                set_file_time(local, job.file_time, created=job.created)
                 return Result(job, "downloaded", local, written, api_ok=True)
             if failure.is_storage:
                 if failure.kind == "storage_down":
@@ -987,7 +929,7 @@ def _take_jobs(conn: sqlite3.Connection, now: float) -> list[Job]:
     rows = conn.execute(
         """
         SELECT f.link_id, f.path, f.size, f.md5, f.error, f.storage_host, f.preview_path,
-               l.public_url, l.local_dir, l.kind
+               f.file_time, f.created, l.public_url, l.local_dir, l.kind
           FROM link_files f JOIN links l ON l.id = f.link_id
          WHERE l.state='active' AND l.error_kind IS NULL AND l.listed_at IS NOT NULL
            AND (l.limit_until IS NULL OR l.limit_until <= ?) AND f.status='pending'
@@ -996,7 +938,8 @@ def _take_jobs(conn: sqlite3.Connection, now: float) -> list[Job]:
         (now,),
     ).fetchall()
     return [Job(r["link_id"], r["path"], r["size"], r["md5"], r["error"], r["storage_host"], r["preview_path"],
-                r["public_url"], r["local_dir"], r["kind"]) for r in rows]
+                r["public_url"], r["local_dir"], r["kind"], file_time=r["file_time"], created=r["created"])
+            for r in rows]
 
 
 class Round:
@@ -1033,7 +976,7 @@ class Round:
             print(f"Собираю список {label(link)}...", flush=True)
             last = [0.0]
 
-            def on_found(n: int, link=link) -> None:
+            def on_found(n: int, link=link, last=last) -> None:
                 if time.monotonic() - last[0] >= PROGRESS_EVERY_SEC:
                     last[0] = time.monotonic()
                     print(f"Найдено: {n} ({label(link)})", flush=True)
@@ -1142,6 +1085,13 @@ class Round:
             if e.link_level:
                 self._link_error(job.link_id, e.kind, e.text)
                 return
+            # Временный сбой (50x, сеть, 429) при проверке корня — не считаем файл удалённым
+            self.counters["deferred"] += 1
+            self.conn.execute(
+                "UPDATE link_files SET status='pending', error=? WHERE link_id=? AND path=?",
+                (f"{DEFERRED_MARKER}{e.text}", job.link_id, job.path),
+            )
+            return
         self.counters["gone"] += 1
         self.conn.execute("UPDATE link_files SET status='gone', error=? WHERE link_id=? AND path=?",
                           (res.error, job.link_id, job.path))
@@ -1176,35 +1126,39 @@ class Round:
     def download(self, jobs: list[Job]) -> bool:
         """Проходит очередь. True — по ходу добавили или убрали ссылки: нужен новый проход."""
         self._assign_targets(jobs)
-        self.total += len(jobs)
+        done_so_far = sum(self.counters[k] for k in ("downloaded", "failed", "deferred", "limited", "held", "gone"))
+        self.total = done_so_far + len(jobs)
         pending = deque(jobs)
         futures: dict = {}
         active = self._active_ok()
         checked_at = time.monotonic()
         changed = False
-        with ThreadPoolExecutor(max_workers=self.workers) as pool:
-            while pending or futures:
-                if time.monotonic() - checked_at >= 10:
-                    checked_at = time.monotonic()
-                    active = self._active_ok()
-                    changed = changed or self._changed()
-                while pending and len(futures) < self.workers * 2 and not self.aborted and not changed:
-                    job = pending.popleft()
-                    if job.link_id not in active:
-                        continue  # ссылку убрали, сломалась или упёрлась в лимит
-                    self.tried.add((job.link_id, job.path))
-                    futures[pool.submit(_download_file, job, self.download_dir, self.dead)] = job
-                if not futures:
-                    break
-                done, _ = wait(list(futures), timeout=WAKE_POLL_SEC, return_when=FIRST_COMPLETED)
-                for fut in done:
-                    futures.pop(fut)
-                    res = fut.result()
-                    self._apply(res)
-                    if res.status in ("held", "link_error") or (
-                            res.status == "limited" and self.limit_streak.get(res.job.link_id, 0) >= LIMIT_STREAK):
-                        active.discard(res.job.link_id)  # остальные файлы этой ссылки сейчас не пробуем
-                self._progress()
+        try:
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                while pending or futures:
+                    if time.monotonic() - checked_at >= 10:
+                        checked_at = time.monotonic()
+                        active = self._active_ok()
+                        changed = changed or self._changed()
+                    while pending and len(futures) < self.workers * 2 and not self.aborted and not changed:
+                        job = pending.popleft()
+                        if job.link_id not in active:
+                            continue  # ссылку убрали, сломалась или упёрлась в лимит
+                        self.tried.add((job.link_id, job.path))
+                        futures[pool.submit(_download_file, job, self.download_dir, self.dead)] = job
+                    if not futures:
+                        break
+                    done, _ = wait(list(futures), timeout=WAKE_POLL_SEC, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        futures.pop(fut)
+                        res = fut.result()
+                        self._apply(res)
+                        if res.status in ("held", "link_error") or (
+                                res.status == "limited" and self.limit_streak.get(res.job.link_id, 0) >= LIMIT_STREAK):
+                            active.discard(res.job.link_id)  # остальные файлы этой ссылки сейчас не пробуем
+                    self._progress()
+        finally:
+            _close_thread_sessions()
         self._progress(force=True)
         return changed and not self.aborted
 
@@ -1212,13 +1166,22 @@ class Round:
         # Причины прошлого раунда (_note) устарели: ссылки пробуем снова — новые запишутся сами
         self.conn.execute("UPDATE links SET error=NULL WHERE error_kind IS NULL AND error IS NOT NULL")
         while True:
+            was_changed = meta_get(self.conn, "changed") is not None
             meta_set(self.conn, "changed", None)
+            if was_changed:
+                # По ходу раунда добавили/повторили ссылку — снимаем старые отметки tried/held
+                self.tried.clear()
+                self.held.clear()
             self.list_links(relist)
             relist = False
             jobs = [j for j in _take_jobs(self.conn, time.time()) if (j.link_id, j.path) not in self.tried]
             if not jobs:
+                if not self.aborted:
+                    _apply_link_folder_dates(self.conn, self.download_dir)
                 return
             if not self.download(jobs) or self.aborted:
+                if not self.aborted:
+                    _apply_link_folder_dates(self.conn, self.download_dir)
                 return
 
     def waiting(self) -> tuple[int, int]:
@@ -1271,41 +1234,47 @@ def run(conn: sqlite3.Connection, download_dir: str, workers: int, wait_mode: bo
     dead = DeadHosts()
     purge_removed(conn)
     sweep_previews(conn, download_dir)
-    while True:
-        meta_set(conn, "state", "running")
-        meta_set(conn, "next_retry_at", None)
-        rnd = Round(conn, download_dir, workers, dead)
-        with keep_awake():
-            rnd.run(relist)
-        relist = False
-        purge_removed(conn)
-        code = rnd.exit_code()
-        waiting, limited = rnd.waiting()
-        if rnd.counters["deferred"]:
-            print(f"storage_down | Отложено {files_text(rnd.counters['deferred'])}: их серверы хранения Яндекса "
-                  f"сейчас не отвечают. Файлы не потеряны — их скачает следующая попытка.", flush=True)
-            if not wait_mode and not under_webui():
-                print("  Повторить их: python public_download.py --wait — программа будет пробовать их сама "
-                      "каждые 30 минут.", flush=True)
-        if not wait_mode or code not in (EXIT_OUTAGE, EXIT_DEFERRED):
-            meta_set(conn, "state", None)
+    try:
+        while True:
+            meta_set(conn, "state", "running")
             meta_set(conn, "next_retry_at", None)
-            print("Готово: всё доступное по ссылкам скачано." if code == EXIT_OK else f"Раунд закончен (код {code}).",
-                  flush=True)
-            return code
-        delay = float(retry_every_sec())
-        until = _nearest_limit(conn)
-        if until and waiting and waiting == limited and not rnd.unlisted():
-            delay = max(60.0, until - time.time())  # ждут только лимита — до полуночи раунды бесполезны
-        next_at = time.time() + delay
-        meta_set(conn, "state", "waiting")
-        meta_set(conn, "next_retry_at", str(next_at))
-        print(f"Жду Яндекса: {files_text(waiting)}. Следующая попытка в {hhmm(next_at)}", flush=True)
-        # Не даём компьютеру уснуть ради серверов, которые могут ожить, но не ради лимита до полуночи
-        with keep_awake() if waiting > limited else nullcontext():
-            if wait_until(conn, next_at):
-                dead.clear()
-                print("Пробую снова — по вашей просьбе", flush=True)
+            rnd = Round(conn, download_dir, workers, dead)
+            with keep_awake():
+                rnd.run(relist)
+            relist = False
+            purge_removed(conn)
+            code = rnd.exit_code()
+            waiting, limited = rnd.waiting()
+            if rnd.counters["deferred"]:
+                print(f"storage_down | Отложено {files_text(rnd.counters['deferred'])}: их серверы хранения Яндекса "
+                      f"сейчас не отвечают. Файлы не потеряны — их скачает следующая попытка.", flush=True)
+                if not wait_mode and not under_webui():
+                    print("  Повторить их: python public_download.py --wait — программа будет пробовать их сама "
+                          "каждые 30 минут.", flush=True)
+            if not wait_mode or code not in (EXIT_OUTAGE, EXIT_DEFERRED):
+                meta_set(conn, "state", None)
+                meta_set(conn, "next_retry_at", None)
+                print("Готово: всё доступное по ссылкам скачано." if code == EXIT_OK else f"Раунд закончен (код {code}).",
+                      flush=True)
+                return code
+            delay = float(retry_every_sec())
+            until = _nearest_limit(conn)
+            if until and waiting and waiting == limited and not rnd.unlisted():
+                delay = max(60.0, until - time.time())  # ждут только лимита — до полуночи раунды бесполезны
+            next_at = time.time() + delay
+            meta_set(conn, "state", "waiting")
+            meta_set(conn, "next_retry_at", str(next_at))
+            print(f"Жду Яндекса: {files_text(waiting)}. Следующая попытка в {hhmm(next_at)}", flush=True)
+            # Не даём компьютеру уснуть ради серверов, которые могут ожить, но не ради лимита до полуночи
+            with keep_awake() if waiting > limited else nullcontext():
+                if wait_until(conn, next_at):
+                    dead.clear()
+                    print("Пробую снова — по вашей просьбе", flush=True)
+    finally:
+        try:
+            meta_set(conn, "state", None)
+        except sqlite3.Error:
+            pass
 
 
 def cmd_status(conn: sqlite3.Connection) -> int:
@@ -1329,14 +1298,18 @@ def cmd_add(conn: sqlite3.Connection, url: str) -> int:
         print(str(e), file=sys.stderr)
         return EXIT_PARTIAL
     meta = None
+    api = PublicApi()
     try:
-        meta = PublicApi().meta(public_url, sub, limit=1)
+        meta = api.meta(public_url, sub, limit=1)
     except LinkError as e:
         if e.link_level:
             print(e.text, file=sys.stderr)
             return EXIT_PARTIAL
         print(f"{e.text} — ссылку всё равно добавляю, список соберу позже")
+    finally:
+        api.session.close()
     link_id, new = add_link(conn, public_url, sub, meta)
+    poke(conn, wake=True)
     row = conn.execute("SELECT id, name FROM links WHERE id=?", (link_id,)).fetchone()
     print(f"{'Добавил' if new else 'Уже в списке'}: {label(row)}")
     return EXIT_OK
@@ -1380,10 +1353,6 @@ def main(argv: list[str] | None = None) -> int:
               f"или проверьте, что диск подключён.", flush=True)
         return EXIT_DISK_FULL
     finally:
-        try:
-            meta_set(conn, "state", None)
-        except sqlite3.Error:
-            pass
         conn.close()
 
 

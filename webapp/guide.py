@@ -93,11 +93,18 @@ def render_guide() -> str:
     return html
 
 
+_GUIDE_CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; "
+    "img-src 'self' https://img.shields.io; base-uri 'none'; "
+    "form-action 'none'; frame-ancestors 'none'"
+)
+
+
 @router.get("/guide", response_class=HTMLResponse)
 def guide():
     if not GUIDE_FILE.exists():
         return RedirectResponse(url=GUIDE_GITHUB_URL, status_code=307)
-    return HTMLResponse(render_guide())
+    return HTMLResponse(render_guide(), headers={"Content-Security-Policy": _GUIDE_CSP})
 
 
 @router.get("/docs/images/{name}")

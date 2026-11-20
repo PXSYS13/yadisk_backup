@@ -7,12 +7,14 @@
   let source = 'disk';
   let problems = null;
   let problemsAt = 0;
+  let problemsSeq = 0;
 
   async function loadProblems() {
     problemsAt = Date.now();
     const want = source;
+    const seq = ++problemsSeq;
     const res = await App.api.get(`/api/${want}/failed?limit=300`);
-    if (want !== source) return; // пока ждали ответа, открыли другой источник
+    if (want !== source || seq !== problemsSeq) return; // пока ждали ответа, открыли другой источник или пошёл новый запрос
     const data = res.ok && res.data ? res.data : null;
     const error = data ? data.error : res.error || 'Не получилось';
     problems = error ? { items: [], reasons: {}, total: 0, failed: 0, error } : data;
@@ -50,13 +52,15 @@
   let fpPath = 'disk:/';
   let folders = null;
   let foldersAt = 0;
+  let foldersSeq = 0;
 
   async function loadFolders(path) {
     if (path !== undefined) fpPath = path;
     foldersAt = Date.now();
     const want = fpPath;
+    const seq = ++foldersSeq;
     const res = await App.api.get(`/api/disk/folder_progress?path=${encodeURIComponent(want)}${App.demo ? '&demo=1' : ''}`);
-    if (want !== fpPath) return; // пока ждали ответа, открыли другую папку
+    if (want !== fpPath || seq !== foldersSeq) return; // пока ждали ответа, открыли другую папку
     folders = res.ok ? res.data : { error: res.error || 'Не получилось загрузить папки' };
     paintFolders();
   }
@@ -337,6 +341,7 @@
     if (want !== source || seq !== files.seq) return;
     const data = res.ok && res.data ? res.data : null;
     const error = data ? data.error : res.error || 'Не получилось загрузить список';
+    if (!error && data && data.page) files.page = data.page;
     files.data = error ? { error, items: [], counts: {}, total: 0, page: 1, pages: 1 } : data;
     paintFiles();
   }
@@ -418,8 +423,14 @@
         `<td><span class="badge ${cls}">${esc(label)}</span></td>` +
         `<td class="small muted">${esc(detail)}</td></tr>`;
     }).join('');
+    const prevScroll = bodyBox.querySelector ? bodyBox.querySelector('.scroll') : null;
+    const savedScrollTop = prevScroll ? prevScroll.scrollTop : 0;
     App.html(bodyBox, `<div class="scroll"><table class="list"><thead><tr><th>Файл</th><th>Размер</th><th>Состояние</th><th>Подробности</th></tr></thead>` +
       `<tbody>${rows}</tbody></table></div>`);
+    if (savedScrollTop) {
+      const nextScroll = bodyBox.querySelector ? bodyBox.querySelector('.scroll') : null;
+      if (nextScroll) nextScroll.scrollTop = savedScrollTop;
+    }
 
     const total = d.total || 0;
     const from = (d.page - 1) * d.limit + 1;
@@ -512,6 +523,8 @@
       }
     },
     show(params) {
+      clearTimeout(searchTimer);
+      searchTimer = null;
       source = params.source === 'unlim' ? 'unlim' : 'disk';
       problems = null;
       files.status = 'not_downloaded';
@@ -646,8 +659,9 @@
 
   // Тот же путь, что «Обновить список» на Главной: с выбранными папками, и ход сбора виден на Главной
   App.action('details-relist', async (btn) => {
+    const src = source;
     const yes = await App.confirm({ title: 'Собрать список файлов заново?', ok: 'Собрать',
       text: 'Программа заново спросит у Яндекса, какие файлы есть, и скачает новые. Скачанное не пропадёт и второй раз качаться не будет.' });
-    if (yes) App.run(btn, () => App.api.post('/api/rescue/relist', { source }));
+    if (yes) App.run(btn, () => App.api.post('/api/rescue/relist', { source: src }));
   });
 })();

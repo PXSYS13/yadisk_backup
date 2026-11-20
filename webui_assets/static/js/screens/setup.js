@@ -16,6 +16,12 @@
   ];
   let step = 0;
   let finished = false;
+  let advanceTimer = null;
+
+  function cancelAdvance() {
+    clearTimeout(advanceTimer);
+    advanceTimer = null;
+  }
 
   function isDone(kind, s) {
     if (!s) return false;
@@ -49,8 +55,9 @@
   function paintStepper(s) {
     const html = STEPS.map((st, i) => {
       const done = isDone(st.kind, s);
-      return `<div class="s ${i === step && !finished ? 'active' : ''} ${done ? 'done' : ''}" data-action="setup-goto" data-step="${i}">
-        <span class="n">${done ? App.icon('check') : i + 1}</span><b>${st.title}</b></div>`;
+      const active = i === step && !finished;
+      return `<button type="button" class="s ${active ? 'active' : ''} ${done ? 'done' : ''}" data-action="setup-goto" data-step="${i}"${active ? ' aria-current="step"' : ''}>
+        <span class="n">${done ? App.icon('check') : i + 1}</span><b>${st.title}</b></button>`;
     }).join('');
     App.html(byId('setup-stepper'), html);
   }
@@ -63,10 +70,16 @@
         <div class="stepper" id="setup-stepper"></div>
         <div class="card" id="setup-step"></div>`;
       el.addEventListener('access-saved', () => {
-        setTimeout(() => { if (step < STEPS.length - 1) { step++; render(); } else { finished = true; render(); } }, 400);
+        cancelAdvance();
+        advanceTimer = setTimeout(() => {
+          advanceTimer = null;
+          if (App.state.route !== 'setup') return;
+          if (step < STEPS.length - 1) { step++; render(); } else { finished = true; render(); }
+        }, 400);
       });
     },
     show() {
+      cancelAdvance();
       // Открываем первый ещё не сделанный шаг
       const s = App.state.status;
       finished = false;
@@ -83,6 +96,7 @@
   };
 
   App.action('setup-next', (btn) => {
+    cancelAdvance();
     const need = btn.dataset.require;
     if (need && !isDone(need, App.state.status)) {
       App.toast(need === 'folder' ? 'Сначала сохраните папку' : 'Сначала сохраните, или нажмите «пропустить»', 'err');
@@ -92,8 +106,8 @@
     else finished = true;
     render();
   });
-  App.action('setup-back', () => { if (step > 0) { step--; finished = false; render(); } });
-  App.action('setup-goto', (el) => { step = Number(el.dataset.step) || 0; finished = false; render(); });
+  App.action('setup-back', () => { cancelAdvance(); if (step > 0) { step--; finished = false; render(); } });
+  App.action('setup-goto', (el) => { cancelAdvance(); step = Number(el.dataset.step) || 0; finished = false; render(); });
   App.action('setup-start', async (btn) => {
     const res = await App.run(btn, () => App.api.post('/api/rescue/start'));
     if (res && res.ok) App.go('#/home');

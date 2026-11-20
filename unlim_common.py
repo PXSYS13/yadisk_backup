@@ -177,7 +177,7 @@ def cookie_base_domain(domain) -> str | None:
     if not d:
         return ""
     for tld in YANDEX_COOKIE_DOMAINS:
-        if d == tld or d == f"disk.{tld}":
+        if d in (tld, f"disk.{tld}", f"disk.360.{tld}"):
             return tld
     return None
 
@@ -209,12 +209,12 @@ def _extract_curl_cookies(text: str) -> list[dict]:
     """Извлекает куки из скопированной в DevTools команды 'Copy as cURL' (POSIX и Windows cmd)."""
     # Склеиваем переносы строк bash (\) и Windows cmd (^)
     joined = re.sub(r"[\\^]\r?\n", " ", text)
-    # Windows cmd оборачивает кавычки как ^" и экранирует спецсимволы ^& ^% ^^
-    if '^"' in joined:
-        joined = joined.replace('^"', '"').replace("^&", "&").replace("^%", "%").replace("^^", "^")
+    # Windows cmd оборачивает кавычки как ^" и экранирует спецсимволы (^|, ^&, ^%, ^^, ^<, ^>, ^!)
+    if '^"' in joined or "^|" in joined:
+        joined = re.sub(r'\^([\"&|%<>^!()])', r"\1", joined)
     chunks: list[str] = []
     for m in re.finditer(
-        r"""(?:-H|--header)\s+(?:'([^']*)'|"([^"]*)")""",
+        r"""(?:-H|--header)\s+(?:\$?'([^']*)'|"([^"]*)")""",
         joined,
         flags=re.IGNORECASE,
     ):
@@ -222,7 +222,7 @@ def _extract_curl_cookies(text: str) -> list[dict]:
         if re.match(r"^cookie\s*:", hdr, flags=re.IGNORECASE):
             chunks.append(hdr)
     for m in re.finditer(
-        r"""(?:-b|--cookie)\s+(?:'([^']*)'|"([^"]*)"|(\S+))""",
+        r"""(?:-b|--cookie)\s+(?:\$?'([^']*)'|"([^"]*)"|(\S+))""",
         joined,
     ):
         val = next((g for g in m.groups() if g is not None), "").strip()
@@ -526,15 +526,37 @@ def make_session(cookies: dict[str, str] | None = None,
     return s
 
 
-def _is_captcha_response(r) -> bool:
-    """Яндекс показал SmartCaptcha — куки при этом живые, нужен повтор позже."""
+def is_captcha_response(r) -> bool:
+    """Яндекс показал SmartCaptcha — куки при этом живые, нужен повтор позже.
+
+    Для валидного HTTP 200 application/json не ищем подстроку в сыром теле: там лежит
+    имя файла пользователя (например «captcha_error.png»), и оно давало ложную капчу.
+    """
     url_low = str(getattr(r, "url", "") or "").lower()
     if "showcaptcha" in url_low:
         return True
+    status = getattr(r, "status_code", 0)
+    headers = getattr(r, "headers", None) or {}
+    ctype = str(headers.get("Content-Type") or headers.get("content-type") or "").lower()
+    if status == 200 and "application/json" in ctype:
+        try:
+            data = r.json()
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            if data.get("captcha") or data.get("showcaptcha") or data.get("type") == "captcha":
+                return True
+            err = data.get("error")
+            if err and "captcha" in str(err).lower():
+                return True
+        return False
     body_low = str(getattr(r, "text", "") or "")[:4000].lower()
     if "smartcaptcha" in body_low or "showcaptcha" in body_low:
         return True
-    return getattr(r, "status_code", 0) in (403, 429) and "captcha" in body_low
+    return status in (403, 429) and "captcha" in body_low
+
+
+_is_captcha_response = is_captcha_response
 
 
 def _extract_sk_uid(text: str) -> tuple[str | None, str | None]:
@@ -615,8 +637,8 @@ def api_call(s: requests.Session, sk: str, uid: str, method: str,
             if r.status_code == 200:
                 try:
                     data = r.json()
-                except Exception:
-                    raise RuntimeError(f"{method}: ответ не JSON: {r.text[:200]}")
+                except Exception as e:
+                    raise RuntimeError(f"{method}: ответ не JSON: {r.text[:200]}") from e
                 # mpfs/list отвечает списком, остальные методы — объектом
                 if not isinstance(data, (dict, list)):
                     raise RuntimeError(f"{method}: неожиданный формат ответа: {type(data).__name__}")
@@ -646,9 +668,9 @@ def api_call(s: requests.Session, sk: str, uid: str, method: str,
 
 
 def connect_unlim_db(db_path: str | None = None, timeout: float = 60) -> sqlite3.Connection:
-    """Соединение с unlim_state.db в WAL-режиме, строки — sqlite3.Row."""
+    """Соединение с unlim_state.db, строки — sqlite3.Row. WAL задаётся при инициализации схемы."""
     c = sqlite3.connect(db_path or UNLIM_DB_FILE, timeout=timeout)
-    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA synchronous=NORMAL")
     c.row_factory = sqlite3.Row
     return c
 
@@ -715,32 +737,76 @@ def ensure_unlim_schema(db_path: str | None = None) -> None:
     """Миграция старых БД: колонки attempts, storage_host, preview_path, file_time и dated,
     индекс, таблица unlim_meta.
 
-    Воркеры стартуют одновременно и зовут её параллельно — это безопасно.
+    Воркеры стартуют одновременно и зовут её параллельно: BEGIN IMMEDIATE держит очередь
+    ожидания по timeout=60 вместо мгновенного database is locked при апгрейде транзакции.
     """
     db_path = db_path or UNLIM_DB_FILE
-    c = sqlite3.connect(db_path, timeout=60)
+    c = sqlite3.connect(db_path, timeout=60, isolation_level=None)
     try:
-        cols = {r[1] for r in c.execute("PRAGMA table_info(unlim_files)")}
-        if cols and "attempts" not in cols:
-            _add_column(c, "ALTER TABLE unlim_files ADD COLUMN attempts INTEGER DEFAULT 0")
-            cols.add("attempts")
-        if cols and "storage_host" not in cols:
-            _add_column(c, "ALTER TABLE unlim_files ADD COLUMN storage_host TEXT")
-        if cols and "preview_path" not in cols:
-            _add_column(c, "ALTER TABLE unlim_files ADD COLUMN preview_path TEXT")
-        # file_time — дата для копии (съёмки или загрузки, секунды эпохи); dated — с какой
-        # file_time уже сверили дату скачанной копии (file_dates)
-        for col in ("file_time", "dated"):
-            if cols and col not in cols:
-                _add_column(c, f"ALTER TABLE unlim_files ADD COLUMN {col} REAL")
-        if {"status", "attempts", "assigned_at"}.issubset(cols):
-            c.execute("CREATE INDEX IF NOT EXISTS idx_unlim_pending ON unlim_files(status, attempts, assigned_at)")
-        # Общие для всех воркеров значения: пауза по 429, молчащие серверы хранения
-        c.execute("CREATE TABLE IF NOT EXISTS unlim_meta (key TEXT PRIMARY KEY, value TEXT)")
-        c.execute(VERIFY_PROBLEMS_SCHEMA)
-        c.commit()
+        c.execute("PRAGMA journal_mode=WAL")
+        with sqlite_tx(c):
+            cols = {r[1] for r in c.execute("PRAGMA table_info(unlim_files)")}
+            if cols and "attempts" not in cols:
+                _add_column(c, "ALTER TABLE unlim_files ADD COLUMN attempts INTEGER DEFAULT 0")
+                cols.add("attempts")
+            if cols and "storage_host" not in cols:
+                _add_column(c, "ALTER TABLE unlim_files ADD COLUMN storage_host TEXT")
+            if cols and "preview_path" not in cols:
+                _add_column(c, "ALTER TABLE unlim_files ADD COLUMN preview_path TEXT")
+            # file_time — дата для копии (съёмки или загрузки, секунды эпохи); dated — с какой
+            # file_time уже сверили дату скачанной копии (file_dates)
+            for col in ("file_time", "dated"):
+                if cols and col not in cols:
+                    _add_column(c, f"ALTER TABLE unlim_files ADD COLUMN {col} REAL")
+            if {"status", "attempts", "assigned_at"}.issubset(cols):
+                c.execute("CREATE INDEX IF NOT EXISTS idx_unlim_pending ON unlim_files(status, attempts, assigned_at)")
+            # Общие для всех воркеров значения: пауза по 429, молчащие серверы хранения
+            c.execute("CREATE TABLE IF NOT EXISTS unlim_meta (key TEXT PRIMARY KEY, value TEXT)")
+            c.execute(VERIFY_PROBLEMS_SCHEMA)
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS unlim_verify_cache ("
+                "local_path TEXT PRIMARY KEY, size INTEGER NOT NULL, "
+                "mtime_ns INTEGER NOT NULL, md5 TEXT NOT NULL)"
+            )
     finally:
         c.close()
+
+
+def get_unlim_verify_cache(db_path: str | None = None) -> dict[str, tuple[int, int, str]]:
+    """Кэш проверенных MD5 для Безлимита: path_key(local_path) → (size, mtime_ns, md5)."""
+    from utils import path_key
+
+    db_path = db_path or UNLIM_DB_FILE
+    if not os.path.exists(db_path):
+        return {}
+    c = connect_unlim_db(db_path)
+    try:
+        if not c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='unlim_verify_cache'"
+        ).fetchone():
+            return {}
+        return {
+            path_key(r["local_path"]): (int(r["size"]), int(r["mtime_ns"]), str(r["md5"]))
+            for r in c.execute("SELECT local_path, size, mtime_ns, md5 FROM unlim_verify_cache")
+        }
+    except sqlite3.Error:
+        return {}
+    finally:
+        c.close()
+
+
+def save_unlim_verify_cache(entries: list[tuple[str, int, int, str]], db_path: str | None = None) -> None:
+    """Сохраняет проверенные MD5 Безлимита для ускорения повторных --verify."""
+    if not entries:
+        return
+    db_path = db_path or UNLIM_DB_FILE
+    ensure_unlim_schema(db_path)
+    with unlim_tx(db_path) as c:
+        c.executemany(
+            "INSERT OR REPLACE INTO unlim_verify_cache (local_path, size, mtime_ns, md5) "
+            "VALUES (?, ?, ?, ?)",
+            entries,
+        )
 
 
 # Старое имя — им пользуются CLI и тесты

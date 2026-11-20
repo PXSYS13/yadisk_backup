@@ -30,6 +30,7 @@ STORAGE_RETRY_SEC = 1800
 LINK_TIMEOUT = (30, 60)
 
 _REDIRECT_CODES = (301, 302, 303, 307, 308)
+_MAX_REDIRECTS = 5
 # Оригинал фото или видео никогда не приходит страницей или JSON — это отказ Яндекса.
 # Для обычного Диска проверка выключается: там бывают настоящие .html и .json.
 _PAGE_CONTENT_TYPES = ("text/html", "application/json")
@@ -148,21 +149,30 @@ def fetch_to_file(
     written = 0
     trace = ""
     try:
+        cur_url = url
         first = {"headers": headers} if headers else {}
-        r = session.get(url, stream=True, allow_redirects=False, timeout=LINK_TIMEOUT, **first)
-        location = (getattr(r, "headers", None) or {}).get("Location")
-        if r.status_code in _REDIRECT_CODES and location:
+        r = session.get(cur_url, stream=True, allow_redirects=False, timeout=LINK_TIMEOUT, **first)
+        for _ in range(_MAX_REDIRECTS):
+            location = (getattr(r, "headers", None) or {}).get("Location")
+            if r.status_code not in _REDIRECT_CODES or not location:
+                break
             r.close()
-            location = urljoin(url, location)
-            host = urlsplit(location).hostname or ""
-            if host and host_is_dead and host_is_dead(host):
+            next_url = urljoin(cur_url, location)
+            parsed = urlsplit(next_url)
+            cur_scheme = urlsplit(cur_url).scheme
+            if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                    or (cur_scheme == "https" and parsed.scheme != "https")):
+                return 0, host, FetchFailure("refused", f"неожиданный редирект: {scrub_urls(next_url)}", host)
+            host = parsed.hostname
+            if host_is_dead and host_is_dead(host):
                 return 0, host, FetchFailure("storage_skip", f"сервер хранения {host} недавно не отвечал", host)
-            r = session.get(location, stream=True, timeout=(storage_timeout, storage_timeout))
+            cur_url = next_url
+            r = session.get(cur_url, stream=True, allow_redirects=False, timeout=(storage_timeout, storage_timeout))
         with r:
             r.raise_for_status()
-            headers = getattr(r, "headers", {}) or {}
+            resp_headers = getattr(r, "headers", {}) or {}
             trace = response_trace(r)
-            ctype = (headers.get("Content-Type") or "").lower()
+            ctype = (resp_headers.get("Content-Type") or "").lower()
             if reject_pages and any(t in ctype for t in _PAGE_CONTENT_TYPES):
                 snippet = next(iter(r.iter_content(512)), b"")[:200]
                 return 0, host, FetchFailure(
@@ -170,7 +180,11 @@ def fetch_to_file(
                     f"вместо файла пришёл {ctype.split(';')[0]}: {snippet.decode('utf-8', 'replace')!r}{trace}",
                     host,
                 )
-            content_len = int(headers.get("Content-Length", 0) or 0)
+            try:
+                content_len = int(resp_headers.get("Content-Length", 0) or 0)
+            except (TypeError, ValueError):
+                content_len = 0
+            content_encoded = bool(resp_headers.get("Content-Encoding"))
             total = expected_size or content_len
             # MD5 — контрольная сумма, которую отдаёт Яндекс: ловит битые файлы, а не подмену
             md5 = hashlib.md5(usedforsecurity=False) if is_md5(expected_md5) else None
@@ -219,12 +233,12 @@ def fetch_to_file(
     except Exception as e:  # noqa: BLE001 — любой сбой должен стать FetchFailure, а не исключением
         return written, host, FetchFailure("connection", f"сбой скачивания файла: {scrub_urls(e)}", host)
 
-    if content_len and written != content_len:
+    if content_len and not content_encoded and written != content_len:
         return written, host, FetchFailure(
             "connection", f"файл оборвался: скачано {written} байт из {content_len}{trace}", host)
     if written == 0 and expected_size != 0:
         return written, host, FetchFailure("bad_file", f"Яндекс отдал пустой файл{trace}", host)
-    if expected_size and written != expected_size:
+    if expected_size is not None and written != expected_size:
         # Не помечаем скачанным то, что не совпало с описанием файла на Диске
         return written, host, FetchFailure(
             "bad_file", f"размер не совпал: скачано {written} байт, на Диске {expected_size}{trace}", host)

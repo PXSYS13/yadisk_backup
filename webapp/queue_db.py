@@ -15,6 +15,7 @@ from state import CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER
 from unlim_common import DEFERRED_MARKER, RELEASE_IN_PROGRESS_SQL, unlim_tx
 from utils import CATEGORY_LABELS, categorize, sqlite_ro_uri, sqlite_tx, utc_ts
 from webapp import paths
+from webapp.db_predicates import connect_ro, deferred_sql
 from webapp.listing import LISTING_KEY, parse_listing
 
 # Белый список для SQL-идентификаторов — защита от инъекций через f-string
@@ -40,7 +41,6 @@ REASON_TEXT = (
     ("download_timeout |", "Яндекс отвечал слишком долго"),
     ("timeout |", "Яндекс отвечал слишком долго"),
     ("rate_limit |", "Яндекс просил обращаться реже"),
-    ("link_limit |", "Яндекс временно ограничил скачивание по этой ссылке"),
     ("auth_expired |", "Доступ устарел — обновите ключ или доступ к Безлимиту"),
     ("local_disk |", "Не удалось записать файл на ваш диск"),
     ("local_file |", "Файл не записать в эту папку: слишком длинное имя или файл больше 4 ГБ для диска FAT32"),
@@ -92,14 +92,14 @@ def db_stats(db_file: Path, table: str = "files",
         return out
     c = None
     try:
-        c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
-        c.row_factory = sqlite3.Row
+        c = connect_ro(db_file)
+        def_expr = deferred_sql()
         for r in c.execute(
-            f"SELECT status, (COALESCE(error, '') LIKE ?) AS deferred, "
+            f"SELECT status, ({def_expr}) AS deferred, "
             f"(COALESCE(error, '') = ?) AS cat_x, (COALESCE(error, '') = ?) AS fold_x, "
             f"COUNT(*) AS n, COALESCE(SUM(size),0) AS b "
             f"FROM {table} GROUP BY status, deferred, cat_x, fold_x",
-            (DEFERRED_MARKER + "%", CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER),
+            (DEFERRED_MARKER, CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER),
         ):
             st = r["status"]
             n = r["n"]
@@ -120,7 +120,9 @@ def db_stats(db_file: Path, table: str = "files",
                 out["bytes_done_real"] += b
                 out["bytes_done"] += b
             elif st == "skipped":
-                if r["cat_x"] or r["fold_x"]:
+                # У Безлимита все skipped — исключённые выбором (как в file_list.py);
+                # у Диска skipped без маркера выбора — файлы, найденные на диске при докачке
+                if table == "unlim_files" or r["cat_x"] or r["fold_x"]:
                     out["category_skipped"] += n
                     out["category_skipped_bytes"] += b
                     if r["fold_x"]:
@@ -134,15 +136,22 @@ def db_stats(db_file: Path, table: str = "files",
             try:
                 out["deferred_hosts"] = c.execute(
                     f"SELECT COUNT(DISTINCT storage_host) FROM {table} "
-                    f"WHERE status='pending' AND error LIKE ? AND storage_host IS NOT NULL",
-                    (DEFERRED_MARKER + "%",),
+                    f"WHERE status='pending' AND {def_expr} AND storage_host IS NOT NULL",
+                    (DEFERRED_MARKER,),
                 ).fetchone()[0]
             except sqlite3.OperationalError:  # старая БД без колонки storage_host
                 pass
         try:
-            out["previews"] = c.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE preview_path IS NOT NULL AND status <> 'downloaded'"
-            ).fetchone()[0]
+            if table == "files":
+                out["previews"] = c.execute(
+                    "SELECT COUNT(*) FROM files WHERE preview_path IS NOT NULL "
+                    "AND NOT (status = 'downloaded' OR (status = 'skipped' AND COALESCE(error, '') NOT IN (?, ?)))",
+                    (CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER),
+                ).fetchone()[0]
+            else:
+                out["previews"] = c.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE preview_path IS NOT NULL AND status <> 'downloaded'"
+                ).fetchone()[0]
         except sqlite3.OperationalError:  # старая БД без колонки preview_path
             pass
         # Скорость за последние 10 минут — для оценки времени в мастере плана.
@@ -332,9 +341,10 @@ def filter_to_categories(db_file: Path, table: str, id_col: str,
     if not db_file.exists():
         return (0, 0)
     sel = set(selected)
-    c = sqlite3.connect(db_file, timeout=30)
-    c.execute("PRAGMA journal_mode=WAL")
+    c = None
     try:
+        c = sqlite3.connect(db_file, timeout=30)
+        c.execute("PRAGMA journal_mode=WAL")
         rows = c.execute(
             f"SELECT {id_col}, {category_key_expr(table, id_col)} FROM {table} WHERE status='pending'"
         ).fetchall()
@@ -348,7 +358,8 @@ def filter_to_categories(db_file: Path, table: str, id_col: str,
                 )
         return (len(to_skip), kept)
     finally:
-        c.close()
+        if c is not None:
+            c.close()
 
 
 def unskip_markers(db_file: Path, table: str, markers: tuple[str, ...]) -> int:
@@ -356,9 +367,10 @@ def unskip_markers(db_file: Path, table: str, markers: tuple[str, ...]) -> int:
     table = validate_sql_ident(table, ALLOWED_TABLES, "table")
     if not db_file.exists() or not markers:
         return 0
-    c = sqlite3.connect(db_file, timeout=30)
-    c.execute("PRAGMA journal_mode=WAL")
+    c = None
     try:
+        c = sqlite3.connect(db_file, timeout=30)
+        c.execute("PRAGMA journal_mode=WAL")
         with sqlite_tx(c):
             return c.execute(
                 f"UPDATE {table} SET status='pending', error=NULL "
@@ -366,7 +378,8 @@ def unskip_markers(db_file: Path, table: str, markers: tuple[str, ...]) -> int:
                 markers,
             ).rowcount
     finally:
-        c.close()
+        if c is not None:
+            c.close()
 
 
 def unskip_category_marker(db_file: Path, table: str) -> int:
@@ -388,9 +401,10 @@ def filter_to_folders(db_file: Path, folders: list[str]) -> tuple[int, int]:
     params: list = []
     for f in folders:
         params += [f, len(f) + 1, f + "/"]
-    c = sqlite3.connect(db_file, timeout=30)
-    c.execute("PRAGMA journal_mode=WAL")
+    c = None
     try:
+        c = sqlite3.connect(db_file, timeout=30)
+        c.execute("PRAGMA journal_mode=WAL")
         with sqlite_tx(c):
             skipped = c.execute(
                 f"UPDATE files SET status='skipped', error=? "
@@ -400,7 +414,8 @@ def filter_to_folders(db_file: Path, folders: list[str]) -> tuple[int, int]:
         kept = c.execute("SELECT COUNT(*) FROM files WHERE status='pending'").fetchone()[0]
         return (skipped, kept)
     finally:
-        c.close()
+        if c is not None:
+            c.close()
 
 
 # ── Что не скачалось и почему ──
@@ -421,9 +436,10 @@ def list_problem_files(db_file: Path, table: str, id_col: str, limit: int) -> di
     out: dict = {"items": [], "reasons": {}, "total": 0, "failed": 0}
     if not db_file.exists():
         return out
-    c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
-    c.row_factory = sqlite3.Row
+    c = None
     try:
+        c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
+        c.row_factory = sqlite3.Row
         cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
         preview_col = "preview_path" if "preview_path" in cols else "NULL AS preview_path"
         where = ("status='failed' OR (status='pending' AND COALESCE(error, '') LIKE ?)")
@@ -451,5 +467,6 @@ def list_problem_files(db_file: Path, table: str, id_col: str, limit: int) -> di
     except sqlite3.Error as e:
         out["error"] = str(e)
     finally:
-        c.close()
+        if c is not None:
+            c.close()
     return out

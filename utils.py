@@ -19,6 +19,15 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from error_classify import (  # noqa: F401 — реэкспорт для обратной совместимости
+    DONATION_URL,
+    TELEGRAM_CHANNEL,
+    TELEGRAM_HANDLE,
+    YOUTUBE_VIDEO_URL,
+    classify_yandex_error,
+    scrub_urls,
+)
+
 # Символы, запрещённые в именах файлов на Windows.
 # Слеши тоже сюда: имя файла с '\' или '/' на Яндекс.Диске легально, а локально
 # превратилось бы в разделитель пути и увело файл мимо DOWNLOAD_DIR.
@@ -38,7 +47,7 @@ CASE_INSENSITIVE_PATHS = IS_WINDOWS or sys.platform == "darwin"
 # Порог, после которого включаем префикс \\?\ для длинных путей
 WIN_LONG_PATH_THRESHOLD = 240
 
-APP_VERSION = "2.8.11"
+APP_VERSION = "2.9.0"
 
 # ── Общие лимиты (единое место для CLI, Web UI и pipeline) ──────────────────
 
@@ -67,13 +76,21 @@ def previews_enabled() -> bool:
 
 def preview_path_for(download_dir: str, original_path: str) -> str:
     """<папка>/_превью/<путь оригинала относительно папки>.jpg — рядом не перепутать с оригиналом."""
+    base_dir = _strip_long_prefix(download_dir)
+    orig = _strip_long_prefix(original_path)
     try:
-        rel = os.path.relpath(original_path, download_dir)
+        rel = os.path.relpath(orig, base_dir)
     except ValueError:  # другой диск на Windows
-        rel = os.path.basename(original_path)
+        rel = os.path.basename(orig)
     if rel.startswith(".."):
-        rel = os.path.basename(original_path)
-    return os.path.join(download_dir, PREVIEW_DIRNAME, rel + ".jpg")
+        rel = os.path.basename(orig)
+    sub_dir, fname = os.path.split(rel)
+    # Запас на ".jpg" (4) и временный ".part" (5) в fetch_preview: имя не превысит MAX_NAME_LEN
+    if name_len(fname + ".jpg") > MAX_NAME_LEN - 5:
+        fname = name_with_tag(fname, f"_{short_hash(orig)}", MAX_NAME_LEN - 9) + ".jpg"
+    else:
+        fname = fname + ".jpg"
+    return os.path.join(base_dir, PREVIEW_DIRNAME, sub_dir, fname) if sub_dir else os.path.join(base_dir, PREVIEW_DIRNAME, fname)
 
 
 def set_aside(download_dir: str, path: str) -> str | None:
@@ -83,20 +100,22 @@ def set_aside(download_dir: str, path: str) -> str | None:
     вне папки скачивания (её сменили после скачивания — новая копия ляжет в новую папку и старую
     не заденет). OSError — переложить не вышло (файл открыт в другой программе, нет прав).
     """
+    base_dir = _strip_long_prefix(download_dir)
+    src = _strip_long_prefix(path)
     try:
-        rel = os.path.relpath(path, download_dir)
+        rel = os.path.relpath(src, base_dir)
     except ValueError:  # другой диск на Windows
         return None
-    if rel.split(os.sep, 1)[0] in (os.curdir, os.pardir) or not os.path.isfile(to_long_path(path)):
+    if rel.split(os.sep, 1)[0] in (os.curdir, os.pardir) or not os.path.isfile(to_long_path(src)):
         return None
-    target = os.path.join(download_dir, SET_ASIDE_DIRNAME, rel)
+    target = os.path.join(base_dir, SET_ASIDE_DIRNAME, rel)
     os.makedirs(to_long_path(os.path.dirname(target)), exist_ok=True)
-    base, ext = os.path.splitext(target)
+    folder, fname = os.path.split(target)
     cand, n = target, 1
     while os.path.lexists(to_long_path(cand)):
         n += 1
-        cand = f"{base} ({n}){ext}"
-    shutil.move(to_long_path(path), to_long_path(cand))
+        cand = os.path.join(folder, name_with_tag(fname, f" ({n})", MAX_NAME_LEN))
+    shutil.move(to_long_path(src), to_long_path(cand))
     return cand
 
 
@@ -206,6 +225,10 @@ def keep_awake() -> Iterator[None]:
                 pass
         if caffeinate is not None:
             caffeinate.terminate()
+            try:
+                caffeinate.wait(timeout=2)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
 
 
 # ── Выбор папок Диска ───────────────────────────────────────────────────────
@@ -497,7 +520,7 @@ def legacy_local_path(download_dir: str, remote_path: str) -> str | None:
 
 def ensure_dir(path: str | os.PathLike) -> None:
     """Создаёт директорию и все родительские, если их нет."""
-    os.makedirs(path, exist_ok=True)
+    os.makedirs(to_long_path(str(path)), exist_ok=True)
 
 
 def to_long_path(path: str) -> str:
@@ -540,7 +563,7 @@ def path_key(path: str) -> str:
     На Windows 'D:/YAD-bak\a_b\x.txt' и 'D:\YAD-bak\A_B\x.txt' — один и тот же файл. На macOS
     к тому же «ё» одной буквой и «е» с двумя точками (NFC и NFD) — одно имя.
     """
-    p = os.path.normpath(path)
+    p = os.path.normpath(_strip_long_prefix(path))
     if sys.platform == "darwin":
         p = unicodedata.normalize("NFC", p)
     return p.lower() if CASE_INSENSITIVE_PATHS else p
@@ -612,11 +635,43 @@ _WIN_SYSTEM_DIR_RE = re.compile(
     r"|\$recycle\.bin|users\\all users)(\\|$)"
 )
 _WIN_SYSTEM_ENV_VARS = ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData")
-_POSIX_SYSTEM_DIRS = ("/etc", "/usr", "/bin", "/sbin", "/var", "/lib", "/system", "/library")
+_POSIX_SYSTEM_DIRS = (
+    "/etc", "/private/etc", "/usr", "/bin", "/sbin", "/var", "/lib",
+    "/system", "/library", "/applications", "/boot", "/dev", "/proc", "/sys", "/root",
+)
+_UNC_ROOT_RE = re.compile(r"^\\\\[^\\]+\\[^\\]+\\?$")
 
 
 def _is_drive_root(path: str) -> bool:
-    return len(path) <= 3 and path.endswith((":\\", ":/"))
+    return (len(path) <= 3 and path.endswith((":\\", ":/"))) or bool(_UNC_ROOT_RE.match(path.replace("/", "\\")))
+
+
+def _check_forbidden_path(cand: str, original: str) -> str | None:
+    """Проверяет один нормализованный абсолютный путь против корней, HOME и системных папок."""
+    norm = cand.lower().replace("/", "\\")
+    if _is_drive_root(cand) or norm in ("\\", "/"):
+        return "Нельзя использовать корень диска целиком (укажите конкретную папку)"
+    home_dir = os.path.expanduser("~")
+    if home_dir and home_dir != "~":
+        home_norm = os.path.abspath(home_dir).lower().replace("/", "\\")
+        if norm == home_norm:
+            return (
+                "Нельзя использовать домашнюю папку пользователя целиком "
+                "(укажите конкретную папку бэкапа)"
+            )
+    for var in _WIN_SYSTEM_ENV_VARS:
+        val = os.environ.get(var)
+        if val:
+            val_norm = os.path.abspath(val).lower().replace("/", "\\")
+            if norm == val_norm or norm.startswith(val_norm + "\\"):
+                return f"Системная папка запрещена: {val}"
+    if _WIN_SYSTEM_DIR_RE.match(norm):
+        return f"Системная папка запрещена: {original}"
+    norm_posix = cand.replace("\\", "/").lower()
+    for bad in _POSIX_SYSTEM_DIRS:
+        if norm_posix == bad or norm_posix.startswith(bad + "/"):
+            return f"Системная папка запрещена: {bad}"
+    return None
 
 
 def is_safe_dir(path: str, *, must_exist: bool = False) -> tuple[bool, str]:
@@ -624,9 +679,10 @@ def is_safe_dir(path: str, *, must_exist: bool = False) -> tuple[bool, str]:
 
     Запрещены:
     - пустые или относительные пути
-    - корни дисков (C:\, D:\, /)
+    - корни дисков (C:\, D:\, /, \\server\share)
     - домашняя папка пользователя целиком (C:\Users\username или /home/user)
     - системные папки (Windows, Program Files, ProgramData, Recycle Bin, /etc, /usr, ...)
+    - симлинки и junction, ведущие в запрещённые папки
 
     must_exist=False — папку можно создать: достаточно, чтобы существовал
     ближайший существующий предок (целевая папка скачивания).
@@ -656,50 +712,30 @@ def is_safe_dir(path: str, *, must_exist: bool = False) -> tuple[bool, str]:
     except (OSError, ValueError):
         return False, "Невалидный путь"
 
-    norm = abs_path.lower().replace("/", "\\")
+    err = _check_forbidden_path(abs_path, abs_path)
+    if err:
+        return False, err
 
-    # Корень диска (C:\, D:\, /, \)
-    if _is_drive_root(abs_path) or norm in ("\\", "/"):
-        return False, "Нельзя использовать корень диска целиком (укажите конкретную папку)"
-
-    # Домашняя папка пользователя целиком
-    home_dir = os.path.expanduser("~")
-    if home_dir and home_dir != "~":
-        home_norm = os.path.abspath(home_dir).lower().replace("/", "\\")
-        if norm == home_norm or raw_norm == home_norm:
-            return False, (
-                "Нельзя использовать домашнюю папку пользователя целиком "
-                "(укажите конкретную папку бэкапа)"
-            )
-
-    # Системные папки Windows по переменным окружения (учитывают нестандартный диск)
-    for var in _WIN_SYSTEM_ENV_VARS:
-        val = os.environ.get(var)
-        if val:
-            val_norm = os.path.abspath(val).lower().replace("/", "\\")
-            if norm == val_norm or norm.startswith(val_norm + "\\"):
-                return False, f"Системная папка запрещена: {val}"
-
-    # Любой диск с системными папками Windows (C:\Windows, D:\Windows, ...)
-    if _WIN_SYSTEM_DIR_RE.match(norm):
-        return False, f"Системная папка запрещена: {abs_path}"
-
-    # Unix системные пути
-    norm_posix = abs_path.replace("\\", "/").lower()
-    for bad in _POSIX_SYSTEM_DIRS:
-        if norm_posix == bad or norm_posix.startswith(bad + "/"):
-            return False, f"Системная папка запрещена: {bad}"
+    # Разворачиваем симлинки/junction: ссылка на C:\Windows или /etc не должна проходить проверку
+    try:
+        real_path = _strip_long_prefix(os.path.realpath(to_long_path(abs_path)))
+    except OSError:
+        real_path = abs_path
+    if real_path != abs_path:
+        err = _check_forbidden_path(real_path, abs_path)
+        if err:
+            return False, err
 
     if must_exist:
-        if not os.path.isdir(abs_path):
+        if not os.path.isdir(to_long_path(abs_path)):
             return False, "Папка не существует"
         return True, "OK"
 
     # Папки ещё нет — должен существовать ближайший предок
     parent = Path(abs_path).parent
-    while not parent.exists() and parent != parent.parent:
+    while not os.path.exists(to_long_path(str(parent))) and parent != parent.parent:
         parent = parent.parent
-    if not parent.exists():
+    if not os.path.exists(to_long_path(str(parent))):
         return False, "Родительская директория недоступна"
     return True, "OK"
 
@@ -713,20 +749,21 @@ def is_safe_download_dir(path: str) -> tuple[bool, str]:
 
 
 def avoid_case_collision(local_path: str) -> str:
-    """На Windows два файла foo.txt и FOO.txt — одно и то же.
-    Если файл с таким именем (без учёта регистра) уже занят другим путём — добавляем суффикс _1, _2 и т.д.
+    """На Windows и macOS два файла foo.txt и FOO.txt — одно и то же.
+    Если файл с таким именем (без учёта регистра) уже занят другим регистром — добавляем суффикс _1, _2 и т.д.
     Учитываем только реально существующие файлы.
     """
-    if not IS_WINDOWS:
+    if not CASE_INSENSITIVE_PATHS:
         return local_path
     if not os.path.lexists(to_long_path(local_path)):
         return local_path  # такого имени нет ни в каком регистре: папку можно не читать
     parent = os.path.dirname(local_path)
     name = os.path.basename(local_path)
-    if not parent or not os.path.isdir(parent):
+    long_parent = to_long_path(parent) if parent else ""
+    if not parent or not os.path.isdir(long_parent):
         return local_path
     try:
-        existing = os.listdir(parent)
+        existing = os.listdir(long_parent)
     except OSError:
         return local_path
     if name in existing:
@@ -738,12 +775,12 @@ def avoid_case_collision(local_path: str) -> str:
 
 
 def _suffix_path(local_path: str, existing_lower: dict[str, str]) -> str:
-    base, ext = os.path.splitext(local_path)
+    parent, name = os.path.split(local_path)
     i = 1
     while True:
-        candidate = f"{base}_{i}{ext}"
-        if os.path.basename(candidate).lower() not in existing_lower:
-            return candidate
+        cand_name = name_with_tag(name, f"_{i}", MAX_NAME_LEN)
+        if cand_name.lower() not in existing_lower:
+            return os.path.join(parent, cand_name)
         i += 1
 
 
@@ -814,19 +851,6 @@ def local_copy_matches(local_path: str, size: int | None, md5: str | None) -> bo
         return compute_md5(local_path).lower() == md5.lower()
     except OSError:
         return False
-
-
-_URL_TAIL_RE = re.compile(r"(https?://[^/\s'\"?#]+)[/?#][^\s'\")]*")
-_URL_PATH_RE = re.compile(r"(\burl: )/[^\s'\")]*")
-
-
-def scrub_urls(text: object) -> str:
-    """Текст без путей и параметров ссылок: «…for url: https://downloader.disk.yandex.ru/…».
-
-    Подписанная ссылка на файл Яндекса — сама по себе доступ к нему (и uid владельца): в журналы,
-    базу и отчёт для поддержки она попадать не должна. Сервер в тексте остаётся.
-    """
-    return _URL_PATH_RE.sub(r"\1/…", _URL_TAIL_RE.sub(r"\1/…", str(text)))
 
 
 def remove_quiet(path: str) -> None:
@@ -949,13 +973,13 @@ def filesystem_type(path: str) -> str | None:
     """
     try:
         p = os.path.abspath(_strip_long_prefix(path))
-        while not os.path.exists(p):
+        while not os.path.exists(to_long_path(p)):
             parent = os.path.dirname(p)
             if parent == p:
                 return None
             p = parent
         if IS_WINDOWS:
-            return _windows_fs_type(p)
+            return _windows_fs_type(to_long_path(p))
         if sys.platform.startswith("linux"):
             with open("/proc/mounts", encoding="utf-8", errors="replace") as f:
                 return fs_type_from_mounts(os.path.realpath(p), f.read())
@@ -1066,118 +1090,3 @@ def ensure_utf8_stdio() -> None:
         except Exception:
             pass
 
-
-# ── Ссылки сообщества ────────────────────────────────────────────────────────
-TELEGRAM_CHANNEL = "https://t.me/davronsv"
-TELEGRAM_HANDLE = "@davronsv"
-YOUTUBE_VIDEO_URL = "https://www.youtube.com/watch?v=XAiJxqHkEUA"
-DONATION_URL = "https://dalink.to/davronsvv"
-
-
-def classify_yandex_error(exc: BaseException | str | None) -> dict:
-    """Анализирует ошибку и определяет, возникла ли она на стороне серверов Яндекса.
-
-    Возвращает словарь:
-    {
-        "is_yandex_server": bool,
-        "category": str,
-        "title": str,
-        "message": str,
-        "action": str,
-    }
-    """
-    if exc is None:
-        return {
-            "is_yandex_server": False,
-            "category": "none",
-            "title": "Ошибок нет",
-            "message": "Всё работает штатно",
-            "action": "",
-        }
-
-    err_str = str(exc).lower()
-    type_name = type(exc).__name__.lower() if isinstance(exc, BaseException) else ""
-
-    # 0. Локальный диск — проверяем ПЕРВЫМ: в тексте OSError есть путь к файлу,
-    #    а в пути бывают «500» и «notfound», которые ниже приняли бы за сбой Яндекса
-    if err_str.startswith("local_disk |") or (isinstance(exc, BaseException) and is_local_disk_error(exc)):
-        return {
-            "is_yandex_server": False,
-            "category": "local_disk",
-            "title": "Проблема с локальным диском",
-            "message": "Нет места, нет прав на запись или папка скачивания недоступна (отключён диск?).",
-            "action": "Освободите место или проверьте папку скачивания в настройках, затем повторите.",
-        }
-
-    # 1. 429 Too Many Requests (Rate limit Яндекса)
-    if "429" in err_str or "toomanyrequests" in err_str or "toomanyrequests" in type_name:
-        return {
-            "is_yandex_server": True,
-            "category": "rate_limit",
-            "title": "Лимит запросов Яндекса (HTTP 429 Too Many Requests)",
-            "message": "Серверы Яндекса временно ограничили частоту скачивания. Скрипт ожидает паузу.",
-            "action": f"Рекомендуется снизить число параллельных воркеров до 2–3. Новости: {TELEGRAM_CHANNEL}",
-        }
-
-    # 2. Сбои оборудования / дата-центров Яндекса (500, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout)
-    server_codes = ("500", "502", "503", "504")
-    server_types = ("badgateway", "gatewaytimeout", "internalserver", "unavailableerror", "servererror")
-    if (
-        any(code in err_str for code in server_codes)
-        or any(st in type_name for st in server_types)
-        or "bad gateway" in err_str
-        or "service unavailable" in err_str
-        or "gateway timeout" in err_str
-        or "prepare failed" in err_str
-    ):
-        return {
-            "is_yandex_server": True,
-            "category": "server_down",
-            "title": "Сбой дата-центра Яндекса (HTTP 50x / шторм серверов)",
-            "message": "Проблема на стороне серверов Яндекса (перегрузка или сбой узлов). Скрипт НЕ сломался!",
-            "action": f"Скрипт автоматически подождёт и продолжит. Проверьте статус в Telegram: {TELEGRAM_CHANNEL}",
-        }
-
-    # 3. Обрывы связи и сбросы TCP-соединений CDN Яндекса
-    conn_indicators = (
-        "connectionreset", "connection reset", "remotedisconnected",
-        "connection aborted", "read timed out", "connect timed out",
-        "connectionerror", "timeouterror"
-    )
-    if any(ci in err_str for ci in conn_indicators) or isinstance(exc, (ConnectionError, TimeoutError)):
-        return {
-            "is_yandex_server": True,
-            "category": "connection_drop",
-            "title": "Разрыв связи с сервером Яндекса",
-            "message": "CDN-узел Яндекса сбросил TCP-соединение или задержал ответ по таймауту.",
-            "action": "Скрипт автоматически восстановит соединение и повторит скачивание файла.",
-        }
-
-    # 4. Проблемы с авторизацией (клиентские: 401, 403, протухли куки/токен)
-    if "401" in err_str or "unauthorized" in err_str or "403" in err_str or "forbidden" in err_str or "passport.yandex" in err_str:
-        return {
-            "is_yandex_server": False,
-            "category": "auth_expired",
-            "title": "Срок действия токена или cookies истёк (401/403)",
-            "message": "Яндекс отклонил ключ доступа. Токен или cookies.json устарели.",
-            "action": f"Обновите токен или куки во вкладке 'Настройка'. Инструкция: {YOUTUBE_VIDEO_URL}",
-        }
-
-    # 5. Файл не найден (404)
-    if "404" in err_str or "pathnotfound" in err_str or "notfound" in err_str:
-        return {
-            "is_yandex_server": False,
-            "category": "not_found",
-            "title": "Файл не найден на Яндекс.Диске (404)",
-            "message": "Файл был удалён или перемещён в корзину на Диске.",
-            "action": "Файл безопасно пропущен в очереди.",
-        }
-
-    # 6. Прочие ошибки
-    return {
-        "is_yandex_server": False,
-        "category": "generic",
-        "title": "Ошибка скачивания",
-        "message": str(exc),
-        "action": f"При повторении проблемы напишите в Telegram: {TELEGRAM_CHANNEL}",
-    }

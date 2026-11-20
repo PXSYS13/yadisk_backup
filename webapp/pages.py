@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
-
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 import supporters
 from utils import APP_VERSION, DONATION_URL
 from webapp import paths
+from webapp.demo import demo_on
 from webapp.ports import APP_ID
 
 router = APIRouter()
@@ -22,7 +21,8 @@ def index():
         return HTMLResponse("<h1>UI не установлен</h1>")
     html = html_path.read_text(encoding="utf-8")
     # ?v=версия у статики — после обновления браузер не возьмёт старый JS из кэша
-    return HTMLResponse(html.replace("__APP_VERSION__", APP_VERSION))
+    return HTMLResponse(html.replace("__APP_VERSION__", APP_VERSION),
+                        headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/donate")
@@ -43,7 +43,7 @@ def api_supporters(demo: str | None = None):
 
     Синхронная функция — опрос /api/status не ждёт GitHub; список кешируется.
     """
-    data = supporters.demo() if demo and os.environ.get("YADISK_DEMO") == "1" else supporters.get_supporters()
+    data = supporters.demo() if demo_on(demo) else supporters.get_supporters()
     top_min = data.get("top_min_rub", supporters.TOP_MIN_RUB)
     return {"ok": True, **data, "people": supporters.count_people(data["supporters"]),
             "top": supporters.top_supporters(data["supporters"], top_min), "top_min_rub": top_min,

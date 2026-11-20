@@ -11,6 +11,7 @@ import os
 import sqlite3
 import sys
 from collections import Counter, defaultdict
+from contextlib import closing
 
 from utils import ensure_utf8_stdio, is_media, sqlite_tx
 
@@ -38,9 +39,13 @@ def folder_priority(path: str) -> int:
 def main() -> int:
     ensure_utf8_stdio()
 
-    conn = sqlite3.connect(DB, timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
+    with closing(sqlite3.connect(DB, timeout=30, isolation_level=None)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        return _run_dedupe(conn)
+
+
+def _run_dedupe(conn: sqlite3.Connection) -> int:
 
     # ── шаг 0: статистика до ────────────────────────────────────────────────
     before = conn.execute(
@@ -107,7 +112,7 @@ def main() -> int:
     dup_groups = 0
     saved_bytes = 0
 
-    for key, members in groups.items():
+    for _key, members in groups.items():
         if len(members) <= 1:
             continue
         dup_groups += 1
@@ -121,6 +126,7 @@ def main() -> int:
                 status_rank,
                 folder_priority(r["remote_path"]),
                 len(r["remote_path"]),
+                r["remote_path"],
             )
 
         # members_sorted[0] — тот, кого оставляем; остальные помечаем дублями
@@ -173,8 +179,6 @@ def main() -> int:
             pending_b = r["b"]
     print(f"  {'итого':<12} {total_after:>5} файлов   {bytes_after/1e9:.2f} ГБ")
     print(f"\n  💾 ОСТАЛОСЬ СКАЧАТЬ: {pending_n} файлов / {pending_b/1e9:.2f} ГБ")
-
-    conn.close()
     return 0
 
 

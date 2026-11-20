@@ -11,17 +11,20 @@ import io
 import math
 import os
 import sqlite3
+import tempfile
 import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from state import CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER, SELECTION_MARKERS
 from unlim_common import DEFERRED_MARKER
-from utils import human_bytes, sqlite_ro_uri, utc_ts
+from utils import human_bytes, utc_ts
 from webapp import paths
+from webapp.db_predicates import LINK_LIMIT_PREFIX, connect_ro, deferred_sql, limited_sql
+from webapp.demo import demo_on as _demo_on
 from webapp.folders import folder_split
 from webapp.queue_db import reason_text
 
@@ -113,6 +116,11 @@ def _source_db(source: str, db_override: Path | None = None) -> Path:
     return paths.LINKS_DB_FILE
 
 
+_LINK_LIMIT_PREFIX = LINK_LIMIT_PREFIX
+_DEFERRED_EXPR = deferred_sql("f")
+_LIMITED_EXPR = limited_sql("f")
+
+
 def _status_clause(source: str, status: str) -> tuple[str, list]:
     """SQL WHERE-условие для выбранного статуса (алиас таблицы f)."""
     if source == "disk":
@@ -127,16 +135,16 @@ def _status_clause(source: str, status: str) -> tuple[str, list]:
         done, done_p = "(f.status = 'downloaded')", []
         exc, exc_p = "(0)", []
 
-    deferred = "(f.status = 'pending' AND COALESCE(f.error, '') LIKE ?)"
-    deferred_p = [DEFERRED_MARKER + "%"]
-    limited = "(f.status = 'pending' AND COALESCE(f.error, '') LIKE 'link_limit |%')" if source == "links" else "(0)"
+    deferred = f"(f.status = 'pending' AND {_DEFERRED_EXPR})"
+    deferred_p = [DEFERRED_MARKER]
+    limited = f"(f.status = 'pending' AND {_LIMITED_EXPR})" if source == "links" else "(0)"
     queued = (
-        "(f.status = 'in_progress' OR (f.status = 'pending' "
-        "AND COALESCE(f.error, '') NOT LIKE ? AND COALESCE(f.error, '') NOT LIKE 'link_limit |%'))"
+        f"(f.status = 'in_progress' OR (f.status = 'pending' "
+        f"AND NOT ({_DEFERRED_EXPR}) AND NOT ({_LIMITED_EXPR})))"
         if source == "links"
-        else "(f.status = 'in_progress' OR (f.status = 'pending' AND COALESCE(f.error, '') NOT LIKE ?))"
+        else f"(f.status = 'in_progress' OR (f.status = 'pending' AND NOT ({_DEFERRED_EXPR})))"
     )
-    queued_p = [DEFERRED_MARKER + "%"]
+    queued_p = [DEFERRED_MARKER]
     not_done = "(f.status IN ('pending', 'in_progress', 'failed'))"
 
     if status == "all":
@@ -175,24 +183,26 @@ def _base_where(source: str, folder: str, link_id: int | None) -> tuple[list[str
     return clauses, params
 
 
-def _order_by(source: str, status: str, sort: str, id_col: str) -> str:
+def _order_by(source: str, status: str, sort: str, id_col: str, cols: set[str] | None = None) -> str:
+    has_name = cols is None or "name" in cols
+    has_dl = cols is None or "downloaded_at" in cols
     if sort == "name":
-        return f"COALESCE(f.name, f.{id_col}) ASC" if source == "unlim" else f"f.{id_col} ASC"
+        return f"COALESCE(f.name, f.{id_col}) ASC" if source == "unlim" and has_name else f"f.{id_col} ASC"
     if sort == "size_desc":
         return f"COALESCE(f.size, 0) DESC, f.{id_col} ASC"
     if sort == "size_asc":
         return f"COALESCE(f.size, 0) ASC, f.{id_col} ASC"
     if sort == "date_desc":
-        return f"replace(COALESCE(f.downloaded_at, ''), 'T', ' ') DESC, f.{id_col} ASC"
+        return f"replace(COALESCE(f.downloaded_at, ''), 'T', ' ') DESC, f.{id_col} ASC" if has_dl else f"f.{id_col} ASC"
     # default: для скачанных — самые свежие сверху; для нескачанных — сначала ошибки, потом отложенные, потом очередь
-    if status == "downloaded":
+    if status == "downloaded" and has_dl:
         return f"replace(COALESCE(f.downloaded_at, ''), 'T', ' ') DESC, f.{id_col} ASC"
     if status == "not_downloaded":
         return (
             "CASE "
             "WHEN f.status = 'failed' THEN 0 "
-            "WHEN f.status = 'pending' AND COALESCE(f.error, '') LIKE 'storage_down | %' THEN 1 "
-            "WHEN f.status = 'pending' AND COALESCE(f.error, '') LIKE 'link_limit |%' THEN 2 "
+            f"WHEN f.status = 'pending' AND substr(COALESCE(f.error, ''), 1, {len(DEFERRED_MARKER)}) = '{DEFERRED_MARKER}' THEN 1 "
+            f"WHEN f.status = 'pending' AND {_LIMITED_EXPR} THEN 2 "
             "ELSE 3 END ASC, "
             f"f.{id_col} ASC"
         )
@@ -221,13 +231,13 @@ def _collect_counts(c: sqlite3.Connection, source: str, from_sql: str,
     counts = _empty_counts()
     rows = c.execute(
         f"SELECT f.status, "
-        f"(COALESCE(f.error, '') LIKE ?) AS is_def, "
-        f"(COALESCE(f.error, '') LIKE 'link_limit |%') AS is_lim, "
+        f"({_DEFERRED_EXPR}) AS is_def, "
+        f"({_LIMITED_EXPR}) AS is_lim, "
         f"(COALESCE(f.error, '') IN (?, ?)) AS is_sel, "
         f"COUNT(*) AS n "
         f"FROM {from_sql} WHERE {where_sql} "
         f"GROUP BY f.status, is_def, is_lim, is_sel",
-        [DEFERRED_MARKER + "%", CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER, *base_params],
+        [DEFERRED_MARKER, CATEGORY_SKIP_MARKER, FOLDER_SKIP_MARKER, *base_params],
     )
     for r in rows:
         st, n = r["status"], int(r["n"])
@@ -293,8 +303,7 @@ def _format_row(source: str, r: sqlite3.Row) -> dict:
 
 
 def _open_ro(db_file: Path) -> sqlite3.Connection:
-    c = sqlite3.connect(sqlite_ro_uri(db_file), uri=True, timeout=30)
-    c.row_factory = sqlite3.Row
+    c = connect_ro(db_file)
     c.create_function("ci_contains", 2, _ci_contains)
     return c
 
@@ -350,12 +359,15 @@ def query_files(
                 where_params.append(q)
 
         where_sql = " AND ".join(where_parts) if where_parts else "1=1"
-        total = int(c.execute(f"SELECT COUNT(*) FROM {from_sql} WHERE {where_sql}", where_params).fetchone()[0])
+        if not q and status in counts:
+            total = counts[status]
+        else:
+            total = int(c.execute(f"SELECT COUNT(*) FROM {from_sql} WHERE {where_sql}", where_params).fetchone()[0])
         pages = max(1, math.ceil(total / limit))
         if page > pages:
             page = pages
         offset = (page - 1) * limit
-        order_sql = _order_by(source, status, sort, id_col)
+        order_sql = _order_by(source, status, sort, id_col, cols)
         sel = _select_columns(source, cols, id_col)
         rows = c.execute(
             f"SELECT {sel} FROM {from_sql} WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?",
@@ -377,9 +389,11 @@ def query_files(
 
 
 def _csv_safe(value: str) -> str:
-    """Защита от CSV-инъекции формул в Excel (=, +, -, @, табуляция, перенос)."""
+    """Защита от CSV-инъекции формул в Excel (=, +, -, @, табуляция, перенос, пробелы перед ними)."""
     s = str(value or "")
-    if s and s[0] in ("=", "+", "-", "@", "\t", "\r"):
+    stripped = s.lstrip(" \t\r\n")
+    if s and (s[0] in ("=", "+", "-", "@", "\t", "\r", "\n")
+              or (stripped and stripped[0] in ("=", "+", "-", "@"))):
         return "'" + s
     return s
 
@@ -394,6 +408,8 @@ def iter_files_for_export(
     db_file: Path | None = None,
 ) -> Iterator[dict]:
     """Читает файлы батчами по rowid (O(1) память даже на 250 000+ записях)."""
+    if source not in VALID_SOURCES:
+        raise ValueError(f"Неизвестный источник: {source}")
     status = status if status in VALID_STATUSES else "not_downloaded"
     q = (q or "").strip()
     db = _source_db(source, db_file)
@@ -442,8 +458,10 @@ def iter_export_bytes(
     if fmt == "txt":
         buf: list[str] = []
         for it in items:
-            prefix = f"[{it['link_name']}] " if source == "links" and it.get("link_name") else ""
-            buf.append(f"{prefix}{it['display_path']}\n")
+            raw_link = str(it.get("link_name") or "").replace("\r", " ").replace("\n", " ")
+            raw_path = str(it["display_path"] or "").replace("\r", " ").replace("\n", " ")
+            prefix = f"[{raw_link}] " if source == "links" and raw_link else ""
+            buf.append(f"{prefix}{raw_path}\n")
             if len(buf) >= 500:
                 yield "".join(buf).encode("utf-8")
                 buf.clear()
@@ -474,7 +492,7 @@ def iter_export_bytes(
             human_bytes(it["size"]) if it["size"] else "",
             _csv_safe(it["reason"]),
             _csv_safe(it["local_path"]),
-            it["downloaded_at_raw"],
+            _csv_safe(it["downloaded_at_raw"]),
             "да" if it["preview"] else "",
         ]
         if source == "links":
@@ -514,9 +532,19 @@ def export_to_file(
 
     dst = Path(out_path)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    with open(dst, "wb") as f:
-        for chunk in iter_export_bytes(_counting(), source, fmt):
-            f.write(chunk)
+    fd, tmp_name = tempfile.mkstemp(prefix=".export-", suffix=".tmp", dir=str(dst.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            for chunk in iter_export_bytes(_counting(), source, fmt):
+                f.write(chunk)
+        os.replace(tmp, dst)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
     return counted
 
 
@@ -568,6 +596,9 @@ def _demo_rows(source: str, link_id: int | None = None) -> list[dict]:
 def demo_file_list(source: str, *, status: str = "not_downloaded", q: str = "",
                    folder: str = "", link_id: int | None = None,
                    page: int = 1, limit: int = 100) -> dict:
+    status = status if status in VALID_STATUSES else "not_downloaded"
+    page = max(1, int(page))
+    limit = max(1, min(int(limit), 500))
     all_rows = _demo_rows(source, link_id)
     if source == "disk" and folder:
         _p, prefix = folder_split(folder)
@@ -604,10 +635,6 @@ def demo_file_list(source: str, *, status: str = "not_downloaded", q: str = "",
     }
 
 
-def _demo_on(demo: str | None) -> bool:
-    return bool(demo) and os.environ.get("YADISK_DEMO") == "1"
-
-
 # ── HTTP-маршруты ───────────────────────────────────────────────────────────
 
 
@@ -617,7 +644,7 @@ def api_file_list(
     status: str = "not_downloaded",
     q: str = "",
     folder: str = "",
-    link_id: int | None = None,
+    link_id: int | None = Query(default=None, ge=1, le=2 ** 63 - 1),
     sort: str = "default",
     page: int = 1,
     limit: int = 100,
@@ -637,7 +664,7 @@ def api_file_list_export(
     format: str = "csv",  # noqa: A002
     q: str = "",
     folder: str = "",
-    link_id: int | None = None,
+    link_id: int | None = Query(default=None, ge=1, le=2 ** 63 - 1),
     demo: str | None = None,
 ):
     if source not in VALID_SOURCES:
@@ -650,6 +677,17 @@ def api_file_list_export(
     if _demo_on(demo):
         items = iter(demo_file_list(source, status=st, q=q, folder=folder, link_id=link_id, limit=500)["items"])
     else:
+        db = _source_db(source)
+        if db.exists():
+            c = None
+            try:
+                c = _open_ro(db)
+                c.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            except sqlite3.Error as e:
+                raise HTTPException(503, f"База данных занята: {e}") from None
+            finally:
+                if c is not None:
+                    c.close()
         items = iter_files_for_export(source, status=st, q=q, folder=folder, link_id=link_id)
     return StreamingResponse(
         iter_export_bytes(items, source, fmt),

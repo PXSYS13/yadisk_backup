@@ -75,6 +75,20 @@ CREATE TABLE IF NOT EXISTS verify_problems (
     remote_path TEXT PRIMARY KEY,
     kind TEXT NOT NULL
 );
+-- Даты папок с Яндекса (created, modified): после скачивания выставляются локальным папкам
+-- снизу вверх (см. file_dates.apply_folder_dates)
+CREATE TABLE IF NOT EXISTS folders (
+    remote_path TEXT PRIMARY KEY,
+    created REAL,
+    modified REAL
+);
+-- Кэш MD5 для ускорения повторных проверок (main.py verify; --full пересчитывает с диска)
+CREATE TABLE IF NOT EXISTS verify_cache (
+    local_path TEXT PRIMARY KEY,
+    size INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    md5 TEXT NOT NULL
+);
 """
 
 # Маркер отложенного файла в колонке error (его же считает db_stats в webui.py)
@@ -125,7 +139,6 @@ class State:
                 isolation_level=None,  # autocommit; явные транзакции через BEGIN
                 check_same_thread=False,
             )
-            conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("PRAGMA foreign_keys=ON;")
             conn.row_factory = sqlite3.Row
@@ -137,12 +150,13 @@ class State:
     def _init_schema(self) -> None:
         with self._lock:
             conn = self._conn()
+            conn.execute("PRAGMA journal_mode=WAL;")
             conn.executescript(SCHEMA)
             cols = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
             # modified — когда файл менялся на Диске (секунды эпохи): то же время получает копия.
             # dated — modified, с которым уже сверили дату скачанной копии (file_dates)
             for col, kind in (("storage_host", "TEXT"), ("preview_path", "TEXT"), ("modified", "REAL"),
-                              ("dated", "REAL")):
+                              ("created", "REAL"), ("dated", "REAL")):
                 if col in cols:
                     continue
                 try:
@@ -150,6 +164,16 @@ class State:
                 except sqlite3.OperationalError as e:  # колонку успел добавить другой процесс
                     if "duplicate column" not in str(e).lower():
                         raise
+            # Индексы для баз на 200k–500k файлов: очередь, уборка превью и возврат дат
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_files_status_size ON files(status, size)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_previews ON files(preview_path) "
+                "WHERE preview_path IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_undated ON files(status) "
+                "WHERE modified IS NOT NULL AND (dated IS NULL OR dated <> modified)"
+            )
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
@@ -196,20 +220,25 @@ class State:
         обновляем размер и MD5: файл мог измениться, пока его папка была не выбрана,
         и после возврата в очередь проверка скачанного сравнит его со старыми данными.
 
-        items — (remote_path, size, md5) или (remote_path, size, md5, modified).
+        items — (remote_path, size, md5), (..., modified) или (..., modified, created).
         """
-        items_list = [(*item[:3], item[3] if len(item) > 3 else None, *SELECTION_MARKERS) for item in items]
+        items_list = [
+            (*item[:3], item[3] if len(item) > 3 else None,
+             item[4] if len(item) > 4 else None, *SELECTION_MARKERS)
+            for item in items
+        ]
         if not items_list:
             return
         with self._tx() as conn:
             conn.executemany(
                 """
-                INSERT INTO files (remote_path, size, md5, modified, status)
-                VALUES (?, ?, ?, ?, 'pending')
+                INSERT INTO files (remote_path, size, md5, modified, created, status)
+                VALUES (?, ?, ?, ?, ?, 'pending')
                 ON CONFLICT(remote_path) DO UPDATE SET
                     size = excluded.size,
                     md5 = COALESCE(excluded.md5, files.md5),
                     modified = COALESCE(excluded.modified, files.modified),
+                    created = COALESCE(excluded.created, files.created),
                     status = CASE
                         WHEN files.status IN ('downloaded', 'skipped') AND files.error IS NULL
                              AND excluded.md5 IS NOT NULL AND files.md5 IS NOT NULL
@@ -222,24 +251,40 @@ class State:
                 items_list,
             )
 
-    def mark_downloaded(self, remote_path: str, local_path: str) -> str | None:
+    def mark_downloaded(self, remote_path: str, local_path: str,
+                        dated: float | None = None) -> str | None:
         """Файл скачан. Возвращает путь его страховочного превью, если оно записано:
         оригинал теперь на месте, превью пора убрать (downloader удаляет файл и
-        зовёт clear_previews)."""
+        зовёт clear_previews). Если дата уже выставлена при скачивании, передаётся dated."""
         with self._tx() as conn:
             preview = self._preview_of(conn, remote_path)
-            conn.execute(
-                """
-                UPDATE files
-                   SET status = 'downloaded',
-                       local_path = ?,
-                       error = NULL,
-                       storage_host = NULL,
-                       downloaded_at = ?
-                 WHERE remote_path = ?
-                """,
-                (local_path, _utc_now(), remote_path),
-            )
+            if dated is not None:
+                conn.execute(
+                    """
+                    UPDATE files
+                       SET status = 'downloaded',
+                           local_path = ?,
+                           error = NULL,
+                           storage_host = NULL,
+                           downloaded_at = ?,
+                           dated = ?
+                     WHERE remote_path = ?
+                    """,
+                    (local_path, _utc_now(), dated, remote_path),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE files
+                       SET status = 'downloaded',
+                           local_path = ?,
+                           error = NULL,
+                           storage_host = NULL,
+                           downloaded_at = ?
+                     WHERE remote_path = ?
+                    """,
+                    (local_path, _utc_now(), remote_path),
+                )
         return preview
 
     def mark_skipped(self, remote_path: str, local_path: str) -> str | None:
@@ -337,7 +382,7 @@ class State:
             chunk = ids[start:start + PENDING_CHUNK]
             rows = {r["rowid"]: r for r in conn.execute(
                 "SELECT rowid, remote_path, size, md5, local_path, error, storage_host, preview_path, "
-                "modified, downloaded_at "
+                "modified, created, downloaded_at "
                 f"FROM files WHERE status='pending' AND rowid IN ({','.join('?' * len(chunk))})",
                 chunk,
             )}
@@ -357,14 +402,15 @@ class State:
         last = 0
         while True:
             rows = conn.execute(
-                "SELECT rowid, remote_path, local_path, size, modified, downloaded_at FROM files "
+                "SELECT rowid, remote_path, local_path, size, modified, created, downloaded_at FROM files "
                 f"WHERE {_DATES_TO_CHECK} AND rowid > ? ORDER BY rowid LIMIT ?",
                 (last, PENDING_CHUNK),
             ).fetchall()
             if not rows:
                 return
             last = rows[-1]["rowid"]
-            yield [DateRow(r["remote_path"], r["local_path"], r["size"], r["modified"], r["downloaded_at"])
+            yield [DateRow(r["remote_path"], r["local_path"], r["size"], r["modified"],
+                           r["downloaded_at"], r["created"])
                    for r in rows]
 
     def mark_dated(self, items: Iterable[tuple[float | None, str]]) -> None:
@@ -374,6 +420,81 @@ class State:
             return
         with self._tx() as conn:
             conn.executemany("UPDATE files SET dated = ? WHERE remote_path = ?", items)
+
+    # ── даты папок ────────────────────────────────────────────────────
+
+    def save_folders_batch(self, items: Iterable[tuple[str, float | None, float | None]]) -> None:
+        """Сохраняет (remote_path, created, modified) папок Диска. Уже известные не затирает NULL-ами."""
+        rows = [(p.rstrip("/"), c, m) for p, c, m in items if p and p.rstrip("/") not in ("", "disk:")]
+        if not rows:
+            return
+        with self._tx() as conn:
+            conn.executemany(
+                """
+                INSERT INTO folders (remote_path, created, modified)
+                VALUES (?, ?, ?)
+                ON CONFLICT(remote_path) DO UPDATE SET
+                    created = COALESCE(excluded.created, folders.created),
+                    modified = COALESCE(excluded.modified, folders.modified)
+                """,
+                rows,
+            )
+
+    def get_folder_dates(self) -> dict[str, tuple[float | None, float | None]]:
+        """Все сохранённые даты папок: remote_path → (created, modified)."""
+        rows = self._conn().execute("SELECT remote_path, created, modified FROM folders").fetchall()
+        return {r["remote_path"]: (r["created"], r["modified"]) for r in rows}
+
+    def known_folder_paths(self) -> set[str]:
+        """Папки, для которых в таблице folders уже известна хотя бы одна дата."""
+        rows = self._conn().execute(
+            "SELECT remote_path FROM folders WHERE created IS NOT NULL OR modified IS NOT NULL"
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    def unique_parent_folders(self) -> set[str]:
+        """Все уникальные родительские папки из таблицы files (disk:/Фото, disk:/Фото/2023, ...)."""
+        parents: set[str] = set()
+        for (rpath,) in self._conn().execute("SELECT remote_path FROM files"):
+            if not rpath:
+                continue
+            cur = rpath.rstrip("/")
+            while True:
+                idx = cur.rfind("/")
+                if idx <= 5:  # 'disk:/' имеет длину 6
+                    break
+                cur = cur[:idx]
+                if cur in parents:
+                    break  # все предки cur уже добавлены
+                parents.add(cur)
+        return parents
+
+    def derive_folder_dates_from_files(self) -> dict[str, tuple[float | None, float | None]]:
+        """Запасной расчёт дат папок по файлам внутри них: (min created/modified, max modified)."""
+        bounds: dict[str, list[float]] = {}
+        for rpath, mod, cr in self._conn().execute(
+            "SELECT remote_path, modified, created FROM files "
+            "WHERE modified IS NOT NULL OR created IS NOT NULL"
+        ):
+            if not rpath:
+                continue
+            c_val = min(x for x in (cr, mod) if x is not None)
+            m_val = mod if mod is not None else cr
+            cur = rpath.rstrip("/")
+            while True:
+                idx = cur.rfind("/")
+                if idx <= 5:
+                    break
+                cur = cur[:idx]
+                b = bounds.get(cur)
+                if b is None:
+                    bounds[cur] = [c_val, m_val]
+                else:
+                    if c_val < b[0]:
+                        b[0] = c_val
+                    if m_val > b[1]:
+                        b[1] = m_val
+        return {k: (v[0], v[1]) for k, v in bounds.items()}
 
     def get_pending_stats(self) -> dict[str, int]:
         """Быстро возвращает количество и сумму байт pending файлов."""
@@ -399,59 +520,64 @@ class State:
             n = os.path.normcase(os.path.abspath(path))
             return n == root or n.startswith(root + os.sep)
 
-        with self._tx() as conn:
-            # Занятые пути — только у файлов, которые реально лежат на диске
-            existing_paths: set[str] = {
-                path_key(r["local_path"])
-                for r in conn.execute(
-                    "SELECT local_path FROM files "
-                    "WHERE status IN ('downloaded', 'skipped') "
-                    "AND local_path IS NOT NULL AND local_path != ''"
-                )
-            }
-
-            rows = conn.execute(
-                "SELECT remote_path, local_path FROM files "
-                "WHERE status IN ('pending', 'failed') ORDER BY remote_path ASC"
-            ).fetchall()
-
-            # Сначала регистрируем те, чьи назначения остаются в силе,
-            # потом считаем новые — чтобы новые не столкнулись со старыми.
-            to_assign: list[str] = []
-            for r in rows:
-                lp = r["local_path"]
-                if lp and under_root(lp) and not _never_writable(lp):
-                    existing_paths.add(path_key(lp))
-                else:
-                    to_assign.append(r["remote_path"])
-
-            if not to_assign:
-                return
-
-            # Сначала пути, которые не пришлось чистить: «a_b/x.txt» получит чистое имя,
-            # а «a:b/x.txt» (после чистки тоже a_b/x.txt) — хеш. Сортировка устойчивая:
-            # внутри групп порядок remote_path сохраняется.
-            order = sorted(((not remote_path_is_clean(rp), rp) for rp in to_assign),
-                           key=lambda t: t[0])
-            dir_exists: dict[str, bool] = {}
-            updates: list[tuple[str, str]] = []
-            for dirty, rp in order:
-                old = legacy_local_path(download_dir, rp) if dirty else None
-                if old and path_key(old) not in existing_paths:
-                    folder = os.path.dirname(old)
-                    if folder not in dir_exists:
-                        dir_exists[folder] = os.path.isdir(to_long_path(folder))
-                    # Файл уже лежит под именем до 2.3.1 (например, после «Забыть список
-                    # файлов») — оставляем это имя, а не качаем его второй раз под новым
-                    if dir_exists[folder] and os.path.isfile(to_long_path(old)):
-                        existing_paths.add(path_key(old))
-                        updates.append((old, rp))
-                        continue
-                updates.append((resolve_local_path(download_dir, rp, existing_paths), rp))
-            conn.executemany(
-                "UPDATE files SET local_path = ? WHERE remote_path = ?",
-                updates,
+        # Читаем состояние и считаем новые пути ВНЕ write-транзакции: на 300k файлов и
+        # медленном диске файловые проверки не должны держать BEGIN IMMEDIATE для Web UI
+        conn = self._conn()
+        existing_paths: set[str] = {
+            path_key(r["local_path"])
+            for r in conn.execute(
+                "SELECT local_path FROM files "
+                "WHERE status IN ('downloaded', 'skipped') "
+                "AND local_path IS NOT NULL AND local_path != ''"
             )
+        }
+
+        rows = conn.execute(
+            "SELECT remote_path, local_path FROM files "
+            "WHERE status IN ('pending', 'failed') ORDER BY remote_path ASC"
+        ).fetchall()
+
+        # Сначала регистрируем те, чьи назначения остаются в силе,
+        # потом считаем новые — чтобы новые не столкнулись со старыми.
+        to_assign: list[str] = []
+        for r in rows:
+            lp = r["local_path"]
+            if lp and under_root(lp) and not _never_writable(lp):
+                existing_paths.add(path_key(lp))
+            else:
+                to_assign.append(r["remote_path"])
+
+        if not to_assign:
+            return
+
+        # Сначала пути, которые не пришлось чистить: «a_b/x.txt» получит чистое имя,
+        # а «a:b/x.txt» (после чистки тоже a_b/x.txt) — хеш. Сортировка устойчивая:
+        # внутри групп порядок remote_path сохраняется.
+        order = sorted(((not remote_path_is_clean(rp), rp) for rp in to_assign),
+                       key=lambda t: t[0])
+        dir_exists: dict[str, bool] = {}
+        updates: list[tuple[str, str]] = []
+        for dirty, rp in order:
+            old = legacy_local_path(download_dir, rp) if dirty else None
+            if old and path_key(old) not in existing_paths:
+                folder = os.path.dirname(old)
+                if folder not in dir_exists:
+                    dir_exists[folder] = os.path.isdir(to_long_path(folder))
+                # Файл уже лежит под именем до 2.3.1 (например, после «Забыть список
+                # файлов») — оставляем это имя, а не качаем его второй раз под новым
+                if dir_exists[folder] and os.path.isfile(to_long_path(old)):
+                    existing_paths.add(path_key(old))
+                    updates.append((old, rp))
+                    continue
+            updates.append((resolve_local_path(download_dir, rp, existing_paths), rp))
+
+        chunk_size = 5000
+        for start in range(0, len(updates), chunk_size):
+            with self._tx() as tx:
+                tx.executemany(
+                    "UPDATE files SET local_path = ? WHERE remote_path = ?",
+                    updates[start:start + chunk_size],
+                )
 
     def part_named_paths(self) -> tuple[set[str], set[str]]:
         """Пути «….part», занятые файлами Диска: (ключи path_key их local_path, remote_path
@@ -495,6 +621,25 @@ class State:
             conn.execute("DELETE FROM verify_problems")
             conn.executemany(
                 "INSERT OR REPLACE INTO verify_problems (remote_path, kind) VALUES (?, ?)", problems
+            )
+
+    def get_verify_cache(self) -> dict[str, tuple[int, int, str]]:
+        """Кэш проверенных MD5: path_key(local_path) → (size, mtime_ns, md5)."""
+        rows = self._conn().execute(
+            "SELECT local_path, size, mtime_ns, md5 FROM verify_cache"
+        ).fetchall()
+        return {path_key(r["local_path"]): (int(r["size"]), int(r["mtime_ns"]), str(r["md5"])) for r in rows}
+
+    def save_verify_cache(self, entries: Iterable[tuple[str, int, int, str]]) -> None:
+        """Сохраняет (local_path, size, mtime_ns, md5) для ускорения повторных проверок."""
+        rows = list(entries)
+        if not rows:
+            return
+        with self._tx() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO verify_cache (local_path, size, mtime_ns, md5) "
+                "VALUES (?, ?, ?, ?)",
+                rows,
             )
 
     def requeue_verify_problems(self, kinds: Iterable[str] = ("missing", "size", "md5"),

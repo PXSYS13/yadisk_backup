@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
 import threading
@@ -16,27 +17,50 @@ from fastapi import HTTPException
 from utils import CATEGORY_LABELS, MAX_DISK_FOLDERS, decode_disk_folders, previews_enabled, safe_int
 from webapp import paths
 
+log = logging.getLogger("webui")
+
 # Источники, которые умеет качать «Режим спасения»
 SOURCES = ("disk", "unlim")
 # python-dotenv переписывает .env целиком: два сохранения сразу (переключатели в настройках
 # шлют запросы независимо) затирали бы друг друга
 ENV_LOCK = threading.RLock()
+_env_cache: dict = {"key": None, "saved": {}}
+
+
+def _sync_dotenv() -> dict:
+    """Перечитывает .env с диска только если файл изменился (mtime_ns, size) или сменился путь."""
+    env_file = paths.ENV_FILE
+    try:
+        st = env_file.stat()
+        cache_key = (str(env_file), st.st_mtime_ns, st.st_size)
+    except OSError:
+        cache_key = (str(env_file), None, None)
+    if _env_cache["key"] == cache_key:
+        return _env_cache["saved"]
+    if cache_key[1] is not None:
+        load_dotenv(env_file, override=True)
+        try:
+            saved = dict(dotenv_values(env_file))
+        except Exception:
+            saved = {}
+    else:
+        saved = {}
+    _env_cache["key"] = cache_key
+    _env_cache["saved"] = saved
+    return saved
 
 
 def get_config() -> dict:
-    """Перечитывает .env заново."""
-    load_dotenv(paths.ENV_FILE, override=True)
-    try:
-        saved = dotenv_values(paths.ENV_FILE) if paths.ENV_FILE.exists() else {}
-    except Exception:
-        saved = {}
-    return {
-        "token": (os.getenv("YA_DISK_TOKEN", "") or "").strip(),
-        "download_dir": (os.getenv("DOWNLOAD_DIR", str(paths.PROJECT / "downloads")) or "").strip(),
-        # Папку выбирали осознанно (есть в .env), а не взяли дефолт
-        "download_dir_set": bool((saved.get("DOWNLOAD_DIR") or "").strip()),
-        "max_workers": safe_int(os.getenv("MAX_WORKERS"), default=4, min_val=1, max_val=16),
-    }
+    """Читает настройки из .env и окружения (парсинг .env кэшируется по mtime/size)."""
+    with ENV_LOCK:
+        saved = _sync_dotenv()
+        return {
+            "token": (os.getenv("YA_DISK_TOKEN", "") or "").strip(),
+            "download_dir": (os.getenv("DOWNLOAD_DIR", str(paths.PROJECT / "downloads")) or "").strip(),
+            # Папку выбирали осознанно (есть в .env), а не взяли дефолт
+            "download_dir_set": bool((saved.get("DOWNLOAD_DIR") or "").strip()),
+            "max_workers": safe_int(os.getenv("MAX_WORKERS"), default=4, min_val=1, max_val=16),
+        }
 
 
 def mask_token(token: str) -> str:
@@ -92,8 +116,8 @@ def set_resume_pending(on: bool) -> None:
         return
     try:
         env_set_verified(RESUME_PENDING, "1" if on else "")
-    except (HTTPException, OSError):
-        pass
+    except (HTTPException, OSError) as e:
+        log.warning("не удалось сохранить флаг автопродолжения: %s", e)
 
 
 def owner_only(path) -> None:
@@ -119,6 +143,7 @@ def env_set(key: str, value: str, quote_mode: str = "always") -> None:
         ensure_env_file()
         set_key(str(paths.ENV_FILE), key, value, quote_mode=quote_mode)
         load_dotenv(paths.ENV_FILE, override=True)
+        _env_cache["key"] = None
 
 
 def env_set_verified(key: str, value: str) -> None:
@@ -138,3 +163,4 @@ def env_set_verified(key: str, value: str) -> None:
             raise HTTPException(500, "Не получилось сохранить настройку: файл .env прочитался иначе. "
                                      "Скачайте отчёт для поддержки во вкладке «Помощь»")
         os.environ[key] = value
+        _env_cache["key"] = None

@@ -64,18 +64,21 @@ async def csrf_guard(request, call_next):
     не только чтением (отчёт для поддержки пишет архив, дерево папок тратит лимит запросов
     к Яндексу), а <img src="http://127.0.0.1:8000/api/…"> с чужого сайта Origin не шлёт.
     """
-    host = (request.headers.get("host") or "").lower()
-    if host and host not in _ALLOWED_HOSTS:
+    host = (request.headers.get("host") or "").strip().lower()
+    if not host or host not in _ALLOWED_HOSTS:
         return JSONResponse({"detail": "Forbidden host"}, status_code=403)
     # Браузер ставит этот заголовок сам; same-site — это и копия программы на соседнем порте
     site = request.headers.get("sec-fetch-site")
     if site and site not in ("same-origin", "none") and request.url.path.startswith("/api/"):
         return JSONResponse({"detail": "Forbidden site"}, status_code=403)
     if request.method in ("POST", "PUT", "DELETE", "PATCH"):
-        origin = request.headers.get("origin") or ""
+        origin = (request.headers.get("origin") or "").strip().lower()
         if origin and origin not in _ALLOWED_ORIGINS:
             return JSONResponse({"detail": "Forbidden origin"}, status_code=403)
-    return await call_next(request)
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
 
 
 # ── Выбор порта ──
@@ -126,7 +129,7 @@ def _ask_port(port: int, path: str, timeout: float) -> dict | None:
         resp = conn.getresponse()
         if resp.status != 200:
             return None
-        data = json.loads(resp.read())
+        data = json.loads(resp.read(65536))
     except (OSError, ValueError, http.client.HTTPException):
         return None
     finally:
@@ -236,16 +239,21 @@ def open_browser_when_ready(host: str, port: int):
     url = f"http://{host}:{port}"
     for _ in range(60):  # ждём до ~30 сек
         time.sleep(0.5)
+        conn = None
         try:
             conn = http.client.HTTPConnection(host, port, timeout=1)
-            conn.request("GET", "/api/status")
+            conn.request("GET", "/api/hello")
             resp = conn.getresponse()
             if resp.status == 200:
-                conn.close()
                 break
-            conn.close()
         except Exception:
             pass
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
     try:
         webbrowser.open(url)
     except Exception:
