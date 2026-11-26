@@ -371,3 +371,46 @@ def test_empty_answer_does_not_wipe_the_supporters(tmp_path):
     with pytest.raises(ss.SyncError):
         ss.sync("t", path=path, opener=opener, pause=0)
     assert json.loads(path.read_text(encoding="utf-8"))["supporters"][0]["name"] == "Анна"
+
+
+def test_csv_import_adds_new_and_skips_footer(tmp_path, capsys):
+    path = tmp_path / "supporters.json"
+    path.write_text(json.dumps({
+        "updated": "2026-11-19",
+        "hidden": ["20"],
+        "no_message": ["21"],
+        "supporters": [
+            {"id": "da-10", "name": "Старый", "amount": 100, "currency": "RUB", "date": "2026-11-10", "message": None},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    csv_file = tmp_path / "donations.csv"
+    csv_file.write_text(
+        'id;username;message;amount;profit;commission;currency;created_at\n'
+        '22;"Ser Bo";;500;440;60;RUB;"2026-11-20 11:57:12"\n'
+        '21;;"Скрытое слово";500;500;0;RUB;"2026-11-24 18:27:35"\n'
+        '20;Спамер;реклама;10;10;0;RUB;"2026-11-25 01:00:00"\n'
+        '19;Ноль;;0;0;0;RUB;"2026-11-25 02:00:00"\n'
+        '"# Total: 4 rows"\n',
+        encoding="utf-8-sig",
+    )
+    assert ss.import_csv(csv_file, path=path, today="2026-11-27") is True
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert [(x["id"], x["name"], x["amount"], x["message"]) for x in data["supporters"]] == [
+        ("da-21", "Аноним", 500, None),
+        ("da-22", "Ser Bo", 500, None),
+        ("da-10", "Старый", 100, None),
+    ]
+    assert data["updated"] == "2026-11-27"
+    assert "новых: 3" in capsys.readouterr().out
+    assert ss.import_csv(csv_file, path=path, today="2026-11-28") is False
+
+
+def test_csv_import_refuses_empty_csv(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "supporters.json"
+    path.write_text('{"supporters": []}', encoding="utf-8")
+    monkeypatch.setattr(ss, "SUPPORTERS_FILE", path)
+    bad = tmp_path / "empty.csv"
+    bad.write_text("id;username;amount\n\"# Total: 0 rows\"\n", encoding="utf-8")
+    assert ss.main(["--from-csv", str(bad)]) == 1
+    assert "В CSV-файле нет донатов" in capsys.readouterr().out
+    assert path.read_text(encoding="utf-8") == '{"supporters": []}'

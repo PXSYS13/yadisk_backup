@@ -1,19 +1,30 @@
 [project]
 name = "yadisk-backup"
-version = "2.9.0"
-description = "Бесплатная программа, которая сохраняет на компьютер весь Яндекс.Диск и безлимит фото"
+version = "3.0.0"
+description = "Бесплатная программа: бэкап Яндекс.Диска, загрузка фото и видео в Безлимит и офлайн-сортировка по людям и датам"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = [
+    "av>=13.0.0",
     "fastapi>=0.115.0",
     "markdown>=3.6",
+    "numpy>=1.26.0",
+    "onnxruntime>=1.19.0",
+    "pillow>=10.4.0",
+    "pillow-heif>=0.18.0",
     "python-dotenv>=1.2.3",
     "requests>=2.31.0",
+    "scipy>=1.13.0",
     "tenacity>=8.2.0",
     "tqdm>=4.66.0",
     "uvicorn>=0.32.0",
     "yadisk[sync_defaults]>=3.4.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "onnxruntime-directml>=1.19.0; sys_platform == 'win32'",
 ]
 
 [dependency-groups]

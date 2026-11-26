@@ -26,6 +26,14 @@ def _isolate_project_files(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp.paths, "DB_FILE", tmp_path / "state.db")
     monkeypatch.setattr(webapp.paths, "UNLIM_DB_FILE", tmp_path / "unlim_state.db")
     monkeypatch.setattr(webapp.paths, "LINKS_DB_FILE", tmp_path / "links_state.db")
+    monkeypatch.setattr(webapp.paths, "UPLOAD_DB_FILE", tmp_path / "upload_unlim_state.db")
+    monkeypatch.setattr(webapp.paths, "UPLOAD_CONFIG_FILE", tmp_path / "upload_unlim_config.json")
+    monkeypatch.setattr(webapp.paths, "PEOPLE_DB_FILE", tmp_path / "people_sorter.db")
+    monkeypatch.setattr(webapp.paths, "PEOPLE_CONFIG_FILE", tmp_path / "people_sorter_config.json")
+    monkeypatch.setattr(webapp.paths, "PEOPLE_MODELS_DIR", tmp_path / ".models")
+    monkeypatch.setattr(webapp.paths, "PEOPLE_CACHE_DIR", tmp_path / ".cache")
+    monkeypatch.setattr(webapp.paths, "PEOPLE_CROPS_DIR", tmp_path / ".cache" / "crops")
+    monkeypatch.setattr(webapp.paths, "PEOPLE_THUMBS_DIR", tmp_path / ".cache" / "thumbs")
     monkeypatch.setattr(public_download, "DB_FILE", tmp_path / "links_state.db")
     monkeypatch.setattr(public_download, "ENV_FILE", tmp_path / ".env")
     monkeypatch.setattr(webapp.paths, "LOG_DIR", tmp_path / "logs")
@@ -50,7 +58,21 @@ def _isolate_project_files(tmp_path, monkeypatch):
                 "YADISK_WEBUI", "BACKUP_RESUME_ON_START", "BACKUP_RESUME_PENDING"):
         monkeypatch.setenv(key, "")
     monkeypatch.setenv("DOWNLOAD_DIR", str(tmp_path / "downloads"))
+    import sorter.paths as sorter_paths
+    import sorter.webapp.manager as sorter_mgr_mod
+    import uploader.webapp.manager as upload_mgr_mod
+    import webapp.people as people_mod
+
+    sorter_paths.configure_data_dir(None)
+    fresh_upload_mgr = upload_mgr_mod.UploadManager()
+    fresh_people_mgr = sorter_mgr_mod.TaskManager()
+    monkeypatch.setattr(upload_mgr_mod, "manager", fresh_upload_mgr)
+    monkeypatch.setattr(sorter_mgr_mod, "manager", fresh_people_mgr)
+    monkeypatch.setattr(people_mod, "manager", fresh_people_mgr)
     yield
+    fresh_upload_mgr.shutdown(timeout=5.0)
+    fresh_people_mgr.shutdown(timeout=5.0)
+    sorter_paths.configure_data_dir(None)
     # unlim_download держит соединение с базой на поток: закрываем то, что открыл тест
     ud = sys.modules.get("unlim_download")
     conn = getattr(getattr(ud, "_tls", None), "c", None)

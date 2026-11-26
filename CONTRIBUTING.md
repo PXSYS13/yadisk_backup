@@ -28,12 +28,21 @@ webapp/               сервер интерфейса по разделам:
   rescue_view.py      сводка для Главной (/api/status.rescue) — чистые функции
   status.py           /api/status
   control.py          кнопки: запуск, повторы, настройки, папки, сортировка
+  upload_unlim.py     /api/upload/* — загрузка локальных фото и видео в Безлимит (/photounlim)
+  people.py           /api/people/* — локальный поиск лиц, учёт взросления детей и раскладка с откатом
   tasks.py            фоновые процессы (CLI-скрипты) по слотам и их журналы
   queue_db.py         счётчики и выбор «что качать» в state.db и unlim_state.db
   access.py, links.py, folders.py, logs.py, …  остальные разделы (список — в webapp/__init__.py)
 webui_assets/
   app.html            каркас интерфейса
   static/             app.css и js/: core.js, components.js, screens/*.js (без сборки)
+
+uploader/             движок загрузки локальных фото и видео в Безлимит (общие cookies.json)
+sorter/               локальный движок сортировки фото и видео по людям:
+  vision/             ONNX SCRFD-10G + ArcFace R100 (antelopev2) + GenderAge + PyAV (с учётом поворота видео)
+  clustering/         ограниченная кластеризация (cannot-link), возрастные мосты детей, прототипы, Ctrl+Z Undo
+  organizer/          чистый Dry-Run планировщик, жёсткие ссылки/копия/перенос и откат по SHA-256/inode
+evals/                синтетический бенчмарк «Цифровая семья» (2000 фото 2018–2026) для проверки кластеризации детей
 
 main.py               CLI обычного Диска: check / scan / download / verify / stats
 downloader.py         обход Диска и скачивание через REST API
@@ -54,7 +63,7 @@ supporters.py         «Нас поддерживают»: список с GitHu
 utils.py              общие утилиты: пути, коды выхода, пределы
 
 tools/
-  sync_supporters.py  переносит донаты DonationAlerts в supporters.json (GitHub Actions)
+  sync_supporters.py  переносит донаты DonationAlerts в supporters.json (API, --from-widget, --from-csv)
 tests/                pytest
 docs/images/          скриншоты для README и инструкции
 ```

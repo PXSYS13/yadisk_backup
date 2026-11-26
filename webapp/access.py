@@ -54,9 +54,14 @@ def invalidate_token_cache() -> None:
 
 
 def invalidate_cookies_cache() -> None:
-    """Сбрасывает кэш разбора cookies.json."""
+    """Сбрасывает кэш разбора cookies.json (включая кэш загрузчика в Безлимит)."""
     with _cookies_cache_lock:
         _cookies_cache.update({"key": None, "at": 0.0, "data": None})
+    try:
+        from uploader.webapp import manager as upload_mgr
+        upload_mgr.manager.set_account_cache(None, None)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def normalize_token(raw: str) -> str:

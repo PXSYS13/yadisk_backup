@@ -30,8 +30,14 @@ _LOG_NAME_RE = re.compile(r"^(tasks/)?[A-Za-z0-9_.-]+\.(log|jsonl)(\.\d+)?$")
 _SECRET_PATTERNS = (
     (re.compile(r"\by0_[A-Za-z0-9_-]{8,}"), "y0_<REDACTED>"),
     (re.compile(r"(Authorization\s*[:=]\s*(?:OAuth|Bearer)\s+)\S+", re.IGNORECASE), r"\1<REDACTED>"),
-    (re.compile(r"\b((?:Session_id|sessionid2|yandexuid|sk)\s*=\s*)[^;\s\"'&,}]+", re.IGNORECASE), r"\1<REDACTED>"),
-    (re.compile(r"\b(uid=)\d+", re.IGNORECASE), r"\1<REDACTED>"),
+    (
+        re.compile(
+            r"""(["']?\b(?:Session_id|sessionid2|yandexuid|sk|x-csrf-token)\b["']?\s*[:=]\s*["']?)[^;\s"'&,}\]]+""",
+            re.IGNORECASE,
+        ),
+        r"\1<REDACTED>",
+    ),
+    (re.compile(r"""(["']?\buid\b["']?\s*[:=]\s*["']?)\d+""", re.IGNORECASE), r"\1<REDACTED>"),
 )
 
 
@@ -59,14 +65,21 @@ def list_logs() -> list[dict]:
     out = []
     if not paths.LOG_DIR.exists():
         return out
+    root = paths.LOG_DIR.resolve()
     for p in sorted(paths.LOG_DIR.rglob("*")):
-        if not p.is_file():
+        if p.is_symlink() or not p.is_file():
             continue
-        rel = p.relative_to(paths.LOG_DIR).as_posix()
+        try:
+            resolved = p.resolve()
+            if root not in resolved.parents:
+                continue
+            rel = p.relative_to(paths.LOG_DIR).as_posix()
+        except (OSError, ValueError):
+            continue
         if not _LOG_NAME_RE.match(rel):
             continue
         try:
-            st = p.stat()
+            st = p.lstat()
         except OSError:
             continue
         out.append({"name": rel, "size": st.st_size, "mtime": st.st_mtime})
@@ -89,6 +102,29 @@ def tail_file(path: Path, lines: int) -> list[str]:
             data = f.read(step) + data
     text = data.decode("utf-8", errors="replace")
     return text.splitlines()[-lines:]
+
+
+def _extra_subsystem_stats() -> dict:
+    """Безопасная сводка счётчиков подсистем загрузки в Безлимит и сортировки по людям (без путей)."""
+    extra: dict = {}
+    if paths.UPLOAD_DB_FILE.exists():
+        try:
+            from uploader.state import UploadState
+
+            extra["upload_unlim"] = UploadState(paths.UPLOAD_DB_FILE).stats()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось прочитать статистику БД загрузки для отчёта: %s", exc)
+            extra["upload_unlim_error"] = _scrub_support_text(f"{type(exc).__name__}: {exc}")[:200]
+    if paths.PEOPLE_DB_FILE.exists():
+        try:
+            from sorter.state import SorterState
+
+            with SorterState(paths.PEOPLE_DB_FILE) as st:
+                extra["people_sorter"] = st.get_stats()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Не удалось прочитать статистику БД сортировки по людям для отчёта: %s", exc)
+            extra["people_sorter_error"] = _scrub_support_text(f"{type(exc).__name__}: {exc}")[:200]
+    return extra
 
 
 def support_info() -> dict:
@@ -126,6 +162,7 @@ def support_info() -> dict:
         "pipeline": rescue.status(),
         "diagnostics": diagnostics.diagnose_tasks(),
         "yandex_health": diagnostics.health_snapshot(),
+        **_extra_subsystem_stats(),
     }
 
 

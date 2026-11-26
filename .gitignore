@@ -8,11 +8,15 @@ cookies.json
 cookies*.json
 cookies.json.tmp
 
-# БД с локальным состоянием
+# БД с локальным состоянием, модели нейросетей и кеш кропов
 *.db
 *.db-wal
 *.db-shm
 *.db-journal
+.models/
+.cache/
+upload_unlim_config.json
+people_sorter_config.json
 
 # Логи, скачанное и временные файлы
 logs/

@@ -35,9 +35,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import getpass
 import html
 import http.server
+import io
 import json
 import os
 import re
@@ -367,6 +369,67 @@ def import_widget(html_path: Path, path: Path = SUPPORTERS_FILE, dry_run: bool =
     return changed
 
 
+def parse_csv_text(text: str) -> list[dict]:
+    """Донаты из выгрузки CSV DonationAlerts (разделитель «;» или «,»)."""
+    lines = [line for line in text.lstrip("\ufeff").splitlines() if line.strip() and not line.lstrip().startswith('"# Total:') and not line.lstrip().startswith("# Total:")]
+    if len(lines) < 2:
+        return []
+    header = lines[0]
+    delimiter = ";" if header.count(";") >= header.count(",") else ","
+    reader = csv.DictReader(io.StringIO("\n".join(lines)), delimiter=delimiter)
+    out: list[dict] = []
+    for row in reader:
+        if not isinstance(row, dict):
+            continue
+        number = _id_number(row.get("id"))
+        amount = _amount(row.get("amount"))
+        if not number or amount is None or amount <= 0:
+            continue
+        out.append({
+            "id": number,
+            "username": row.get("username") or None,
+            "amount": amount,
+            "currency": row.get("currency") or "RUB",
+            "created_at": row.get("created_at") or None,
+            "message": row.get("message") or None,
+            "message_type": "text",
+        })
+    return out
+
+
+def import_csv(csv_path: Path, path: Path = SUPPORTERS_FILE, dry_run: bool = False,
+               today: str | None = None) -> bool:
+    """Добавляет в список донаты из CSV-выгрузки DonationAlerts. True — список изменился."""
+    try:
+        text = Path(csv_path).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as e:
+        raise SyncError(f"Не открыть {csv_path}: {e}", fatal=True) from e
+    donations = parse_csv_text(text)
+    if not donations:
+        raise SyncError("В CSV-файле нет донатов. Экспортируйте список донатов из DonationAlerts "
+                        "с колонками id, username, message, amount, currency, created_at.", fatal=True)
+    try:
+        current = load_current(path)
+    except ValueError as e:
+        raise SyncError(f"{path.name} — не JSON ({e}): исправьте файл руками", fatal=True) from e
+    known = {_id_number(x.get("id")) for x in current.get("supporters") or [] if isinstance(x, dict)}
+    new = merge(current, donations, today=today, keep_existing=True)
+    text_out = dump(new)
+    try:
+        old_text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        old_text = ""
+    changed = text_out != old_text
+    added = sum(1 for d in donations if _id_number(d.get("id")) not in known)
+    shown = sum(1 for x in new["supporters"] if str(x.get("id", "")).startswith(ID_PREFIX))
+    print(f"Донатов в CSV: {len(donations)}, новых: {added}, в списке: {shown}, "
+          f"скрыто: {len(new['hidden'])}, записей вручную: {len(new['supporters']) - shown}")
+    if changed and not dry_run:
+        path.write_text(text_out, encoding="utf-8", newline="\n")
+    print("Список изменился" if changed else "Без изменений", "(пробный запуск, файл не тронут)" if dry_run else "")
+    return changed
+
+
 def _check_url(url: str) -> str:
     """Адрес DonationAlerts по https — или SyncError: ключ на чужой адрес не отправляем."""
     parts = urllib.parse.urlsplit(url)
@@ -565,6 +628,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--get-token", action="store_true", help="получить ключ DonationAlerts (один раз)")
     parser.add_argument("--from-widget", metavar="FILE",
                         help=f"без ключей: страница {WIDGET_URL}, сохранённая из браузера")
+    parser.add_argument("--from-csv", metavar="FILE",
+                        help="без ключей: CSV-выгрузка донатов из DonationAlerts (donations.csv)")
     parser.add_argument("--dry-run", action="store_true", help="показать итог, не меняя supporters.json")
     args = parser.parse_args(argv)
     if args.get_token:
@@ -572,6 +637,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.from_widget:
         try:
             import_widget(Path(args.from_widget), path=SUPPORTERS_FILE, dry_run=args.dry_run)
+        except SyncError as e:
+            print(e)
+            return 1
+        return 0
+    if args.from_csv:
+        try:
+            import_csv(Path(args.from_csv), path=SUPPORTERS_FILE, dry_run=args.dry_run)
         except SyncError as e:
             print(e)
             return 1

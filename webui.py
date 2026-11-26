@@ -24,14 +24,16 @@ from fastapi.staticfiles import StaticFiles
 
 from utils import APP_VERSION, TELEGRAM_CHANNEL, YOUTUBE_VIDEO_URL, ensure_utf8_stdio
 from webapp import paths  # первым: читает .env, в нём бывает YADISK_PORT
-from webapp import (access, config, control, diagnostics, file_list, folders, guide, links, logs, pages, ports,
-                    status)
+from webapp import (access, config, control, diagnostics, file_list, folders, guide, links, logs, pages, people, ports,
+                    status, upload_unlim)
 
 log = logging.getLogger("webui")
 
 app = FastAPI(title="Yandex.Disk Backup UI")
 app.middleware("http")(ports.csrf_guard)
-for _module in (status, control, access, file_list, folders, links, logs, guide, pages):
+# Конкретные роутеры (/api/upload/*, /api/people/*) регистрируем ДО file_list (/api/{source}/files),
+# чтобы шаблон {source} не перехватывал префикс /api/upload/files.
+for _module in (status, control, access, upload_unlim, people, file_list, folders, links, logs, guide, pages):
     app.include_router(_module.router)
 
 # Windows берёт MIME из реестра, и там .js бывает text/plain — браузер такой скрипт не выполнит
@@ -48,15 +50,16 @@ def _setup_logging() -> None:
                             datefmt="%Y-%m-%d %H:%M:%S")
     handler = RotatingFileHandler(paths.WEBUI_LOG, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
     handler.setFormatter(fmt)
-    for name in ("webui", "uvicorn.error"):
+    for name in ("webui", "uvicorn.error", "photo_sorter", "unlim_uploader"):
         lg = logging.getLogger(name)
         lg.setLevel(logging.INFO)
         lg.addHandler(handler)
-    # Ошибки сервера (HTTP 500) видно и в чёрном окне — как до log_config=None, а не только в webui.log
+    # Ошибки сервера (HTTP 500) и предупреждения подсистем видно и в чёрном окне
     console = logging.StreamHandler()
     console.setLevel(logging.WARNING)
     console.setFormatter(fmt)
-    logging.getLogger("uvicorn.error").addHandler(console)
+    for name in ("uvicorn.error", "photo_sorter", "unlim_uploader"):
+        logging.getLogger(name).addHandler(console)
 
 
 def main():
@@ -140,6 +143,15 @@ def main():
             diagnostics.health_monitor.stop()
         if rescue.is_running():
             rescue.stop()
+        try:
+            from uploader.webapp import manager as upload_mgr
+            upload_mgr.manager.shutdown(timeout=5.0)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("upload_mgr shutdown error: %s", exc)
+        try:
+            people.manager.shutdown(timeout=5.0)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("people.manager shutdown error: %s", exc)
         stop_and_wait(
             tm.stop_matching(SLOT_DISK)
             + tm.stop_matching(UNLIM_SLOT_PREFIX)
