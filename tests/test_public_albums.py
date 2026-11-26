@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import time
+import types
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -307,7 +308,9 @@ def test_album_answering_404_for_every_photo_is_never_emptied(db, album, tmp_pat
 def test_captcha_429_and_refusals_hold_the_album_until_the_next_round(db, album, tmp_path, monkeypatch, answer):
     session, api = album
     sleeps = []
-    monkeypatch.setattr(pd.time, "sleep", sleeps.append)
+    # Не подменяем глобальный time.sleep, иначе subprocess.Popen.wait() для macOS caffeinate
+    # попадает в sleeps на macos-latest CI.
+    monkeypatch.setattr(pd, "time", types.SimpleNamespace(time=time.time, monotonic=time.monotonic, sleep=sleeps.append))
     pd.list_link(api, db, add(db))
     session.api_error, session.post_status = answer.get("json"), answer.get("http")
     assert pd.run(db, str(tmp_path), 1) == EXIT_OUTAGE  # Яндекс отказывает — повтор позже
