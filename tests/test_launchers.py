@@ -88,3 +88,99 @@ def test_unix_launchers_are_executable_in_git(name):
     if not out:
         pytest.skip("файл ещё не в индексе git")
     assert out.split()[0] == "100755", out
+
+
+def _parse_minor(ver: str) -> tuple[int, int]:
+    major, minor = ver.strip().split(".")[:2]
+    return int(major), int(minor)
+
+
+def test_python_version_pinned_and_bounded():
+    """Без верхней границы requires-python и .python-version uv скачивает свежий CPython (напр. 3.15),
+    для которого у onnxruntime ещё нет wheel — программа перестаёт запускаться у пользователей."""
+    py_ver_file = ROOT / ".python-version"
+    assert py_ver_file.is_file(), "Нет .python-version: uv сам выберет новейший Python без wheel'ов"
+    pinned = py_ver_file.read_text(encoding="utf-8").strip()
+    assert re.fullmatch(r"3\.\d+", pinned), f"Ожидается 3.X в .python-version, получено {pinned!r}"
+
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r'(?m)^requires-python\s*=\s*"([^"]+)"', pyproject)
+    assert m, "В pyproject.toml не найден requires-python"
+    spec = m.group(1)
+
+    low_m = re.search(r">=\s*(3\.\d+)", spec)
+    high_m = re.search(r"<\s*(3\.\d+)", spec)
+    assert low_m and high_m, f"requires-python должен иметь и нижнюю, и верхнюю границу: {spec!r}"
+    assert _parse_minor(low_m.group(1)) <= _parse_minor(pinned) < _parse_minor(high_m.group(1)), (
+        f".python-version ({pinned}) вне диапазона requires-python ({spec})"
+    )
+
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert f'"{pinned}"' in ci, f"Закреплённый Python {pinned} должен проверяться в CI"
+
+
+def test_uv_lock_has_wheels_for_pinned_python_on_all_desktop_platforms():
+    """Для закреплённого Python каждый нативный пакет из uv.lock должен иметь готовый wheel
+    на Windows (x64/arm64), macOS (Apple Silicon и Intel) и Linux (x64/arm64)."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        pytest.skip("tomllib доступен с Python 3.11+")
+
+    py_ver_file = ROOT / ".python-version"
+    assert py_ver_file.is_file(), "Нет .python-version"
+    pinned = py_ver_file.read_text(encoding="utf-8").strip()
+    py_num = int(pinned.replace(".", ""))
+    cp_tag = f"cp{py_num}"
+
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    root_pkg = next(p for p in lock["package"] if p["name"] == "yadisk-backup")
+
+    by_name_ver = {(p["name"], p.get("version")): p for p in lock["package"]}
+    # Собираем нативные зависимости с их маркерами, действующими для закреплённого Python
+    native_deps: dict[str, list[tuple[str, dict]]] = {}
+    for dep in root_pkg.get("dependencies", []):
+        name = dep["name"]
+        ver = dep.get("version")
+        marker = dep.get("marker", "")
+        if f"python_full_version < '{pinned}'" in marker:
+            continue
+        if "python_full_version ==" in marker and f"'{pinned}.*'" not in marker:
+            continue
+        pkg = by_name_ver.get((name, ver))
+        if not pkg:
+            continue
+        wheels = pkg.get("wheels", [])
+        if not wheels or any(w["url"].endswith("-none-any.whl") for w in wheels):
+            continue
+        native_deps.setdefault(name, []).append((marker, pkg))
+
+    assert "onnxruntime" in native_deps, "onnxruntime должен присутствовать в uv.lock"
+
+    platforms = {
+        "win_amd64": lambda p: "win_amd64" in p,
+        "win_arm64": lambda p: "win_arm64" in p,
+        "macos_arm64": lambda p: "macosx" in p and ("arm64" in p or "universal2" in p),
+        "macos_x86_64": lambda p: "macosx" in p and ("x86_64" in p or "universal2" in p),
+        "linux_x86_64": lambda p: "manylinux" in p and "x86_64" in p,
+        "linux_aarch64": lambda p: "manylinux" in p and "aarch64" in p,
+    }
+
+    def wheel_matches(pkg: dict, plat_pred) -> bool:
+        for w in pkg.get("wheels", []):
+            fn = w["url"].rsplit("/", 1)[-1][:-4]
+            py_tag, abi_tag, plat_tag = fn.split("-")[-3:]
+            if not plat_pred(plat_tag):
+                continue
+            if py_tag == cp_tag:
+                return True
+            if abi_tag == "abi3" and py_tag.startswith("cp") and py_num >= int(py_tag[2:]):
+                return True
+        return False
+
+    missing = []
+    for name, entries in sorted(native_deps.items()):
+        for plat_name, pred in platforms.items():
+            if not any(wheel_matches(pkg, pred) for _, pkg in entries):
+                missing.append(f"{name} ({plat_name}, {cp_tag})")
+    assert not missing, f"В uv.lock нет готовых wheel'ов для {pinned}: {', '.join(missing)}"

@@ -4,7 +4,7 @@
 
 ## Окружение
 
-Проект живёт на [uv](https://docs.astral.sh/uv/): он сам ставит нужный Python (3.10+) и зависимости из `uv.lock`. `requirements.txt` нет.
+Проект живёт на [uv](https://docs.astral.sh/uv/): он сам ставит нужный Python (3.10–3.13, по умолчанию `3.13` из `.python-version`) и зависимости из `uv.lock`. `requirements.txt` нет.
 
 ```bash
 uv sync              # окружение с зависимостями для разработки (pytest, ruff, httpx)

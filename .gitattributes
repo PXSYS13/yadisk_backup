@@ -2,3 +2,4 @@
 *.bat -text
 *.sh text eol=lf
 *.command text eol=lf
+.python-version text eol=lf
