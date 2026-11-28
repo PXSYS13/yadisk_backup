@@ -90,7 +90,11 @@ SKIP_DIR_NAMES = frozenset(
         "__pycache__",
         ".venv",
         "node_modules",
+        # Служебные папки бэкапа (utils.PREVIEW_DIRNAME, LINKS_DIRNAME, SET_ASIDE_DIRNAME):
+        # превью, чужие файлы по ссылкам и отложенные повреждённые копии в Безлимит не грузим.
         "_превью",
+        "_ссылки",
+        "_заменённые",
         "_unlim_tmp_zips",
     }
 )

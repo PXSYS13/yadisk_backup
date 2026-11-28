@@ -376,6 +376,10 @@ def cmd_scan(cfg: dict, args: argparse.Namespace) -> int:
         print(f"folder_missing | {json.dumps({'path': path}, ensure_ascii=False)}", flush=True)
     for kind, names in notes.items():
         _print_note(kind, names)
+    forbidden = notes.get("forbidden_folders") or []
+    if forbidden:
+        print(f"Нет доступа к {len(forbidden)} папкам — их файлы не скачаются: "
+              f"{', '.join(forbidden[:5])}{' …' if len(forbidden) > 5 else ''}", flush=True)
     print(f"\nИтого: {total_files} файлов, {human_bytes(total_bytes)}")
     log.info("scan итого: %d файлов, %s; в БД %s", total_files, human_bytes(total_bytes), _stats_line())
     if unreadable:

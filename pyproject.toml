@@ -1,6 +1,6 @@
 [project]
 name = "yadisk-backup"
-version = "3.1.0"
+version = "3.1.1"
 description = "Бесплатная программа: бэкап Яндекс.Диска, загрузка фото и видео в Безлимит и офлайн-сортировка по людям и датам"
 readme = "README.md"
 # Верхняя граница <3.14: у onnxruntime нет wheel для 3.15 (и для Intel macOS выше 3.13 / 1.23.2);

@@ -702,6 +702,18 @@ def test_some_folders_gone_and_shared_folders_found_become_events(rescue, monkey
     assert ("disk", "download") in sc.steps("disk")
 
 
+def test_folders_without_access_become_a_warning_and_the_listing_counts(rescue, monkeypatch):
+    """403 на папке: повтор не поможет, поэтому список запоминается, а человек видит в ленте,
+    какие папки не скачаются (раньше они пропадали молча под «Все файлы сохранены»)."""
+    Script(monkeypatch, rescue, {"disk": [0, 0]})
+    monkeypatch.setattr(rescue, "_task_lines", lambda slot: [
+        'forbidden_folders | {"names": ["disk:/Общая/Чужое"]}'])
+    rescue._run()
+    events = [e for e in rescue.status()["events"] if "не пускает" in e["text"]]
+    assert len(events) == 1 and events[0]["kind"] == "warn"
+    assert "Чужое" in events[0]["text"] and "попросите владельца" in events[0]["text"]
+    assert webapp.listing.read_listing("disk") is not None
+
 def test_queue_follows_folders_then_categories(rescue, monkeypatch, tmp_path):
     db = tmp_path / "state.db"
     _disk_db(db, [("disk:/A/x.jpg", 1, "pending", None), ("disk:/A/y.pdf", 1, "pending", None),

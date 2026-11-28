@@ -9,6 +9,14 @@ updates:
     groups:
       python:
         patterns: ["*"]
+    # Наборы people и people-legacy держат разные версии этих пакетов (legacy — для macOS 11–13),
+    # а Dependabot пытается поднять их одной версией для обоих и падает. Обновлять их — вручную.
+    ignore:
+      - dependency-name: "av"
+      - dependency-name: "numpy"
+      - dependency-name: "onnxruntime"
+      - dependency-name: "onnxruntime-directml"
+      - dependency-name: "scipy"
 
   - package-ecosystem: "github-actions"
     directory: "/"

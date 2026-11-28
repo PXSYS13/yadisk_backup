@@ -232,8 +232,12 @@ def _walk(
         except yadisk.exceptions.ForbiddenError as e:
             if is_overdraft(e):
                 raise
-            # Отозванный доступ к отдельной общей папке — не сбой Яндекса, повтор не поможет
-            log.warning("Нет доступа к папке %s (403): %s — пропускаю", cur, e)
+            # Нет доступа к этой папке (отозванная общая, чужая выбранная): повтор не поможет,
+            # но и молча пропускать нельзя — список без неё выглядел полным, и программа писала
+            # «Все файлы сохранены». Заметка forbidden_folders уходит человеку в ленту.
+            log.warning("Нет доступа к папке %s (403): %s", cur, e)
+            if on_note:
+                on_note("forbidden_folders", [cur])
             continue
         except Exception as e:
             if is_overdraft(e):
@@ -280,12 +284,17 @@ def _list_dir(client: yadisk.Client, path: str) -> list:
 # За один проход после плоского сканирования дозапрашиваем даты не более чем для 500 родительских папок;
 # остальные папки получают даты из запасного расчёта по файлам (derive_folder_dates_from_files)
 FOLDER_DATES_MAX_PARENTS = 500
+# Даты папок — приятная мелочь: во время сбоев Яндекса 500 медленных listdir растягивали
+# «Получаю список» на часы. После бюджета оставшимся папкам хватит запасного расчёта по файлам.
+FOLDER_DATES_BUDGET_SEC = 60.0
 
 
 def collect_folder_dates(
     client: yadisk.Client,
     state: State,
     max_parents: int = FOLDER_DATES_MAX_PARENTS,
+    budget_sec: float = FOLDER_DATES_BUDGET_SEC,
+    clock: Callable[[], float] = time.monotonic,
 ) -> int:
     """Дособирает точные даты (created, modified) папок Диска после плоского get_files().
 
@@ -305,7 +314,11 @@ def collect_folder_dates(
     parents = sorted({_parent_remote_dir(d) for d in missing})[:max_parents]
     saved = 0
     batch: list[tuple[str, float | None, float | None]] = []
+    deadline = clock() + budget_sec
     for parent in parents:
+        if clock() > deadline:
+            log.info("даты папок: бюджет %.0f с исчерпан, остальные — по датам файлов", budget_sec)
+            break
         try:
             entries = list(client.listdir(parent, max_items=None, fields=_FOLDER_DATE_FIELDS,
                                           n_retries=LIST_N_RETRIES))

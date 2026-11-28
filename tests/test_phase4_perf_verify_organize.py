@@ -100,3 +100,24 @@ def test_config_dotenv_cache_invalidates_on_env_set():
     assert webapp.config.get_config()["token"] == "y0_first"
     webapp.config.env_set_verified("YA_DISK_TOKEN", "y0_second")
     assert webapp.config.get_config()["token"] == "y0_second"
+
+
+def test_verify_cache_never_remembers_a_damaged_file(tmp_path):
+    """«Заменить повреждённые» качает хорошую копию того же размера и с той же датой Яндекса:
+    ключ кэша (size, mtime_ns) совпадал со старой битой записью, и хорошая копия снова считалась
+    повреждённой — её уносило в «_заменённые» и качало заново по кругу."""
+    f = tmp_path / "a.bin"
+    good = b"hello world"
+    md5 = hashlib.md5(good, usedforsecurity=False).hexdigest()
+    item = verify.Item("disk:/a.bin", str(f), len(good), md5)
+    f.write_bytes(b"hellX world")  # тот же размер, другое содержимое
+    when = f.stat().st_mtime_ns
+
+    with State(str(tmp_path / "state.db")) as st:
+        s1, p1 = verify.check_files([item], cache=st.get_verify_cache(), save_cache=st.save_verify_cache)
+        assert p1 == [("disk:/a.bin", "md5")]
+
+        f.write_bytes(good)  # скачалась хорошая копия, дата та же
+        os.utime(f, ns=(when, when))
+        s2, p2 = verify.check_files([item], cache=st.get_verify_cache(), save_cache=st.save_verify_cache)
+        assert s2["ok"] == 1 and not p2

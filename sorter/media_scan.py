@@ -90,6 +90,12 @@ SKIP_DIR_NAMES = frozenset(
         ".models",
         ".cache",
         ".sorter_data",
+        # Служебные папки бэкапа (utils.PREVIEW_DIRNAME, LINKS_DIRNAME, SET_ASIDE_DIRNAME):
+        # превью вместо отложенных оригиналов, чужие файлы по ссылкам и отложенные повреждённые копии.
+        "_превью",
+        "_ссылки",
+        "_заменённые",
+        "_unlim_tmp_zips",
     }
 )
 

@@ -95,6 +95,14 @@ def fetch_latest(url: str | None = None) -> dict | None:
     return {"version": "%d.%d.%d" % version, "url": page}
 
 
+def offered_version() -> str | None:
+    """Версия последнего релиза, если она новее нашей (из памяти, без запроса к GitHub), иначе None."""
+    with _lock:
+        latest = _state["latest"]
+    info = update_info(latest)
+    return info["latest"] if info else None
+
+
 def update_info(latest: dict | None, current: str | None = None) -> dict | None:
     """{current, latest, url} для /api/status.update, если latest новее current, иначе None."""
     current = utils.APP_VERSION if current is None else current

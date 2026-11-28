@@ -560,12 +560,14 @@ class Rescue:
             return []
         return task.log_lines() if hasattr(task, "log_lines") else list(task.log)
 
-    def _scan_findings(self) -> tuple[list[str], list[str]]:
-        """(пропавшие выбранные папки, найденные общие папки) — из строк `kind | {json}`."""
+    def _scan_findings(self) -> tuple[list[str], list[str], list[str]]:
+        """(пропавшие выбранные папки, найденные общие папки, папки без доступа) — из строк `kind | {json}`."""
         missing: list[str] = []
         shared: list[str] = []
+        forbidden: list[str] = []
         for line in self._task_lines(SLOT_DISK):
-            for kind, target in (("folder_missing | ", missing), ("shared_folders | ", shared)):
+            for kind, target in (("folder_missing | ", missing), ("shared_folders | ", shared),
+                                 ("forbidden_folders | ", forbidden)):
                 pos = line.find(kind)
                 if pos == -1:
                     continue
@@ -579,7 +581,7 @@ class Rescue:
                     target.append(data["path"])
                 elif isinstance(data.get("names"), list):
                     target.extend(str(n) for n in data["names"])
-        return missing, shared
+        return missing, shared, forbidden
 
     def _apply_disk_selection(self) -> None:
         """Очередь Диска по выбору человека: сначала папки, потом типы файлов."""
@@ -1095,7 +1097,7 @@ class Rescue:
         code = self._run_step(b, SLOT_DISK, "main.py", args, "получаю список файлов")
         if code == -1:
             return -1
-        missing, shared = self._scan_findings() if code == 0 else ([], [])
+        missing, shared, forbidden = self._scan_findings() if code == 0 else ([], [], [])
         if folders and missing and set(folders) <= set(missing):
             b.state = "needs_action"
             b.action = "folders"
@@ -1108,6 +1110,12 @@ class Rescue:
             self._log(f"⚠️ Диск: папки «{folder_label(path)}» больше нет на Диске")
             self._event("disk", "warn", f"Папки «{folder_label(path)}» больше нет на Диске — "
                                         f"уберите её из выбора в «Настройках»")
+        if forbidden:
+            names = ", ".join(f"«{folder_label(p)}»" for p in forbidden[:5]) + (" …" if len(forbidden) > 5 else "")
+            self._log(f"🔒 Диск: нет доступа к папкам: {names}")
+            self._event("disk", "warn", f"Яндекс не пускает в {'папку' if len(forbidden) == 1 else 'папки'} "
+                                        f"{names} — их файлы не скачаются. Если папка общая, попросите владельца "
+                                        f"снова открыть вам доступ")
         if shared:
             names = ", ".join(f"«{n}»" for n in shared)
             self._log(f"🤝 Диск: нашёл общие папки, к которым вам дали доступ: {names}")

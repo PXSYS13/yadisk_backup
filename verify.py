@@ -167,12 +167,12 @@ def check_files(
                 found("size", it, local_size=got)
             elif is_md5(it.md5):
                 hit = cache.get(path_key(it.local_path)) if cache else None
-                if hit is not None and hit[0] == got and hit[1] == st.st_mtime_ns and is_md5(hit[2]):
+                # Кэш подтверждает только совпадение. Битый MD5 из кэша не берём: хорошая копия после
+                # «Заменить повреждённые» бывает того же размера и с той же датой Яндекса.
+                if (hit is not None and hit[0] == got and hit[1] == st.st_mtime_ns and is_md5(hit[2])
+                        and hit[2].lower() == it.md5.lower()):
                     cached_hits += 1
-                    if hit[2].lower() == it.md5.lower():
-                        counts["ok"] += 1
-                    else:
-                        found("md5", it)
+                    counts["ok"] += 1
                 else:
                     to_hash.append((it, got, st.st_mtime_ns))
             else:
@@ -209,8 +209,8 @@ def check_files(
         except OSError as e:
             found("unreadable", it, error=_error_text(e))
         else:
-            new_cache.append((it.local_path, got, mtime_ns, actual))
             if actual == it.md5.lower():
+                new_cache.append((it.local_path, got, mtime_ns, actual))  # только подтверждённые
                 counts["ok"] += 1
             else:
                 found("md5", it)

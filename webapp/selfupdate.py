@@ -5,9 +5,11 @@
 
 1. Только когда ничего не идёт: ни спасение, ни скачивание по ссылкам, ни загрузка в Безлимит,
    ни сортировка (в том числе «По людям»). На время обновления запуск задач запрещён (tm.freeze).
-2. Архив качается во временную папку (потолок размера, срок), проверяется — та ли это
-   программа (папка yadisk_backup-main/ с webui.py, webapp/, utils.py) и новее ли её
-   APP_VERSION — и распаковывается тоже во временную папку. Новая версия должна хотя бы
+2. Качается архив ровно того релиза, о котором сообщает баннер «Вышла версия X» (тег vX.Y.Z),
+   а не вершина main: в main бывают ещё не выпущенные правки. Архив идёт во временную папку
+   (потолок размера, срок), проверяется — та ли это программа (папка yadisk_backup-X.Y.Z/
+   с webui.py, webapp/, utils.py) и совпадает ли её APP_VERSION с обещанной — и распаковывается
+   тоже во временную папку. Новая версия должна хотя бы
    запускаться здесь: всё компилируется, webui импортируется.
 3. Файлы ставятся в три шага: копия каждого заменяемого файла в update_backup/<версия>_<время>/,
    новые файлы рядом с прежними (имя.yadisk-new), и только потом быстрые переименования.
@@ -52,9 +54,11 @@ log = logging.getLogger("webui")
 router = APIRouter()
 
 ZIP_URL = f"https://github.com/{updates.REPO}/archive/refs/heads/main.zip"
-# Для проверок: архив с другого адреса (http — только с этого компьютера)
+# Для проверок: архив с другого адреса (http — только с этого компьютера); его папка — ZIP_TOP
 URL_ENV = "YADISK_UPDATE_URL"
 ZIP_TOP = "yadisk_backup-main"
+NO_OFFER_TEXT = ("Ещё не известно, какая версия вышла на GitHub. Подождите минуту и нажмите "
+                 "«Обновить программу» снова.")
 GITHUB_HOSTS = ("github.com", "codeload.github.com")
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
 # Сейчас архив ~1 МБ, распакованный ~3 МБ: потолки с запасом, но архив-бомбу не пропустят
@@ -103,7 +107,7 @@ STEP_TEXT = {
     "restart": "Перезапускаю программу",
 }
 STOP_FIRST = ("Сначала остановите скачивание: кнопка «Остановить» на Главной. Скачанное сохранится, "
-              "а после обновления программа продолжит с того же места.")
+              "а после обновления запустите скачивание снова — уже скачанные файлы заново не качаются.")
 UPLOAD_FIRST = "Сначала остановите загрузку в Безлимит: раздел «Загрузка» → «Остановить»."
 PEOPLE_FIRST = "Сначала дождитесь конца операции в разделе «По людям» или остановите её там."
 # Проверка скачанных файлов (задачи вида disk_verify, unlim_verify) идёт в слотах скачивания
@@ -316,12 +320,20 @@ def _bad_part(part: str) -> bool:
             or part.endswith((" ", ".")) or part.split(".")[0].upper() in _WIN_RESERVED)
 
 
-def check_archive(zip_path: Path, current: str | None = None) -> Release:
+def release_source(version: str) -> tuple[str, str]:
+    """Адрес архива релиза vX.Y.Z на GitHub и его верхняя папка (GitHub убирает «v»: yadisk_backup-3.1.0)."""
+    repo = updates.REPO.split("/")[-1]
+    return f"https://github.com/{updates.REPO}/archive/refs/tags/v{version}.zip", f"{repo}-{version}"
+
+
+def check_archive(zip_path: Path, current: str | None = None, *, top: str = ZIP_TOP,
+                  expect: str | None = None) -> Release:
     """Это та программа и она новее нашей? Release — номер версии и файлы; иначе UpdateError.
 
-    Всё лежит в yadisk_backup-main/, есть webui.py, utils.py, pyproject.toml, webapp/,
-    APP_VERSION в utils.py новее current. Ссылок, зашифрованных файлов, путей наружу,
-    недопустимых в Windows имён и имён, совпадающих без учёта регистра, нет.
+    Всё лежит в папке top (yadisk_backup-X.Y.Z/ у релиза), есть webui.py, utils.py, pyproject.toml,
+    webapp/, APP_VERSION в utils.py новее current и, если задано expect, равен ему. Ссылок,
+    зашифрованных файлов, путей наружу, недопустимых в Windows имён и имён, совпадающих без учёта
+    регистра, нет.
     """
     current = utils.APP_VERSION if current is None else current
     broken = f"Скачанный файл повреждён или это не архив программы. Попробуйте ещё раз. {UNCHANGED}"
@@ -329,7 +341,7 @@ def check_archive(zip_path: Path, current: str | None = None) -> Release:
         zf = zipfile.ZipFile(zip_path)
     except (zipfile.BadZipFile, OSError, ValueError):
         raise UpdateError(broken) from None
-    prefix = ZIP_TOP + "/"
+    prefix = top + "/"
     with zf:
         infos = zf.infolist()
         if not infos or len(infos) > MAX_FILES:
@@ -340,7 +352,7 @@ def check_archive(zip_path: Path, current: str | None = None) -> Release:
         for info in infos:
             name = info.filename
             if not name.startswith(prefix):
-                raise UpdateError(f"В архиве не та программа: нет папки {ZIP_TOP}. {UNCHANGED}")
+                raise UpdateError(f"В архиве не та программа: нет папки {top}. {UNCHANGED}")
             rel = name[len(prefix):].rstrip("/")
             if not rel:
                 continue
@@ -377,6 +389,8 @@ def check_archive(zip_path: Path, current: str | None = None) -> Release:
     version = "%d.%d.%d" % parsed
     if not updates.is_newer(version, current):
         raise UpdateError(f"На GitHub сейчас версия {version}, а у вас {current} — обновлять нечего.")
+    if expect is not None and version != expect:
+        raise UpdateError(f"В архиве версия {version}, а обещана {expect}. Попробуйте позже. {UNCHANGED}")
     return Release(version, files)
 
 
@@ -441,7 +455,10 @@ def _tail(text: str) -> str:
 
 
 def _clean_env(*drop: str) -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", *drop)}
+    # Ключ Диска новой версии на проверке не нужен: импорт webui читает .env сам, а в окружении
+    # подпроцесса ключу делать нечего
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONPATH", "PYTHONHOME", "YA_DISK_TOKEN", *drop)}
     env.update(PYTHONIOENCODING="utf-8", PYTHONUTF8="1", YADISK_NO_BROWSER="1")
     return env
 
@@ -985,6 +1002,11 @@ def start_install() -> tuple[bool, str]:
         info = install_info(cfg)
         if not info["ok"]:
             return False, info["why"]
+        env_url = os.environ.get(URL_ENV, "").strip()
+        offered = None if env_url else updates.offered_version()
+        if not env_url and offered is None:
+            return False, NO_OFFER_TEXT
+        url, top = (env_url, ZIP_TOP) if env_url else release_source(offered)
         pre_busy = busy_text([], rescue.is_running(), _upload_running(), _people_running())
         if pre_busy:
             return False, pre_busy
@@ -995,10 +1017,9 @@ def start_install() -> tuple[bool, str]:
         if post_busy:  # спасение, загрузка или «По людям» запустились между проверками
             tm.unfreeze()
             return False, post_busy
-        url = os.environ.get(URL_ENV, "").strip() or ZIP_URL
         _job = _new_job()
         try:
-            _thread = threading.Thread(target=_run, args=(url, cfg.get("download_dir")),
+            _thread = threading.Thread(target=_run, args=(url, cfg.get("download_dir"), top, offered),
                                        name="self-update", daemon=True)
             _thread.start()
         except RuntimeError:
@@ -1024,7 +1045,7 @@ def _check_writable(project: Path) -> None:
                           f"или обновите вручную. {UNCHANGED}") from None
 
 
-def _run(url: str, download_dir: str | None) -> None:
+def _run(url: str, download_dir: str | None, top: str = ZIP_TOP, expect: str | None = None) -> None:
     tmp: Path | None = None
     try:
         project = paths.PROJECT
@@ -1037,7 +1058,7 @@ def _run(url: str, download_dir: str | None) -> None:
         size = download_zip(url, zip_path, progress=_download_progress)
         log.info("обновление: архив скачан, %d байт", size)
         _step("check")
-        release = check_archive(zip_path)
+        release = check_archive(zip_path, top=top, expect=expect)
         _set(to=release.version)
         src = tmp / "new"
         extract_archive(zip_path, release, src)

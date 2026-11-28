@@ -755,6 +755,10 @@ def app_dir(tmp_path, monkeypatch):
     project = make_tree(tmp_path / "app", program(OLD) | USER_DATA)
     monkeypatch.setattr(webapp.paths, "PROJECT", project)
     monkeypatch.setattr(utils, "APP_VERSION", OLD)
+    # Баннер уже знает о релизе NEW; тестовые архивы собраны с папкой ZIP_TOP
+    monkeypatch.setitem(webapp.updates._state, "latest", {"version": NEW, "url": webapp.updates.RELEASES_PAGE})
+    real_source = su.release_source
+    monkeypatch.setattr(su, "release_source", lambda version: (real_source(version)[0], su.ZIP_TOP))
     return project
 
 
@@ -983,6 +987,7 @@ def test_status_reports_the_update(app_dir, monkeypatch):
     import webapp.access
     import webapp.updates
     monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
+    monkeypatch.setitem(webapp.updates._state, "latest", None)
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
     st = client.get("/api/status").json()
     assert st["update"] is None and st["update_job"] is None and st["updated"] is None
@@ -1097,8 +1102,12 @@ def test_restart_takes_its_old_port_first(fake_main, old_port_free, capsys):
     assert su.updated_info()["to"] == utils.APP_VERSION
 
 
-def test_auto_restart_retries_same_wanted_port_before_falling_back(fake_main, capsys):
+def test_auto_restart_retries_same_wanted_port_before_falling_back(fake_main, capsys, monkeypatch):
     """На Windows без SO_REUSEADDR порт 8000 освобождается с задержкой — автоперезапуск ждёт и остаётся на 8000."""
+    # Без настоящих пауз и с запасом по времени: на медленном раннере macOS 2,5 с истекали
+    # раньше третьей попытки, и тест падал без ошибки в коде.
+    monkeypatch.setattr(webui, "RESTART_PORT_STEP_SEC", 0.0)
+    monkeypatch.setattr(webui, "RESTART_PORT_WAIT_SEC", 60.0)
     run, calls = fake_main
     path = webapp.paths.LOG_DIR / su.MARKER_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1135,3 +1144,39 @@ def test_slow_ops_never_block_the_status_poll(app_dir, monkeypatch):
     finally:
         gate.set()
         _finish()
+
+
+def test_release_source_is_the_tag_archive():
+    """Ставится архив того релиза, о котором сказал баннер, а не вершина main."""
+    url, top = su.release_source("3.1.0")
+    assert url == "https://github.com/PXSYS13/yadisk_backup/archive/refs/tags/v3.1.0.zip"
+    assert top == "yadisk_backup-3.1.0"
+
+
+def test_tag_archive_is_checked_by_its_folder_and_version(tmp_path):
+    archive = make_zip(tmp_path / "t.zip", program(NEW), top=f"yadisk_backup-{NEW}")
+    assert su.check_archive(archive, OLD, top=f"yadisk_backup-{NEW}", expect=NEW).version == NEW
+    with pytest.raises(su.UpdateError, match="не та программа"):
+        su.check_archive(archive, OLD)  # папка релиза — не yadisk_backup-main
+    with pytest.raises(su.UpdateError, match="обещана 3.2.0"):
+        su.check_archive(archive, OLD, top=f"yadisk_backup-{NEW}", expect="3.2.0")
+
+
+def test_install_downloads_the_offered_release(app_dir, monkeypatch):
+    seen = []
+
+    def fake_download(url, dest, progress=None, **kw):
+        seen.append(url)
+        raise su.UpdateError("стоп")
+
+    monkeypatch.setattr(su, "download_zip", fake_download)
+    assert su.start_install()[0]
+    _finish()
+    assert seen == ["https://github.com/PXSYS13/yadisk_backup/archive/refs/tags/v3.1.0.zip"]
+
+
+def test_install_waits_until_the_release_is_known(app_dir, monkeypatch):
+    import webapp.updates
+    monkeypatch.setitem(webapp.updates._state, "latest", None)
+    assert su.start_install() == (False, su.NO_OFFER_TEXT)
+    assert not webapp.tasks.tm.frozen()  # отказ до заморозки задач

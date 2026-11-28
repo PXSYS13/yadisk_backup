@@ -367,3 +367,23 @@ def test_start_on_a_full_disk_with_nothing_else_to_download_explains_instead(mon
     monkeypatch.setattr(webapp.access, "check_cookies", lambda: {"ok": False})
     res = TestClient(webui.app, headers={"Host": "localhost:8000"}).post("/api/rescue/start").json()
     assert res["ok"] is False and "переполнен" in res["msg"] and started == []
+
+
+class _ForbiddenSubfolder(_Client):
+    """Корень читается, а подпапка отвечает обычным 403 (не «переполнен»)."""
+
+    def listdir(self, path, **kwargs):
+        if path.rstrip("/").endswith("Фото"):
+            return [SimpleNamespace(type="dir", path="disk:/Фото/2019", name="2019",
+                                    modified=None, created=None)]
+        raise yadisk.exceptions.ForbiddenError("DiskForbiddenError", "нет прав")
+
+
+def test_folder_answering_403_is_reported_not_skipped_silently(tmp_path):
+    """Папка с 403 пропускалась молча: её файлы не попадали в очередь, а программа писала
+    «Все файлы сохранены». Теперь о ней заметка forbidden_folders (повтор не поможет — не код 3)."""
+    notes = []
+    with State(str(tmp_path / "state.db")) as st:
+        downloader.scan_tree(_ForbiddenSubfolder(check=True), st, root="disk:/Фото",
+                             on_note=lambda kind, items: notes.append((kind, items)))
+    assert notes == [("forbidden_folders", ["disk:/Фото/2019"])]

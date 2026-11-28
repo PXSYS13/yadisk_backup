@@ -167,6 +167,26 @@ def test_hybrid_folder_date_collection_and_restore(tmp_path):
             assert abs(ct - T_2021) < 2
 
 
+def test_folder_dates_stop_at_the_time_budget(tmp_path):
+    """Во время сбоев Яндекса каждый listdir ждёт долго: даты папок не держат скан дольше бюджета."""
+    asked = []
+
+    class _Client:
+        def listdir(self, path, **kw):
+            asked.append(path)
+            return iter([])
+
+    now = [0.0]
+
+    def clock():
+        now[0] += 40.0  # каждый вызов часов — ещё 40 с
+        return now[0]
+
+    with State(str(tmp_path / "state.db")) as st:
+        st.mark_pending_batch([(f"disk:/П{i}/Д/f.jpg", 1, "a" * 32, T_2020) for i in range(5)])
+        downloader.collect_folder_dates(_Client(), st, budget_sec=60.0, clock=clock)
+    assert 0 < len(asked) < 5
+
 def test_public_links_sync_file_and_folder_dates(tmp_path, monkeypatch):
     conn = pd.connect_db(tmp_path / "links.db")
     try:
