@@ -7,10 +7,10 @@
 Проект живёт на [uv](https://docs.astral.sh/uv/): он сам ставит нужный Python (3.10–3.13, по умолчанию `3.13` из `.python-version`) и зависимости из `uv.lock`. `requirements.txt` нет.
 
 ```bash
-uv sync              # окружение с зависимостями для разработки (pytest, ruff, httpx)
-uv run webui.py      # веб-интерфейс на http://127.0.0.1:8000
-uv run pytest -q     # тесты
-uv run ruff check .  # линтер
+uv sync --extra people                 # полное окружение (с «По людям», pytest, ruff, httpx)
+uv run --extra people webui.py         # веб-интерфейс на http://127.0.0.1:8000
+uv run --extra people pytest -q        # тесты
+uv run --extra people ruff check .     # линтер
 ```
 
 Полезные переменные окружения:
@@ -84,6 +84,7 @@ docs/images/          скриншоты для README и инструкции
 - Тесты не трогают настоящие `.env`, `cookies.json` и базы: `tests/conftest.py` подменяет пути в `webapp/paths.py` на временные. Новые файлы проекта добавляйте туда же. Модули `webapp` читают пути и настройки в момент вызова (`paths.DB_FILE`, `config.get_config()`), а не копируют при импорте, — иначе подмена в тестах до них не дойдёт.
 - После правок интерфейса поднимите `APP_VERSION` в `utils.py`: версия в адресах файлов — единственный способ сбросить кеш браузера.
 - `.bat`-файлы хранятся с окончаниями строк CRLF, иначе cmd.exe путает метки.
+- `webui.bat` и `webui.sh` поддерживают 3-ступенчатую синхронизацию (`--extra people` → `--extra people-legacy` для macOS 11–13 → базовое ядро) и перезапуск по коду `75` (`YADISK_RESTART_CODE=75`) после автообновления из интерфейса (`webapp/selfupdate.py`).
 - Версия uv закреплена в `webui.bat`, `webui.sh` и `.github/workflows/ci.yml`. Обновляя её, поменяйте и SHA-256: в `webui.bat` — трёх zip-архивов для Windows (`uv-x86_64-pc-windows-msvc.zip`, `uv-aarch64-pc-windows-msvc.zip`, `uv-i686-pc-windows-msvc.zip`), в `webui.sh` — установщика `uv-installer.sh` (суммы — на странице релиза uv на GitHub). Со старой суммой установка uv у новых пользователей остановится на проверке. `webui.bat` не должен запускать скачанные скрипты (`.ps1`, `-ExecutionPolicy Bypass`): Kaspersky принимал такой лаунчер за загрузчик. `uv.lock` пересоберите той же версией: `uvx --from uv==<версия> uv lock`.
 
 ## Pull request

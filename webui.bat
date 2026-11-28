@@ -23,11 +23,11 @@ REM Use the uv already on this computer, else the one in .uv, else download it o
 REM Paths below are relative to this folder (cd above): curl and tar get no non-ASCII names.
 set "UV=uv"
 where uv >nul 2>&1
-if not errorlevel 1 goto :run
+if not errorlevel 1 goto :yadisk_run
 set "UV=%USERPROFILE%\.local\bin\uv.exe"
-if exist "%UV%" goto :run
+if exist "%UV%" goto :yadisk_run
 set "UV=.uv\uv.exe"
-if exist "%UV%" goto :run
+if exist "%UV%" goto :yadisk_run
 
 echo [setup] uv not found. Downloading uv %UV_VERSION% into the .uv folder - runs ONLY ONCE...
 echo.
@@ -58,11 +58,40 @@ echo.
 echo [OK] uv installed.
 echo.
 
-:run
+:yadisk_run
+set "YADISK_RESTART_CODE=75"
+set "PY_VER=3.13"
+if exist ".python-version" set /p PY_VER=<".python-version"
+set "PY_VER=%PY_VER: =%"
+set "RUN_PY=%PY_VER%"
 echo [*] Starting via uv (first run downloads Python and dependencies, 1-2 min)...
 echo.
-"%UV%" run --no-dev webui.py
-goto :done
+"%UV%" sync --locked --no-dev --extra people --python "%PY_VER%"
+if errorlevel 1 (
+    echo.
+    echo [!] Trying compatible People Sorter set for older systems...
+    echo.
+    "%UV%" sync --locked --no-dev --extra people-legacy --python 3.12
+    if not errorlevel 1 (
+        set "RUN_PY=3.12"
+    ) else (
+        echo.
+        echo [!] People Sorter dependencies are unavailable on this system - starting backup without it...
+        echo.
+        "%UV%" sync --locked --no-dev --python "%PY_VER%"
+        if errorlevel 1 goto :yadisk_stopped
+    )
+)
+(
+    "%UV%" run --no-sync --no-dev --python "%RUN_PY%" webui.py
+    if errorlevel 75 if not errorlevel 76 (
+        echo.
+        echo [*] Update installed, restarting...
+        echo.
+        goto :yadisk_run
+    )
+    goto :yadisk_stopped
+)
 
 :uvbad
 del "%UV_ZIP%" >nul 2>&1
@@ -95,7 +124,7 @@ start "" "https://docs.astral.sh/uv/getting-started/installation/"
 pause
 exit /b 1
 
-:done
+:yadisk_stopped
 echo.
 echo ============================================================
 echo   Server stopped.

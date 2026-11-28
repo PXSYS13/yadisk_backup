@@ -8,12 +8,20 @@ import struct
 import threading
 from typing import Any
 
-import av
 from PIL import Image
 
 from sorter.utils import CancelledError, to_long_path
 
 log = logging.getLogger("photo_sorter.vision.video")
+
+try:
+    import av
+
+    VIDEO_AVAILABLE = True
+except ImportError as _av_exc:
+    av = None  # type: ignore[assignment]
+    VIDEO_AVAILABLE = False
+    log.warning("PyAV (av) недоступен (%s) — обработка видео пропущена, фото работают штатно", _av_exc)
 
 _FALLBACK_MAX_FRAMES = 4
 _FALLBACK_DECODE_LIMIT = 300
@@ -237,6 +245,8 @@ def extract_video_keyframes(
     """Извлекает ключевые RGB-кадры (frame_ms, PIL.Image) с учётом поворота и длительность видео."""
     if stop_event is not None and stop_event.is_set():
         raise CancelledError("Извлечение кадров видео остановлено пользователем")
+    if not VIDEO_AVAILABLE or av is None:
+        return [], None
 
     eff_max = max(1, int(max_frames))
     eff_step = max(0.05, float(step_sec))

@@ -36,14 +36,25 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Lint
-        run: uv run --locked --python ${{ matrix.python-version }} ruff check .
+        run: uv run --locked --extra people --python ${{ matrix.python-version }} ruff check .
 
       - name: ShellCheck
         if: runner.os == 'Linux'
         run: shellcheck webui.sh webui.command
 
       - name: Tests
-        run: uv run --locked --python ${{ matrix.python-version }} pytest -q
+        run: uv run --locked --extra people --python ${{ matrix.python-version }} pytest -q
         env:
           # open() без encoding= на Windows-раннерах (cp1252) уже ломал CI — ловим класс ошибки целиком
           PYTHONWARNDEFAULTENCODING: "1"
+
+      - name: Core-only smoke (without people extra)
+        run: |
+          uv sync --locked --no-dev --python ${{ matrix.python-version }}
+          uv run --no-sync --no-dev python -c "import webui, webapp.people as p; assert p.PEOPLE_AVAILABLE is False; st = p.api_people_status(); assert st['available'] is False"
+
+      - name: Legacy people smoke (Python 3.12, macOS 11+ wheels)
+        if: matrix.python-version == '3.13'
+        run: |
+          uv sync --locked --no-dev --extra people-legacy --python 3.12
+          uv run --no-sync --no-dev --python 3.12 python -c "import onnxruntime, av, webui, webapp.people as p; assert p.PEOPLE_AVAILABLE is True; print('legacy OK:', onnxruntime.__version__, av.__version__)"

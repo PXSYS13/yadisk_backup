@@ -48,6 +48,15 @@ def _isolate_project_files(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp.updates, "RELEASES_URL", "")
     monkeypatch.setattr(webapp.updates, "_state", {"asked_at": None, "latest": None, "busy": False})
     monkeypatch.setattr(webapp.updates, "_thread", None)
+    # «Обновить программу»: никакого обновления, перезапуска и запрета задач из прошлых тестов
+    import webapp.selfupdate
+    import webapp.tasks
+
+    for name in ("_job", "_thread", "_restart_hook", "_port", "exit_code", "_updated", "_fallback"):
+        monkeypatch.setattr(webapp.selfupdate, name, None)
+    monkeypatch.setattr(webapp.tasks.tm, "_frozen", None)
+    monkeypatch.delenv(webapp.selfupdate.RESTART_ENV, raising=False)
+    monkeypatch.delenv(webapp.selfupdate.URL_ENV, raising=False)
     # Сохранение кук спрашивает Яндекс, пускает ли он с ними: в тестах — без сети, «пускает»
     import webapp.access
     monkeypatch.setattr(webapp.access, "get_sk_uid", lambda s: ("sk", "1"))
@@ -70,6 +79,10 @@ def _isolate_project_files(tmp_path, monkeypatch):
     monkeypatch.setattr(sorter_mgr_mod, "manager", fresh_people_mgr)
     monkeypatch.setattr(people_mod, "manager", fresh_people_mgr)
     yield
+    # Жёсткий выход после перезапуска (os._exit) не должен сработать посреди следующих тестов
+    fallback = webapp.selfupdate._fallback
+    if fallback is not None:
+        fallback.cancel()
     fresh_upload_mgr.shutdown(timeout=5.0)
     fresh_people_mgr.shutdown(timeout=5.0)
     sorter_paths.configure_data_dir(None)

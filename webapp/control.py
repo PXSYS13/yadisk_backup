@@ -207,6 +207,9 @@ def api_rescue_start():
             # Безлимит качается, Диск ждал подписки: «Я продлил подписку — продолжить»
             return _continue_after_subscription()
         return _resp(rescue.start())  # идёт — значит «попробовать отложенные сейчас»
+    frozen = tm.frozen()
+    if frozen:  # идёт обновление программы: задачи всё равно не запустились бы
+        return {"ok": False, "msg": frozen}
     if organize_moving():
         return {"ok": False, "msg": ORGANIZE_BUSY}
     if verify_running():
@@ -258,6 +261,9 @@ class RetryFailedPayload(BaseModel):
 @router.post("/api/rescue/retry_failed")
 def api_rescue_retry_failed(p: RetryFailedPayload):
     """«Повторить для N файлов»: упавшие — снова в очередь, и сразу качать."""
+    frozen = tm.frozen()
+    if frozen:
+        return {"ok": False, "msg": frozen}
     if verify_running():
         return {"ok": False, "msg": VERIFY_BUSY}
     n = 0
@@ -301,6 +307,9 @@ def api_rescue_relist(p: RelistPayload):
 
     Идёт спасение — пересобирает ветки этих источников; не идёт — запускает его по настройкам.
     """
+    frozen = tm.frozen()
+    if frozen:
+        return {"ok": False, "msg": frozen}
     enabled = config.get_settings()["sources"]
     sources = [s for s in ("disk", "unlim") if s in enabled] if p.source == "all" else [p.source]
     if not sources or not set(sources) <= set(enabled):

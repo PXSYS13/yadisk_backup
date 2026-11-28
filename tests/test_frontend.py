@@ -786,76 +786,177 @@ def test_details_shows_which_folders_are_complete():
     assert "Файлы прямо в этой папке" in inner and "2022" in inner and "не скачались" not in inner
 
 
-# «Вышла версия X.Y.Z»: плашка на Главной и строка в «Помощи» — в node, хранилище подменено
+# «Вышла версия X.Y.Z» и «Обновить программу»: плашки на Главной и в «Помощи», экран перезапуска,
+# перезагрузка страницы за новой версией — в node, DOM и хранилища подменены
 _UPDATE_HARNESS = r"""
 const path = require('path');
 global.window = globalThis;
 global.addEventListener = () => {};
-global.location = { search: '', hash: '', pathname: '/' };
+let reloads = 0;
+global.location = { search: '', hash: '', pathname: '/', reload: () => { reloads += 1; } };
 const nodes = {};
-const el = () => ({ innerHTML: '', textContent: '', className: '', dataset: {}, style: {},
-  addEventListener() {}, setAttribute() {}, classList: { add() {}, remove() {}, toggle() {} } });
+const el = () => {
+  const cls = new Set();
+  return { innerHTML: '', textContent: '', className: '', dataset: {}, style: {}, addEventListener() {}, setAttribute() {},
+    classList: { add: (c) => cls.add(c), remove: (c) => cls.delete(c), contains: (c) => cls.has(c),
+      toggle: (c, on) => { if (on === undefined ? !cls.has(c) : on) cls.add(c); else cls.delete(c); } } };
+};
+const meta = { content: process.env.PAGE_VERSION };
 global.document = Object.assign(el(), { documentElement: el(), body: el(), createElement: el,
-  querySelectorAll: () => [], querySelector: () => null, getElementById: (id) => (nodes[id] = nodes[id] || el()) });
+  querySelectorAll: () => [], querySelector: (q) => (q.includes('app-version') ? meta : null),
+  getElementById: (id) => (nodes[id] = nodes[id] || el()) });
 const store = {};
+const session = {};
 let broken = false;
 global.localStorage = {
   getItem: (k) => { if (broken) throw new Error('нет доступа'); return k in store ? store[k] : null; },
   setItem: (k, v) => { if (broken) throw new Error('нет доступа'); store[k] = String(v); },
 };
+global.sessionStorage = { getItem: (k) => (k in session ? session[k] : null), setItem: (k, v) => { session[k] = String(v); } };
 global.matchMedia = () => ({ matches: false, addEventListener() {} });
 for (const f of ['core.js', 'components.js', 'flag.js', 'screens/home.js', 'screens/help.js']) require(path.join(process.env.JS_DIR, f));
 const App = window.App;
 App.toast = () => {};
-const st = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-const withUpdate = (latest) => Object.assign({}, st, { update: Object.assign({}, st.update, { latest }) });
-const home = (s) => { App.screens.home.update(s); return nodes['home-update'].innerHTML; };
-const help = (s) => { App.screens.help.update(s); return nodes['help-update'].innerHTML; };
+const cases = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const home = (s) => { App.state.status = s; App.screens.home.update(s); return nodes['home-update'].innerHTML; };
+const help = (s) => { App.state.status = s; App.screens.help.update(s); return nodes['help-update'].innerHTML; };
 App.screens.help.mount(el());
-const out = { shown: home(st), help: help(st) };
-out.action = home(Object.assign({}, st, { rescue: Object.assign({}, st.rescue, { action: { id: 'token' } }) }));
-out.none = home(Object.assign({}, st, { update: null }));
+const out = { version: App.version };
+for (const [name, s] of Object.entries(cases)) out[name] = { home: home(s), help: help(s) };
+const st = cases.update;
+// «Скрыть до следующей версии»: эта версия больше не показывается, следующая — снова
 App.actions['update-hide']({ dataset: { version: st.update.latest } });
 out.stored = store['yadisk-update-hidden'];
 out.hidden = home(st);
+out.hidden_failed = home(cases.failed);
+out.hidden_running = home(cases.running);
 out.help_after_hide = help(st);
-out.next = home(withUpdate('99.0.0'));
-broken = true;  // приватный режим: хранилище бросает исключения
-out.broken = home(withUpdate('98.0.0'));
+out.next = home(Object.assign({}, st, { update: Object.assign({}, st.update, { latest: '99.0.0' }) }));
+// «Программа обновлена» — до «Понятно»
+App.actions['updated-ok']({ dataset: { version: cases.updated.updated.to } });
+out.updated_after_ok = home(cases.updated);
+// Приватный режим: хранилище бросает исключения, а скрытие помнится до перезагрузки страницы
+broken = true;
+const v98 = Object.assign({}, st, { update: Object.assign({}, st.update, { latest: '98.0.0' }) });
+out.broken = home(v98);
 App.actions['update-hide']({ dataset: { version: '98.0.0' } });
-out.broken_hidden = home(withUpdate('98.0.0'));
+out.broken_hidden = home(v98);
+// Перезапуск: пока сервер не отвечает — экран «Перезапускаю программу», через 90 с — что делать
+const overlay = document.getElementById('update-overlay');
+const restarting = { update_job: { state: 'restarting', to: '2.7.4', launcher: 'webui.command' } };
+App.watchRestart(restarting);
+out.overlay_online = overlay.classList.contains('hidden');
+App.watchRestart(null);
+out.overlay_offline = !overlay.classList.contains('hidden');
+out.overlay_title = nodes['update-overlay-title'].textContent;
+out.overlay_text = nodes['update-overlay-text'].textContent;
+const realNow = Date.now;
+Date.now = () => realNow() + 91 * 1000;
+App.watchRestart(null);
+out.late_title = nodes['update-overlay-title'].textContent;
+out.late_text = nodes['update-overlay-text'].textContent;
+Date.now = realNow;
+App.watchRestart({ update_job: null });
+out.overlay_after = overlay.classList.contains('hidden');
+// Сервер ответил новой версией — страница перезагружается один раз, без круга
+out.same = App.reloadIfUpdated({ app_version: process.env.PAGE_VERSION });
+out.newer = App.reloadIfUpdated({ app_version: '99.1.0' });
+out.again = App.reloadIfUpdated({ app_version: '99.1.0' });
+out.reloads = reloads;
 process.stdout.write(JSON.stringify(out));
 """
 
 
+def _with(st: dict, **install) -> dict:
+    return {**st, "update": {**st["update"], "install": {**st["update"]["install"], **install}}}
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js не установлен")
-def test_update_banner_on_home_and_in_help(monkeypatch):
+def test_update_banner_button_steps_and_restart(monkeypatch):
     monkeypatch.setenv("YADISK_DEMO", "1")
     monkeypatch.setattr(webapp.access, "check_token", lambda tok: {"ok": False, "msg": "Токен не задан"})
     client = TestClient(webui.app, headers={"Host": "localhost:8000"})
-    st = client.get("/api/status?demo=update").json()
+
+    def get(state: str) -> dict:
+        return client.get(f"/api/status?demo={state}").json()
+
+    st = get("update")
     latest = st["update"]["latest"]
-    res = subprocess.run(["node", "-e", _UPDATE_HARNESS], input=json.dumps(st), capture_output=True, text=True,
-                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js")})
+    failed = get("update_failed")
+    cases = {
+        "update": st,
+        "manual": _with(st, restart="manual", launcher="webui.command"),
+        "busy": _with(st, busy="Сначала остановите скачивание: кнопка «Остановить» на Главной."),
+        "git": _with(st, ok=False, why="Программа запущена из копии git — обновите её командой git pull."),
+        "action": {**st, "rescue": {**st["rescue"], "action": {"id": "token"}}},
+        "none": {**st, "update": None},
+        "running": get("update_running"),
+        "running_action": {**get("update_running"), "rescue": {**st["rescue"], "action": {"id": "token"}}},
+        "restart_manual": get("update_manual"),
+        "failed": failed,
+        "failed_broken": {**failed, "update_job": {**failed["update_job"], "rolled_back": False,
+                                                   "error": "Прежние файлы лежат в папке update_backup/x"}},
+        "updated": get("updated"),
+    }
+    res = subprocess.run(["node", "-e", _UPDATE_HARNESS], input=json.dumps(cases), capture_output=True, text=True,
+                         encoding="utf-8", env={**os.environ, "JS_DIR": str(ASSETS / "static" / "js"),
+                                                "PAGE_VERSION": utils.APP_VERSION})
     assert res.returncode == 0, res.stderr
     out = json.loads(res.stdout)
-    shown = out["shown"]
+    assert out["version"] == utils.APP_VERSION  # из <meta name="app-version">
+    shown = out["update"]["home"]
     assert f"Вышла версия {latest}" in shown and f"У вас версия {utils.APP_VERSION}" in shown
-    # Программа только подсказывает: архив скачивает сам человек по ссылке
-    assert 'href="https://github.com/PXSYS13/yadisk_backup/archive/refs/heads/main.zip"' in shown
+    # Кнопка ставит сама: архив вручную не нужен, человеку обещано, что данные останутся
+    assert 'data-action="update-install"' in shown and "Обновить программу" in shown and "disabled" not in shown
+    assert "перезапустится" in shown and "настройки останутся" in shown and "main.zip" not in shown
     assert f'href="{st["update"]["url"]}"' in shown and "Что нового" in shown
-    assert "поверх старой папки" in shown and "прогресс скачивания сохранятся" in shown
     assert f'data-action="update-hide" data-version="{latest}"' in shown
-    # В «Помощи» та же строка, но без «Скрыть»: туда приходят с проблемой, а новая версия может её решать
-    assert f"Вышла версия {latest}" in out["help"] and "update-hide" not in out["help"]
-    # Пока нужно действие — плашки нет; новой версии нет — тоже
-    assert out["action"] == "" and out["none"] == ""
-    # «Скрыть до следующей версии»: эту версию больше не показываем, следующую — снова
-    assert out["stored"] == latest and out["hidden"] == ""
+    # В «Помощи» то же, но без «Скрыть»: туда приходят с проблемой, а новая версия может её решать
+    assert f"Вышла версия {latest}" in out["update"]["help"] and "update-hide" not in out["update"]["help"]
+    assert "update-install" in out["update"]["help"]
+    # Старый лаунчер: перезапускать придётся самому — сказано заранее и чем
+    assert "перезапустить" in out["manual"]["home"] and "webui.command" in out["manual"]["home"]
+    # Пока качается — кнопка неактивна, рядом сказано почему
+    assert 'data-action="update-install" disabled' in out["busy"]["home"]
+    assert "Сначала остановите скачивание" in out["busy"]["home"]
+    # Кнопкой нельзя (копия из git) — по-старому, архив вручную и причина
+    git = out["git"]["home"]
+    assert "update-install" not in git and "git pull" in git
+    assert 'href="https://github.com/PXSYS13/yadisk_backup/archive/refs/heads/main.zip"' in git
+    assert "поверх старой папки" in git and "прогресс скачивания сохранятся" in git
+    # Пока нужно действие — плашки о версии нет; новой версии нет — тоже
+    assert out["action"]["home"] == "" and out["none"]["home"] == "" and out["none"]["help"] == ""
+    # Идущее обновление видно всегда: шаги, текущий — с подробностью, и просьба не закрывать окно
+    running = out["running"]["home"]
+    assert "Обновляю программу до версии" in running and "Не закрывайте чёрное окно" in running
+    assert '<li class="done">' in running and '<li class="now">' in running and "18 из 42" in running
+    assert "Перезапускаю программу" in running  # будущий шаг виден заранее
+    assert out["running_action"]["home"] == running and out["running"]["help"] == running
+    manual = out["restart_manual"]["home"]
+    assert "установлена" in manual and "webui.bat" in manual and "скачивание не запустится" in manual
+    bad = out["failed"]["home"]
+    assert "Обновить не получилось" in bad and "Всё вернул как было" in bad
+    assert 'data-action="update-install"' in bad and "Попробовать ещё раз" in bad and "main.zip" in bad
+    broken = out["failed_broken"]["home"]
+    assert "update_backup/x" in broken and "update-install" not in broken and "main.zip" not in broken
+    assert "Написать в Telegram" in broken
+    upd = out["updated"]["home"]
+    assert f"Программа обновлена до версии {utils.APP_VERSION}" in upd and "update_backup/" in upd
+    assert 'data-action="updated-ok"' in upd and out["updated"]["help"] == ""
+    assert out["updated_after_ok"] == ""
+    # «Скрыть до следующей версии»: и плашку, и ошибку обновления этой версии; идущее — нет
+    assert out["stored"] == latest and out["hidden"] == "" and out["hidden_failed"] == ""
+    assert out["hidden_running"] == running
     assert f"Вышла версия {latest}" in out["help_after_hide"]
     assert "Вышла версия 99.0.0" in out["next"]
-    # Хранилище недоступно — плашка работает, а скрытие помнится до перезагрузки страницы
     assert "Вышла версия 98.0.0" in out["broken"] and out["broken_hidden"] == ""
+    # Экран перезапуска: только пока сервер молчит; через 90 с — что делать, с именем лаунчера
+    assert out["overlay_online"] is True and out["overlay_offline"] is True
+    assert out["overlay_title"] == "Перезапускаю программу" and "2.7.4" in out["overlay_text"]
+    assert out["late_title"] == "Программа не запустилась сама" and "webui.command" in out["late_text"]
+    assert out["overlay_after"] is True
+    # Новая версия ответила — перезагрузка за ней, но один раз
+    assert out["same"] is False and out["newer"] is True and out["again"] is False and out["reloads"] == 1
 
 
 # Ядро: перерисовка без лишних записей, склонения, демо и обновление статуса — в node, fetch подменён

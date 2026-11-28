@@ -17,6 +17,7 @@ import os
 import platform
 import sys
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI
@@ -25,15 +26,19 @@ from fastapi.staticfiles import StaticFiles
 from utils import APP_VERSION, TELEGRAM_CHANNEL, YOUTUBE_VIDEO_URL, ensure_utf8_stdio
 from webapp import paths  # первым: читает .env, в нём бывает YADISK_PORT
 from webapp import (access, config, control, diagnostics, file_list, folders, guide, links, logs, pages, people, ports,
-                    status, upload_unlim)
+                    selfupdate, status, upload_unlim)
 
 log = logging.getLogger("webui")
+
+RESTART_PORT_WAIT_SEC = 2.5
+RESTART_PORT_STEP_SEC = 0.25
 
 app = FastAPI(title="Yandex.Disk Backup UI")
 app.middleware("http")(ports.csrf_guard)
 # Конкретные роутеры (/api/upload/*, /api/people/*) регистрируем ДО file_list (/api/{source}/files),
 # чтобы шаблон {source} не перехватывал префикс /api/upload/files.
-for _module in (status, control, access, upload_unlim, people, file_list, folders, links, logs, guide, pages):
+for _module in (status, control, access, upload_unlim, people, file_list, folders, links, logs, guide, pages,
+                selfupdate):
     app.include_router(_module.router)
 
 # Windows берёт MIME из реестра, и там .js бывает text/plain — браузер такой скрипт не выполнит
@@ -67,11 +72,34 @@ def main():
     _setup_logging()
     log.info("webui v%s старт: python %s, %s, проект %s", APP_VERSION,
              platform.python_version(), platform.platform(), paths.PROJECT)
+    # Эту версию только что поставила кнопка «Обновить программу»?
+    restarted = selfupdate.take_restart_marker()
 
     import uvicorn
 
     wanted = ports.PORT
-    sock, port, running = ports.choose_port(wanted, 1 if ports.PORT_FIXED else ports.PORT_TRIES)
+    sock = running = None
+    kept = False  # снова на прежнем порту после обновления, хотя обычный порт другой
+    # После «Обновить программу» — сначала свой прежний порт: открытая страница продолжит работать
+    # с этой копией, а не с соседней (копия для второго аккаунта могла бы занять первый свободный).
+    # На Windows без SO_REUSEADDR прежний процесс может освобождать сокет долю секунды —
+    # при автоперезапуске пробуем занять прежний порт до ~2,5 с, прежде чем уйти на другой.
+    old_port = (restarted or {}).get("port")
+    auto_restart = bool(restarted and restarted.get("restart") == "auto")
+    if type(old_port) is int and 1024 <= old_port <= 65535 and (not ports.PORT_FIXED or old_port == wanted):
+        if auto_restart:
+            deadline = time.monotonic() + RESTART_PORT_WAIT_SEC
+            while True:
+                sock, port, _ = ports.choose_port(old_port, 1)
+                if sock is not None or time.monotonic() >= deadline:
+                    break
+                time.sleep(min(RESTART_PORT_STEP_SEC, max(0.0, deadline - time.monotonic())))
+            kept = sock is not None and port != wanted
+        elif old_port != wanted:
+            sock, port, _ = ports.choose_port(old_port, 1)
+            kept = sock is not None
+    if sock is None:
+        sock, port, running = ports.choose_port(wanted, 1 if ports.PORT_FIXED else ports.PORT_TRIES)
     if running is not None:
         ports.show_running_copy(port, running)
         return
@@ -85,11 +113,14 @@ def main():
         sys.exit(1)
     ports.use_port(port)
     url = f"http://{ports.HOST}:{port}"
-    # Кто держит наш обычный порт: копия этой программы из другой папки (второй аккаунт) или чужая программа
-    neighbour = ports.other_copy_on(wanted) if port != wanted else None
-    if port != wanted:
+    # Кто держит наш обычный порт: копия этой программы из другой папки (второй аккаунт) или чужая программа.
+    # После обновления на прежнем порту не спрашиваем: в Windows отказ соединения ждёт секунды, а страница ждёт нас
+    neighbour = ports.other_copy_on(wanted) if port != wanted and not kept else None
+    if neighbour or (port != wanted and not kept):
         log.info("порт %d занят %s, работаю на %d", wanted,
                  "копией программы из другой папки" if neighbour else "другой программой", port)
+    elif kept:
+        log.info("после обновления работаю на прежнем порту %d", port)
 
     # Монитор Яндекса: два лёгких запроса в минуту, история в logs/yandex_health.jsonl
     diagnostics.start_health_monitor(lambda: config.get_config()["token"])
@@ -105,16 +136,21 @@ def main():
         print(f"  {ports.neighbour_text(neighbour)}")
         print(f"  Эта копия работает рядом, на {url}. У каждой копии свои ключ доступа, папка и прогресс.")
         print()
-    elif port != wanted:
+    elif port != wanted and not kept:
         print(f"  Порт {wanted} занят другой программой (в Linux так бывает со службой печати),")
         print(f"  поэтому программа работает на {url}")
         print()
-    print("  Сервер запускается, браузер откроется автоматически.")
+    # После перезапуска ради обновления страница уже открыта на этом порту и обновится сама
+    reopened = bool(restarted and restarted.get("restart") == "auto" and restarted.get("port") == port)
+    if reopened:
+        print(f"  Работает новая версия {APP_VERSION}. Страница в браузере обновится сама.")
+    else:
+        print("  Сервер запускается, браузер откроется автоматически.")
     print("  Чтобы остановить — закрой это окно или нажми Ctrl+C.")
     print()
 
     # Открыть браузер в фоне когда сервер готов (YADISK_NO_BROWSER=1 — не открывать: dev/CI)
-    if os.getenv("YADISK_NO_BROWSER") != "1":
+    if os.getenv("YADISK_NO_BROWSER") != "1" and not reopened:
         threading.Thread(target=ports.open_browser_when_ready, args=(ports.HOST, port), daemon=True).start()
     # Скачивание шло, когда программу закрыли (окно, перезагрузка, пропал свет), — продолжаем без кнопки
     threading.Thread(target=control.resume_after_restart, daemon=True).start()
@@ -124,7 +160,9 @@ def main():
     # log_config=None: своя настройка журналов uvicorn сняла бы наш файл-лог с uvicorn.error,
     # и тексты ошибок сервера (HTTP 500) не попадали бы ни в webui.log, ни в отчёт для поддержки
     server = uvicorn.Server(uvicorn.Config(app, host=ports.HOST, port=port, log_level="warning",
-                                           log_config=None))
+                                           log_config=None, timeout_graceful_shutdown=5))
+    # Обновление останавливает сервер и выходит с кодом 75 — лаунчер запускает новую версию
+    selfupdate.set_restart_hook(lambda: setattr(server, "should_exit", True), port)
     try:
         server.run(sockets=[sock])
     except KeyboardInterrupt:
@@ -148,16 +186,23 @@ def main():
             upload_mgr.manager.shutdown(timeout=5.0)
         except Exception as exc:  # noqa: BLE001
             log.warning("upload_mgr shutdown error: %s", exc)
-        try:
-            people.manager.shutdown(timeout=5.0)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("people.manager shutdown error: %s", exc)
+        if people.manager is not None:
+            try:
+                people.manager.shutdown(timeout=5.0)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("people.manager shutdown error: %s", exc)
         stop_and_wait(
             tm.stop_matching(SLOT_DISK)
             + tm.stop_matching(UNLIM_SLOT_PREFIX)
             + tm.stop_matching(SLOT_LINKS)
             + tm.stop_matching(SLOT_ORGANIZE)
         )
+        selfupdate.wait_for_files()
+        fallback = selfupdate._fallback
+        if fallback is not None:
+            fallback.cancel()
+    if selfupdate.exit_code is not None:
+        sys.exit(selfupdate.exit_code)
 
 
 if __name__ == "__main__":

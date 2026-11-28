@@ -183,8 +183,13 @@ def test_slow_github_never_blocks_status(monkeypatch):
         release.set()
         _wait_check()
     assert len(calls) == 1
-    assert client.get("/api/status").json()["update"] == {"current": utils.APP_VERSION, "latest": "999.0.0",
-                                                          "url": PAGE}
+    assert _release(client.get("/api/status").json()["update"]) == {"current": utils.APP_VERSION,
+                                                                    "latest": "999.0.0", "url": PAGE}
+
+
+def _release(upd: dict) -> dict:
+    """/api/status.update без install: что известно о новой версии на GitHub."""
+    return {k: upd[k] for k in ("current", "latest", "url")}
 
 
 def test_status_update_key_keeps_the_other_keys(monkeypatch):
@@ -196,7 +201,10 @@ def test_status_update_key_keeps_the_other_keys(monkeypatch):
                 "links", "demo", "diagnostics", "yandex_health", "free_space", "news", "exit_codes"):
         assert key in st, key
     monkeypatch.setitem(updates._state, "latest", {"version": "999.0.0", "url": PAGE})
-    assert webapp.status.api_status()["update"] == {"current": utils.APP_VERSION, "latest": "999.0.0", "url": PAGE}
+    upd = webapp.status.api_status()["update"]
+    assert _release(upd) == {"current": utils.APP_VERSION, "latest": "999.0.0", "url": PAGE}
+    # Можно ли поставить её кнопкой «Обновить программу» — webapp.selfupdate.install_info
+    assert set(upd["install"]) == {"ok", "why", "busy", "restart", "launcher"}
     monkeypatch.setitem(updates._state, "latest", {"version": utils.APP_VERSION, "url": PAGE})
     assert webapp.status.api_status()["update"] is None
 

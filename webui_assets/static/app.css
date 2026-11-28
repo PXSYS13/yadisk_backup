@@ -240,6 +240,27 @@ button.small .i,.btn.small .i{width:16px;height:16px}
 .banner.update .b-icon{background:var(--accent-soft);color:var(--accent-text)}
 .banner.update p{max-width:72ch}
 .banner.update .actions{gap:8px 16px;align-items:center}
+/* «Обновить программу»: шаги, вращение, экран перезапуска */
+.banner.update.busy{border-color:var(--accent-line)}
+.banner.update.ok .b-icon{background:var(--ok-soft);color:var(--ok)}
+.banner.update.err{border-color:var(--err-fill)}
+.banner.update.err .b-icon{background:var(--err-soft);color:var(--err)}
+.upd-note{display:flex;align-items:flex-start;gap:8px;margin-top:10px}
+.upd-note .i{width:18px;height:18px;flex:none;margin-top:2px;color:var(--warn)}
+.upd-steps{list-style:none;margin-top:12px;display:grid;gap:8px}
+.upd-steps li{display:flex;align-items:center;gap:10px;color:var(--text-3);font-size:15px;line-height:1.4}
+.upd-steps li.done{color:var(--text-2)}
+.upd-steps li.done .i{width:18px;height:18px;color:var(--ok);flex:none}
+.upd-steps li.now{color:var(--text);font-weight:500}
+.upd-dot{width:18px;height:18px;display:grid;place-items:center;flex:none}
+.upd-dot::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--border-strong)}
+.upd-spin{display:inline-block;width:18px;height:18px;border-radius:50%;border:2px solid var(--accent-soft);border-top-color:var(--accent-line);animation:spin .9s linear infinite;flex:none}
+.upd-spin.big{width:22px;height:22px;border-width:2.5px}
+.update-overlay{position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(8,10,16,.55)}
+.update-overlay-card{display:grid;justify-items:center;gap:10px;text-align:center;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:32px 28px;max-width:460px;width:100%;box-shadow:var(--shadow-lg)}
+.update-overlay-card h3{font-size:20px}
+.update-overlay-card p{color:var(--text-2);font-size:16px}
+.update-overlay.late .upd-spin{display:none}
 /* Тихая строка «не удаляйте файлы» под главной карточкой */
 .safety-note{display:flex;align-items:flex-start;gap:12px;padding:14px 16px;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--surface-2);color:var(--text-2);font-size:15px;line-height:1.45}
 .safety-note .i{width:20px;height:20px;color:var(--warn);margin-top:1px;stroke-width:1.75}

@@ -263,41 +263,145 @@
         останется где лежит и второй раз качаться не будет.</p>${btn}</div></div>`;
   };
 
-  // ── «Вышла версия X.Y.Z» (/api/status.update): только подсказка — программа сама
-  //    ничего не скачивает. На Главной её можно скрыть до следующей версии ──
+  // ── Новая версия программы. /api/status.update — вышла ли она и можно ли поставить её
+  //    кнопкой (install), update_job — как идёт обновление, updated — только что обновились ──
   App.UPDATE_ZIP_URL = 'https://github.com/PXSYS13/yadisk_backup/archive/refs/heads/main.zip';
   const RELEASES_URL = 'https://github.com/PXSYS13/yadisk_backup/releases/latest';
-  const UPDATE_KEY = 'yadisk-update-hidden';
-  let updateMemory = '';
-  App.updateHidden = {
-    get() {
-      try {
-        const v = localStorage.getItem(UPDATE_KEY);
-        if (typeof v === 'string') updateMemory = v;
-      } catch (e) { /* без хранилища помним до перезагрузки страницы */ }
-      return updateMemory;
-    },
-    save(version) {
-      updateMemory = String(version || '');
-      try { localStorage.setItem(UPDATE_KEY, updateMemory); } catch (e) { /* то же */ }
-    },
+  // Помнит одну версию: скрытую плашку или уже показанное «Программа обновлена».
+  // Без хранилища (приватный режим) помнит до перезагрузки страницы
+  const remembered = (key) => {
+    let memory = '';
+    return {
+      get() {
+        try {
+          const v = localStorage.getItem(key);
+          if (typeof v === 'string') memory = v;
+        } catch (e) { /* без хранилища — память страницы */ }
+        return memory;
+      },
+      save(version) {
+        memory = String(version || '');
+        try { localStorage.setItem(key, memory); } catch (e) { /* то же */ }
+      },
+    };
   };
+  App.updateHidden = remembered('yadisk-update-hidden');
+  App.updatedSeen = remembered('yadisk-updated-seen');
 
+  const updBanner = (cls, ic, title, body, actions = '') =>
+    `<section class="banner update${cls ? ` ${cls}` : ''}" aria-label="Обновление программы"><span class="b-icon">${ic}</span>
+      <div><h3>${title}</h3>${body}${actions ? `<div class="row actions">${actions}</div>` : ''}</div></section>`;
+  const whatsNew = (url) => `<a class="btn" href="${esc(url || RELEASES_URL)}" target="_blank" rel="noopener">${icon('external')}Что нового</a>`;
+  const zipButton = (label) => `<a class="btn" href="${esc(App.UPDATE_ZIP_URL)}" target="_blank" rel="noopener">${icon('download')}${label}</a>`;
+  const spinner = (cls = '') => `<span class="upd-spin${cls ? ` ${cls}` : ''}" aria-hidden="true"></span>`;
+  const note = (text) => `<p class="upd-note">${icon('info')}<span>${esc(text)}</span></p>`;
+
+  // «Вышла версия X.Y.Z»: кнопка «Обновить программу», а где кнопкой нельзя — архив вручную
   App.updateBanner = (u, hideable = false) => {
     if (!u || !u.latest) return '';
+    const inst = u.install || {};
     const hide = hideable
       ? `<button class="link" data-action="update-hide" data-version="${esc(u.latest)}">Скрыть до следующей версии</button>` : '';
-    return `<section class="banner update" aria-label="Новая версия программы"><span class="b-icon">${icon('sparkles')}</span>
-      <div><h3>Вышла версия ${esc(u.latest)}</h3>
-        <p>У вас версия ${esc(u.current)}. Скачайте архив, закройте чёрное окно программы и распакуйте архив
+    const title = `Вышла версия ${esc(u.latest)}`;
+    if (!inst.ok) {
+      return updBanner('', icon('sparkles'), title,
+        `<p>У вас версия ${esc(u.current)}. Скачайте архив, закройте чёрное окно программы и распакуйте архив
           поверх старой папки с заменой файлов, затем запустите программу снова. Ключ, данные входа, папка
-          и прогресс скачивания сохранятся.</p>
-        <div class="row actions">
-          <a class="btn" href="${esc(App.UPDATE_ZIP_URL)}" target="_blank" rel="noopener">${icon('download')}Скачать новую версию</a>
-          <a class="btn" href="${esc(u.url || RELEASES_URL)}" target="_blank" rel="noopener">${icon('external')}Что нового</a>
-          ${hide}
-        </div></div></section>`;
+          и прогресс скачивания сохранятся.</p>${inst.why ? note(inst.why) : ''}`,
+        zipButton('Скачать новую версию') + whatsNew(u.url) + hide);
+    }
+    const after = inst.restart === 'auto'
+      ? 'Программа сама скачает её с GitHub, сохранит копию нынешней версии и перезапустится — это займёт около минуты.'
+      : `Программа сама скачает её с GitHub и сохранит копию нынешней версии. Потом программу нужно будет
+          перезапустить: закрыть чёрное окно и снова запустить ${esc(inst.launcher || 'webui.bat')}.`;
+    return updBanner('', icon('sparkles'), title,
+      `<p>У вас версия ${esc(u.current)}. ${after} Скачанные файлы, ключ, данные входа и настройки останутся
+        на месте.</p>${inst.busy ? note(inst.busy) : ''}`,
+      `<button class="primary" data-action="update-install"${inst.busy ? ' disabled' : ''}>${icon('download')}Обновить программу</button>` +
+      whatsNew(u.url) + hide);
   };
+
+  // Шаги обновления: сделанные — с галочкой, текущий — с вращением и подробностью, остальные — серые
+  function updateSteps(job) {
+    const steps = job.steps || [];
+    const at = steps.findIndex(([id]) => id === job.step);
+    return `<ol class="upd-steps">${steps.map(([id, text], i) => {
+      const now = i === at;
+      const mark = i < at ? icon('check') : now ? spinner() : '<span class="upd-dot" aria-hidden="true"></span>';
+      const detail = now && job.detail ? ` <span class="tiny">· ${esc(job.detail)}</span>` : '';
+      return `<li class="${i < at ? 'done' : now ? 'now' : ''}">${mark}<span>${esc(now && job.text ? job.text : text)}${detail}</span></li>`;
+    }).join('')}</ol>`;
+  }
+
+  // Как идёт обновление (/api/status.update_job)
+  App.updateJobBanner = (job, u) => {
+    if (!job) return '';
+    const version = job.to ? ` ${esc(job.to)}` : '';
+    switch (job.state) {
+      case 'running':
+        return updBanner('busy', spinner('big'), `Обновляю программу${job.to ? ` до версии ${esc(job.to)}` : ''}`,
+          `<p>Не закрывайте чёрное окно программы — это займёт около минуты. Скачанные файлы, ключ и настройки
+            останутся на месте.</p>${updateSteps(job)}`);
+      case 'restarting':
+        return updBanner('busy', spinner('big'), 'Перезапускаю программу',
+          `<p>Новая версия${version} установлена. Страница обновится сама через несколько секунд.</p>`);
+      case 'restart_manual':
+        return updBanner('ok', icon('check'), `Новая версия${version} установлена`,
+          `<p>Осталось перезапустить программу: закройте её чёрное окно и снова запустите
+            ${esc(job.launcher || 'webui.bat')}. До перезапуска работает прежняя версия, и скачивание не запустится.</p>`);
+      case 'failed': {
+        const retry = job.rolled_back && u && (u.install || {}).ok
+          ? `<button class="primary" data-action="update-install">${icon('refresh')}Попробовать ещё раз</button>` : '';
+        return updBanner('err', icon('alert'), 'Обновить не получилось', `<p>${esc(job.error || '')}</p>`,
+          retry + (job.rolled_back ? zipButton('Скачать архив вручную') : '') +
+          `<a class="btn" href="${esc(App.telegramUrl())}" target="_blank" rel="noopener">${icon('send')}Написать в Telegram</a>`);
+      }
+      default:
+        return '';
+    }
+  };
+
+  // «Программа обновлена до версии X» — первые минуты после перезапуска
+  App.updatedBanner = (upd) => !upd ? '' : updBanner('ok', icon('check'), `Программа обновлена до версии ${esc(upd.to)}`,
+    `<p>Скачанные файлы, ключ и настройки на месте.${upd.backup
+      ? ` Копия прежней версии${upd.from ? ` ${esc(upd.from)}` : ''} — в папке программы: ${esc(upd.backup)}.` : ''}</p>`,
+    whatsNew('') + `<button class="link" data-action="updated-ok" data-version="${esc(upd.to)}">Понятно</button>`);
+
+  // Что показать про обновление. Идущее обновление — всегда; остальное на Главной молчит,
+  // пока нужно ваше действие или плашку скрыли до следующей версии
+  App.updateBlock = (s, home = false) => {
+    const u = s.update;
+    const job = s.update_job;
+    if (job && job.state !== 'failed') return App.updateJobBanner(job, u);
+    const quiet = home && !!(((s.rescue || {}).action) || (u && App.updateHidden.get() === u.latest));
+    if (job) return quiet ? '' : App.updateJobBanner(job, u);
+    if (home && s.updated && App.updatedSeen.get() !== s.updated.to) return App.updatedBanner(s.updated);
+    return !u || quiet ? '' : App.updateBanner(u, home);
+  };
+
+  App.telegramUrl = () => ((App.state.status || {}).telegram_url) || 'https://t.me/davronsv';
+
+  App.action('update-install', async (btn) => {
+    const u = (App.state.status || {}).update || {};
+    const inst = u.install || {};
+    if (App.demo) { App.toast('Это демо: обновление здесь не запускается', 'info'); return; }
+    if (inst.busy) { App.toast(inst.busy, 'err', 8000); return; }
+    const sure = await App.confirm({
+      title: `Обновить программу${u.latest ? ` до версии ${u.latest}` : ''}?`,
+      text: inst.restart === 'auto'
+        ? 'Программа скачает новую версию с GitHub, сохранит копию нынешней и перезапустится — это займёт около минуты. ' +
+          'Скачанные файлы, ключ, данные входа и настройки останутся на месте.'
+        : 'Программа скачает новую версию с GitHub и сохранит копию нынешней. Потом её нужно будет перезапустить: ' +
+          `закрыть чёрное окно и снова запустить ${inst.launcher || 'webui.bat'}. Скачанные файлы, ключ и настройки останутся на месте.`,
+      ok: 'Обновить',
+    });
+    if (sure) await App.run(btn, () => App.api.post('/api/update/install'));
+  });
+
+  App.action('updated-ok', (el) => {
+    App.updatedSeen.save(el.dataset.version);
+    App.render();
+  });
 
   // ── Лента «Что происходит» ──
   App.feedCard = (r) => {

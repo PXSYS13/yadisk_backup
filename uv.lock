@@ -2,13 +2,24 @@ version = 1
 revision = 5
 requires-python = ">=3.10, <3.14"
 resolution-markers = [
-    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version >= '3.12' and platform_machine != 'x86_64') or (python_full_version >= '3.12' and sys_platform != 'darwin')",
-    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version == '3.11.*' and platform_machine != 'x86_64') or (python_full_version == '3.11.*' and sys_platform != 'darwin')",
-    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin')",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version >= '3.12' and sys_platform != 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version < '3.11' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version >= '3.12' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version >= '3.12' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "(python_full_version == '3.11.*' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "(python_full_version < '3.11' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version < '3.11' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version >= '3.12' and sys_platform != 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version < '3.11' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
 ]
+conflicts = [[
+    { package = "yadisk-backup", extra = "people" },
+    { package = "yadisk-backup", extra = "people-legacy" },
+]]
 
 [[package]]
 name = "annotated-doc"
@@ -40,6 +51,43 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a9/d2/f4d173e22df740bc37b1db102b386ba719b66e95b0f0d751f556b387e6d2/anyio-4.15.1.tar.gz", hash = "sha256:9f28306018cbd6d329e64a36d58256edff76dd996fe423bc957326e578b82a94", size = 276966, upload-time = "2026-09-05T10:42:39.44Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/12/b8/4bd346e22b28902df4d651910f5242c28d84e4a5c2435ca5c3f797ed7e2e/anyio-4.15.1-py3-none-any.whl", hash = "sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101", size = 132079, upload-time = "2026-09-05T10:42:37.923Z" },
+]
+
+[[package]]
+name = "av"
+version = "14.1.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version == '3.11.*' or (python_full_version >= '3.12' and sys_platform != 'emscripten')",
+    "python_full_version < '3.11'",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c1/8c/8551a53c713424aff5ae1600f17f7407e64761d4eca8854013ee15f2c090/av-14.1.0.tar.gz", hash = "sha256:81a0185af0237016049c2b1560d51d5895ef56763ea7ebab939baa7b6b87e6f7", size = 4049387, upload-time = "2025-01-25T20:48:55.512Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/85/1c333dce8dcfdaaa56b71453a80d9973b9c10104b356a65b69795b4097b5/av-14.1.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:cab602785d583c9ef948da1cca0c2bba9baaf27aa6bd6acaa740599b4a99653e", size = 22096424, upload-time = "2025-01-25T20:46:15.326Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/62/746757d89ec8f31612cd0606b765577c48a10c1bc3a5ae45cb81dcf5fb95/av-14.1.0-cp310-cp310-macosx_11_0_x86_64.whl", hash = "sha256:fe00d6dfd712e3b66ec619ff1bae38c6b07181fc2ccae832922afcea18198f6f", size = 27481312, upload-time = "2025-01-25T20:46:21.44Z" },
+    { url = "https://files.pythonhosted.org/packages/ac/27/4b48a589f63ed80d8da94e8ffd5ea1fba52a761d7a93a5c0aa90dacc8c01/av-14.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:a5de01b2352253fdcbc56bbd065191124f65316bd4fa799b5c519ba9228b665b", size = 36463052, upload-time = "2025-01-25T20:46:26.982Z" },
+    { url = "https://files.pythonhosted.org/packages/58/19/2b8492e8cfa57a471a2ea8ee2e8c5f822f3d3833d13d73ceab8b410125d8/av-14.1.0-cp310-cp310-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:bd496ece3dd1dae6b3e633ffc9c723a839f84288289e803ef80df69d2d52ec99", size = 34858085, upload-time = "2025-01-25T20:46:32.986Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/ec/f85ed93c29c8e5f2a2a8c66eb868820bd171767d4caa3b67f24c481fa271/av-14.1.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2f31d25c617f4501b82daa2b2c2329ac985c35afb15b5701da1d99733a7a391b", size = 38673687, upload-time = "2025-01-25T20:46:39.165Z" },
+    { url = "https://files.pythonhosted.org/packages/93/c8/f670c61b12efbdf413d8b873ac9a20e96fbef7959d34646b37b71821d1bf/av-14.1.0-cp310-cp310-win_amd64.whl", hash = "sha256:9d53f064f9b07023bffe9e7b87083afe734923970ebe6ac74c33928533303159", size = 30618754, upload-time = "2025-01-25T20:46:44.975Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/41/1a0a6ba1290d0830af8b785702602acf1898e5b91bfa2efbbb66ee974fd9/av-14.1.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:29168d9ebf43c389c920731fc360f75c96fb351b2bbde04f697f29151beabcfb", size = 22088248, upload-time = "2025-01-25T20:46:48.926Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/e8/6035e2094a0661545dae5d8f8f7dbb2ee4299bd248d28d2edd5cc5b6fa85/av-14.1.0-cp311-cp311-macosx_11_0_x86_64.whl", hash = "sha256:1779595be0c6aa6355ce486ace5bb8dd43225b4ab6d6e43819f647a132201646", size = 27474801, upload-time = "2025-01-25T20:46:53.038Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/67/ff9baab3bb3b21f09bb9841bf8f0e6262e9f7430fa7f1adc163db2ca5570/av-14.1.0-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:3a12e0fd154e1cc792b687c332c2f853c4829223bfd2c3dd7995e98d4cb5c3c3", size = 37354869, upload-time = "2025-01-25T20:46:58.414Z" },
+    { url = "https://files.pythonhosted.org/packages/59/a2/0fa3f5dfd5237f9e705840e33836cde5eddbb90093ee71d2336ff42236c9/av-14.1.0-cp311-cp311-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:00cf0dcb4329fe3b80c3bbb579e851a3d7fa5018cea8c96c847c835b586504fa", size = 35651455, upload-time = "2025-01-25T20:47:05.054Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/8d/4f938f66ae2d9256773f478c4bbb6e6e88da87e330607472cd84211c4304/av-14.1.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:249b8104fbd7671a0f4c67e168ad92fbb3e2695a55b25015f33e8f7031efc0a4", size = 39545613, upload-time = "2025-01-25T20:47:11.045Z" },
+    { url = "https://files.pythonhosted.org/packages/0b/43/7d59012ab2a7c3b112d6f00809c880d4e017a176dd8fd102d11fdd613022/av-14.1.0-cp311-cp311-win_amd64.whl", hash = "sha256:242a2ce86be8c6d34538ce987c3acc742b69205422850d8091bc640d4adf4aa9", size = 30620888, upload-time = "2025-01-25T20:47:16.655Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/3f/9fb6a691f52a38917330d7025690445db1aff3eff5887852a44a0728511d/av-14.1.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:d2ca492e369b5628c8a1fc6889c1ac1f66ec8e4b99d2cc2633e7eaf4d2c82e66", size = 22093254, upload-time = "2025-01-25T20:47:20.718Z" },
+    { url = "https://files.pythonhosted.org/packages/af/08/b1de0d440e73b3dfd117cedd2dcbb81eabe601da4ea84aa12d66bc9b3716/av-14.1.0-cp312-cp312-macosx_11_0_x86_64.whl", hash = "sha256:8bf8db92bd986e3278b93bd7ca187bf753bb56d63a0015160fe1d3bba69f30e7", size = 27487693, upload-time = "2025-01-25T20:47:25.507Z" },
+    { url = "https://files.pythonhosted.org/packages/71/e1/36ef30c21c115256fd4d3bc98ed9233060ec05b2bb6ac265bf526dd84447/av-14.1.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:c5fdaf28c0d2efd19de06cbcf6c58db6ce4e6bafdda47df88f287fd5f616532f", size = 37601884, upload-time = "2025-01-25T20:47:31.36Z" },
+    { url = "https://files.pythonhosted.org/packages/93/0a/7537c0076f68237dcf158f6fea0838b7e3825214993daf9854a2f5c36036/av-14.1.0-cp312-cp312-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:f9bb976fd83ee720d0aa75725fb73616d5249ec275a7ac79dc3a0f6e4f8cc60c", size = 35924125, upload-time = "2025-01-25T20:47:37.595Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/2e/1f9b6ab22d75e07070fb2ddffecebefdfbc2e3306609d4e2b288f0f9d9b1/av-14.1.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:a258a03e3f5d19ce599281968402ad5e799cdc0a84f53fe47ac01b27bb61e62a", size = 39889204, upload-time = "2025-01-25T20:47:42.715Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/a1/89398ede8f5c0648caf84a14dc26ba6e833fc02578dd2b869d9eb549ab12/av-14.1.0-cp312-cp312-win_amd64.whl", hash = "sha256:49cb87b7c49c0a655928e313d00173c2b25f2f2e33f0ca433c32ccbb4f722679", size = 30624267, upload-time = "2025-01-25T20:47:47.812Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/1e/8643dee1647e7714dc2e34ab8717203037080f3a37a9f82c5a8efc180a24/av-14.1.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:012fb4d08576432b155a8da8d2012a40fb7d7efa63bf117d669ea06ec75cb9a7", size = 22052107, upload-time = "2025-01-25T20:47:52.647Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/3f/2ff3a1f580df369157029029992cce59f826042e02448613083f9f530137/av-14.1.0-cp313-cp313-macosx_11_0_x86_64.whl", hash = "sha256:6ac867ab34b9cfbf3ccdd3f497aaddcbb04cb34f17cf710c8db60cae8d7f1ad7", size = 27445950, upload-time = "2025-01-25T20:47:57.852Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/f8/97eb396a2fbd8af26ff73240a2b0b68a848766958847c99c06d5167dabc0/av-14.1.0-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:5a251c73ed28e8b172b5b67117e0248c4d81526ee8ab1d4792f2060c0114b846", size = 37242905, upload-time = "2025-01-25T20:48:04.255Z" },
+    { url = "https://files.pythonhosted.org/packages/99/8b/71e2e6c943f4a784d675190d8be9df531026989259a36aae7b1049771079/av-14.1.0-cp313-cp313-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:f110133c762f310e03f101986ca16f81c5bda80a839969dddeb0c400f8a73c8d", size = 35578890, upload-time = "2025-01-25T20:48:09.459Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/f8/e888e7a583e2dbe12bb710ae4474e189b86b399cdb380ab1e9a311cd9959/av-14.1.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:222303728d59edfbc241d7e944d5479d3bdfe98d33574a5e60aa7a23d54568fa", size = 39539552, upload-time = "2025-01-25T20:48:15.614Z" },
+    { url = "https://files.pythonhosted.org/packages/3d/6a/a111a144ca52b67e0553437185f081cbe62bec0d7211ff38d33665985ff5/av-14.1.0-cp313-cp313-win_amd64.whl", hash = "sha256:f59d91f2dad90683db55c66e98113bb28a87f4e113eec103756d51ad05db3d8a", size = 30595292, upload-time = "2025-01-25T20:48:20.534Z" },
 ]
 
 [[package]]
@@ -241,7 +289,7 @@ name = "coloredlogs"
 version = "15.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "humanfriendly" },
+    { name = "humanfriendly", marker = "python_full_version < '3.11' or (platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people') or extra == 'extra-13-yadisk-backup-people-legacy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cc/c7/eed8f27100517e8c0e6b923d5f0845d0cb99763da6fdee00478f91db7325/coloredlogs-15.0.1.tar.gz", hash = "sha256:7c991aa71a4577af2f82600d8f8f3a89f936baeaf9b50a9c197da014e5bf16b0", size = 278520, upload-time = "2021-06-11T10:22:45.202Z" }
 wheels = [
@@ -312,8 +360,8 @@ name = "httpcore2"
 version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11" },
-    { name = "truststore" },
+    { name = "h11", marker = "python_full_version == '3.11.*' or (python_full_version >= '3.12' and sys_platform != 'emscripten') or (python_full_version >= '3.12' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "truststore", marker = "python_full_version == '3.11.*' or (python_full_version >= '3.12' and sys_platform != 'emscripten') or (python_full_version >= '3.12' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c0/61/afa9d6b7452f9eca73f73d45324eb0bb52f098fd5e6049bf6b8263be9b4e/httpcore2-2.16.0.tar.gz", hash = "sha256:c72cd0413563b17e1cd8354677dff887466f8ec2551679759e93126534428643", size = 69886, upload-time = "2026-10-21T07:09:45.31Z" }
 wheels = [
@@ -340,12 +388,12 @@ name = "httpx2"
 version = "2.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "anyio", marker = "sys_platform != 'emscripten'" },
-    { name = "httpcore2", marker = "sys_platform != 'emscripten'" },
-    { name = "httpx2-jsfetch", marker = "python_full_version >= '3.12' and sys_platform == 'emscripten'" },
-    { name = "idna" },
-    { name = "truststore", marker = "sys_platform != 'emscripten'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "anyio", marker = "(python_full_version >= '3.11' and sys_platform != 'emscripten') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "httpcore2", marker = "(python_full_version >= '3.11' and sys_platform != 'emscripten') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "httpx2-jsfetch", marker = "(python_full_version >= '3.12' and sys_platform == 'emscripten') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "idna", marker = "python_full_version >= '3.11' or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "truststore", marker = "(python_full_version >= '3.11' and sys_platform != 'emscripten') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.11' and python_full_version < '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/43/73/5ca2cedf5e4e50423d1c258877865a6b62793633b561c58499f8aeb33b7e/httpx2-2.16.0.tar.gz", hash = "sha256:0d54c98128e8f2ff7fbbde0fca8c359e5f032edeaaaac443cdb7f31f685bcd7f", size = 103116, upload-time = "2026-10-21T07:09:46.348Z" }
 wheels = [
@@ -366,7 +414,7 @@ name = "humanfriendly"
 version = "10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyreadline3", marker = "sys_platform == 'win32'" },
+    { name = "pyreadline3", marker = "(python_full_version < '3.11' and sys_platform == 'win32') or (sys_platform == 'win32' and extra == 'extra-13-yadisk-backup-people-legacy') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cc/3f/2c29224acb2e2df4d2046e4c73ee2662023c58ff5b113c4c1adac0886c43/humanfriendly-10.0.tar.gz", hash = "sha256:6b0b831ce8f15f7300721aa49829fc4e83921a9a301cc7f606be6686a2288ddc", size = 360702, upload-time = "2021-09-17T21:40:43.31Z" }
 wheels = [
@@ -396,8 +444,10 @@ name = "markdown"
 version = "3.10.3"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin')",
+    "python_full_version < '3.11' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version < '3.11' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version < '3.11' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version < '3.11' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/29/6f/da4c6aea59b3001f2e8c0ec7497475aadaf3b021c10cab5b2858f0f32b26/markdown-3.10.3.tar.gz", hash = "sha256:3589362618f743188b4d955b874402bc814f4f83f544dc207719f4baa7d9c45f", size = 372596, upload-time = "2026-07-30T19:05:29.005Z" }
 wheels = [
@@ -409,10 +459,15 @@ name = "markdown"
 version = "3.11"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version >= '3.12' and platform_machine != 'x86_64') or (python_full_version >= '3.12' and sys_platform != 'darwin')",
-    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version == '3.11.*' and platform_machine != 'x86_64') or (python_full_version == '3.11.*' and sys_platform != 'darwin')",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version >= '3.12' and sys_platform != 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version >= '3.12' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version >= '3.12' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "(python_full_version == '3.11.*' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version >= '3.12' and sys_platform != 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f8/4f/700155c8c20d9e655dd0732b5fc3c7614f291b9148da271d7388e50bf774/markdown-3.11.tar.gz", hash = "sha256:180224db6aed87ba9ce1f2781ebcd5826253de8ff637112090e24b84502bbf9f", size = 485623, upload-time = "2026-09-25T13:46:23.473Z" }
 wheels = [
@@ -433,8 +488,12 @@ name = "numpy"
 version = "2.2.6"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin')",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version >= '3.12' and sys_platform != 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version < '3.11' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version < '3.11' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version < '3.11' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version < '3.11' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/76/21/7d2a95e4bba9dc13d043ee156a356c0a8f0c6309dff6b21b4d71a073b8a8/numpy-2.2.6.tar.gz", hash = "sha256:e29554e2bef54a90aa5cc07da6ce955accb83f21ab5de01a62c8478897b264fd", size = 20276440, upload-time = "2025-05-17T22:38:04.611Z" }
 wheels = [
@@ -499,8 +558,9 @@ name = "numpy"
 version = "2.4.6"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version == '3.11.*' and platform_machine != 'x86_64') or (python_full_version == '3.11.*' and sys_platform != 'darwin')",
+    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version == '3.11.*' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d0/ad/fed0499ce6a338d2a03ebae59cd15093910c8875328855781952abf6c2fe/numpy-2.4.6.tar.gz", hash = "sha256:f3a3570c4a2a16746ac2c31a7c7c7b0c186b95ce902e33db6f28094ed7387dda", size = 20735807, upload-time = "2026-05-18T23:37:14.07Z" }
 wheels = [
@@ -561,8 +621,9 @@ name = "numpy"
 version = "2.5.5"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version >= '3.12' and platform_machine != 'x86_64') or (python_full_version >= '3.12' and sys_platform != 'darwin')",
+    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version >= '3.12' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version >= '3.12' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version >= '3.12' and sys_platform != 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/4e/3a/8770c288c47f0b5c2a786d3c20e79f66fd245f2d42cd232d7cd5e00e83e5/numpy-2.5.5.tar.gz", hash = "sha256:5cddc243c75114ba845f01b1f87aca1572dbf7b6c2d88636ed3e1d2bccd7f1bf", size = 20873892, upload-time = "2026-11-15T21:32:28.607Z" }
 wheels = [
@@ -592,6 +653,41 @@ wheels = [
 
 [[package]]
 name = "onnxruntime"
+version = "1.19.2"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.12' and sys_platform == 'emscripten'",
+    "python_full_version == '3.11.*' or (python_full_version >= '3.12' and sys_platform != 'emscripten')",
+    "python_full_version < '3.11'",
+]
+dependencies = [
+    { name = "coloredlogs" },
+    { name = "flatbuffers" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "packaging" },
+    { name = "protobuf" },
+    { name = "sympy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/39/18/272d3d7406909141d3c9943796e3e97cafa53f4342d9231c0cfd8cb05702/onnxruntime-1.19.2-cp310-cp310-macosx_11_0_universal2.whl", hash = "sha256:84fa57369c06cadd3c2a538ae2a26d76d583e7c34bdecd5769d71ca5c0fc750e", size = 16776408, upload-time = "2024-09-04T06:37:02.431Z" },
+    { url = "https://files.pythonhosted.org/packages/d8/d3/eb93f4ae511cfc725d0c69e07008800f8ac018de19ea1e497b306f174ccc/onnxruntime-1.19.2-cp310-cp310-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:bdc471a66df0c1cdef774accef69e9f2ca168c851ab5e4f2f3341512c7ef4666", size = 11491779, upload-time = "2024-09-04T06:37:06.203Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/4b/ce5958074abe4b6e8d1da9c10e443e01a681558a9ec17e5cc7619438e094/onnxruntime-1.19.2-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e3a4ce906105d99ebbe817f536d50a91ed8a4d1592553f49b3c23c4be2560ae6", size = 13170428, upload-time = "2024-09-04T06:37:09.032Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/0f/6df82dfe02467d12adbaa05c2bd17519c29c7df531ed600231f0c741ad22/onnxruntime-1.19.2-cp310-cp310-win32.whl", hash = "sha256:4b3d723cc154c8ddeb9f6d0a8c0d6243774c6b5930847cc83170bfe4678fafb3", size = 9591305, upload-time = "2024-09-04T06:37:11.482Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/d8/68b63dc86b502169d017a86fe8bc718f4b0055ef1f6895bfaddd04f2eead/onnxruntime-1.19.2-cp310-cp310-win_amd64.whl", hash = "sha256:17ed7382d2c58d4b7354fb2b301ff30b9bf308a1c7eac9546449cd122d21cae5", size = 11084902, upload-time = "2024-09-04T06:37:14.647Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/ff/77bee5df55f034ee81d2e1bc58b2b8511b9c54f06ce6566cb562c5d95aa5/onnxruntime-1.19.2-cp311-cp311-macosx_11_0_universal2.whl", hash = "sha256:d863e8acdc7232d705d49e41087e10b274c42f09e259016a46f32c34e06dc4fd", size = 16779187, upload-time = "2024-09-04T06:37:18.245Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/78/e29f5fb76e0f6524f3520e8e5b9d53282784b45d14068c5112db9f712b0a/onnxruntime-1.19.2-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c1dfe4f660a71b31caa81fc298a25f9612815215a47b286236e61d540350d7b6", size = 11496005, upload-time = "2024-09-04T06:37:20.998Z" },
+    { url = "https://files.pythonhosted.org/packages/60/ce/be4152da5c1030ab5a159a4a792ed9abad6ba498d79ef0aeba593ff7b5bf/onnxruntime-1.19.2-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a36511dc07c5c964b916697e42e366fa43c48cdb3d3503578d78cef30417cb84", size = 13167809, upload-time = "2024-09-04T06:37:24.221Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/00/9740a074eb0e0a21ff13a2c4f32aecc5b21110b2c9b9177d8ac132b66e2d/onnxruntime-1.19.2-cp311-cp311-win32.whl", hash = "sha256:50cbb8dc69d6befad4746a69760e5b00cc3ff0a59c6c3fb27f8afa20e2cab7e7", size = 9591445, upload-time = "2024-09-04T06:37:26.766Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/f5/9d995a685f97508b3254f17015b4a78641b0625e79480a7aed7a7a105d7c/onnxruntime-1.19.2-cp311-cp311-win_amd64.whl", hash = "sha256:1c3e5d415b78337fa0b1b75291e9ea9fb2a4c1f148eb5811e7212fed02cfffa8", size = 11085695, upload-time = "2024-09-04T06:37:29.473Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/a5/2a02687a88fc8a2507bef65876c90e96b9f8de5ba1f810acbf67c140fc67/onnxruntime-1.19.2-cp312-cp312-macosx_11_0_universal2.whl", hash = "sha256:68e7051bef9cfefcbb858d2d2646536829894d72a4130c24019219442b1dd2ed", size = 16790434, upload-time = "2024-09-04T06:37:32.77Z" },
+    { url = "https://files.pythonhosted.org/packages/47/64/da42254ec14452cad2cdd4cf407094841c0a378c0d08944e9a36172197e9/onnxruntime-1.19.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d2d366fbcc205ce68a8a3bde2185fd15c604d9645888703785b61ef174265168", size = 11486028, upload-time = "2024-09-04T06:37:35.364Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/92/3574f6836f33b1b25f272293e72538c38451b12c2d9aa08630bb6bc0f057/onnxruntime-1.19.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:477b93df4db467e9cbf34051662a4b27c18e131fa1836e05974eae0d6e4cf29b", size = 13175054, upload-time = "2024-09-04T06:37:38.192Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/c9/8c37e413a830cac7f7dc094fffbd0c998c8bcb66a6f0b0a3201a49bc742b/onnxruntime-1.19.2-cp312-cp312-win32.whl", hash = "sha256:9a174073dc5608fad05f7cf7f320b52e8035e73d80b0a23c80f840e5a97c0147", size = 9592681, upload-time = "2024-09-04T06:37:41.328Z" },
+    { url = "https://files.pythonhosted.org/packages/44/c0/59768846533786a82cafb38d8d2f900ad666bc91f0ae634774d286fa3c47/onnxruntime-1.19.2-cp312-cp312-win_amd64.whl", hash = "sha256:190103273ea4507638ffc31d66a980594b237874b65379e273125150eb044857", size = 11086411, upload-time = "2024-09-04T06:37:44.123Z" },
+]
+
+[[package]]
+name = "onnxruntime"
 version = "1.23.2"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
@@ -601,14 +697,14 @@ resolution-markers = [
     "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin')",
 ]
 dependencies = [
-    { name = "coloredlogs" },
-    { name = "flatbuffers" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-    { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'" },
-    { name = "packaging" },
-    { name = "protobuf" },
-    { name = "sympy" },
+    { name = "coloredlogs", marker = "python_full_version < '3.11' or (platform_machine == 'x86_64' and sys_platform == 'darwin')" },
+    { name = "flatbuffers", marker = "python_full_version < '3.11' or (platform_machine == 'x86_64' and sys_platform == 'darwin')" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "packaging", marker = "python_full_version < '3.11' or (platform_machine == 'x86_64' and sys_platform == 'darwin')" },
+    { name = "protobuf", marker = "python_full_version < '3.11' or (platform_machine == 'x86_64' and sys_platform == 'darwin')" },
+    { name = "sympy", marker = "python_full_version < '3.11' or (platform_machine == 'x86_64' and sys_platform == 'darwin')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/35/d6/311b1afea060015b56c742f3531168c1644650767f27ef40062569960587/onnxruntime-1.23.2-cp310-cp310-macosx_13_0_arm64.whl", hash = "sha256:a7730122afe186a784660f6ec5807138bf9d792fa1df76556b27307ea9ebcbe3", size = 17195934, upload-time = "2025-10-27T23:06:14.143Z" },
@@ -644,11 +740,11 @@ resolution-markers = [
     "(python_full_version == '3.11.*' and platform_machine != 'x86_64') or (python_full_version == '3.11.*' and sys_platform != 'darwin')",
 ]
 dependencies = [
-    { name = "flatbuffers" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "packaging" },
-    { name = "protobuf" },
+    { name = "flatbuffers", marker = "(python_full_version >= '3.11' and platform_machine != 'x86_64') or (python_full_version >= '3.11' and sys_platform != 'darwin')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people') or (python_full_version == '3.11.*' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people') or (python_full_version >= '3.12' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "packaging", marker = "(python_full_version >= '3.11' and platform_machine != 'x86_64') or (python_full_version >= '3.11' and sys_platform != 'darwin')" },
+    { name = "protobuf", marker = "(python_full_version >= '3.11' and platform_machine != 'x86_64') or (python_full_version >= '3.11' and sys_platform != 'darwin')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/5d/50be370b540a6cb9ea173503f5418e8315dfe5757400ad7720542d348b94/onnxruntime-1.32.0-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:366b9e53d07812cc5c92822cecf7563b76a8a0f32ba3bb8dd232a206ac3bcb6c", size = 22506162, upload-time = "2026-11-13T11:05:56.87Z" },
@@ -675,7 +771,9 @@ name = "onnxruntime-directml"
 version = "1.23.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin')",
+    "python_full_version < '3.11' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version < '3.11' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version < '3.11' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version < '3.11' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
 ]
 dependencies = [
     { name = "coloredlogs" },
@@ -697,16 +795,20 @@ name = "onnxruntime-directml"
 version = "1.24.4"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "(python_full_version >= '3.12' and platform_machine != 'x86_64') or (python_full_version >= '3.12' and sys_platform != 'darwin')",
-    "(python_full_version == '3.11.*' and platform_machine != 'x86_64') or (python_full_version == '3.11.*' and sys_platform != 'darwin')",
+    "(python_full_version >= '3.12' and sys_platform != 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')",
+    "(python_full_version >= '3.12' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version >= '3.12' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "(python_full_version == '3.11.*' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version >= '3.12' and sys_platform != 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
 ]
 dependencies = [
-    { name = "flatbuffers" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "packaging" },
-    { name = "protobuf" },
-    { name = "sympy" },
+    { name = "flatbuffers", marker = "python_full_version >= '3.11' or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and extra == 'extra-13-yadisk-backup-people-legacy') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people-legacy') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra != 'extra-13-yadisk-backup-people-legacy') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "packaging", marker = "python_full_version >= '3.11' or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "protobuf", marker = "python_full_version >= '3.11' or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "sympy", marker = "python_full_version >= '3.11' or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/be/90/99566dc6398028e7691a5b12720fd85f757a0901818b84599d28abb3f085/onnxruntime_directml-1.24.4-cp311-cp311-win_amd64.whl", hash = "sha256:96642a787e5a6f33bf043521c0f06eb1eb663f6b830e5862a2026d03f9c90543", size = 25106000, upload-time = "2026-03-17T21:47:15.438Z" },
@@ -740,8 +842,9 @@ name = "pillow"
 version = "12.3.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin')",
+    "python_full_version < '3.11' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version < '3.11' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version < '3.11' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/1c/3d/bb7fca845737cf9d7dbde16ed1843984665ff2e0a518f5db43e77ec540b9/pillow-12.3.0.tar.gz", hash = "sha256:3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce", size = 47025035, upload-time = "2026-07-01T11:56:38.965Z" }
 wheels = [
@@ -796,10 +899,12 @@ name = "pillow"
 version = "13.0.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version >= '3.12' and platform_machine != 'x86_64') or (python_full_version >= '3.12' and sys_platform != 'darwin')",
-    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version == '3.11.*' and platform_machine != 'x86_64') or (python_full_version == '3.11.*' and sys_platform != 'darwin')",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version >= '3.12' and sys_platform != 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version >= '3.12' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version >= '3.12' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "(python_full_version == '3.11.*' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ce/a4/9cc30690a394a8305e8be4c9036aa16d0dfddadd09079860b582f562496d/pillow-13.0.0.tar.gz", hash = "sha256:cdcd1ba258178f7356d74170c9a81ba4eab6a5d55748bc402a5a2a6fe6be3510", size = 47058631, upload-time = "2026-10-16T22:18:09.718Z" }
 wheels = [
@@ -850,11 +955,12 @@ name = "pillow-heif"
 version = "1.8.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin')",
+    "python_full_version < '3.11' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version < '3.11' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version < '3.11' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
 ]
 dependencies = [
-    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/44/c1/82145984920ca055675af2c2795bd30da6f7461215c41f3c1eacb3d66353/pillow_heif-1.8.1.tar.gz", hash = "sha256:521ebffb8a181d56c3904e5a61f20903edee0d9d3275967b8fb345f866215c06", size = 17395786, upload-time = "2026-10-11T13:18:19.2Z" }
 wheels = [
@@ -902,13 +1008,15 @@ name = "pillow-heif"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version >= '3.12' and platform_machine != 'x86_64') or (python_full_version >= '3.12' and sys_platform != 'darwin')",
-    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version == '3.11.*' and platform_machine != 'x86_64') or (python_full_version == '3.11.*' and sys_platform != 'darwin')",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version >= '3.12' and sys_platform != 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version >= '3.12' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version == '3.11.*' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version >= '3.12' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version >= '3.12' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
+    "(python_full_version == '3.11.*' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
 ]
 dependencies = [
-    { name = "pillow", version = "13.0.0", source = { registry = "https://pypi.org/simple" } },
+    { name = "pillow", version = "13.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and extra == 'extra-13-yadisk-backup-people') or (python_full_version >= '3.11' and extra == 'extra-13-yadisk-backup-people-legacy') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/46/b8/bef426073bdb089d30e053bcc6b2800d2be756ff2cf93eea34fa68bc92f0/pillow_heif-1.9.0.tar.gz", hash = "sha256:8a13d15106c9dbbd66a65966edee2ee0de3950c18dc3ea42912442cda803ea4c", size = 17430038, upload-time = "2026-11-24T21:39:59.171Z" }
 wheels = [
@@ -1096,7 +1204,7 @@ name = "pytest"
 version = "9.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
     { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
     { name = "iniconfig" },
     { name = "packaging" },
@@ -1163,11 +1271,14 @@ name = "scipy"
 version = "1.15.3"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin'",
-    "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin')",
+    "python_full_version >= '3.12' and sys_platform == 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version >= '3.12' and sys_platform != 'emscripten' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy') or (python_full_version == '3.11.*' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')",
+    "python_full_version < '3.11' and extra != 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy'",
+    "python_full_version < '3.11' and platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy'",
+    "(python_full_version < '3.11' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy') or (python_full_version < '3.11' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people' and extra != 'extra-13-yadisk-backup-people-legacy')",
 ]
 dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-13-yadisk-backup-people') or extra == 'extra-13-yadisk-backup-people-legacy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0f/37/6964b830433e654ec7485e45a00fc9a27cf868d622838f6b6d9c5ec0d532/scipy-1.15.3.tar.gz", hash = "sha256:eae3cf522bc7df64b42cad3925c876e1b0b6c35c1337c93e12c0f366f55b0eaf", size = 59419214, upload-time = "2025-05-08T16:13:05.955Z" }
 wheels = [
@@ -1227,7 +1338,7 @@ resolution-markers = [
     "(python_full_version == '3.11.*' and platform_machine != 'x86_64') or (python_full_version == '3.11.*' and sys_platform != 'darwin')",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/97/5a3609c4f8d58b039179648e62dd220f89864f56f7357f5d4f45c29eb2cc/scipy-1.17.1.tar.gz", hash = "sha256:95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0", size = 30573822, upload-time = "2026-02-23T00:26:24.851Z" }
 wheels = [
@@ -1282,7 +1393,7 @@ resolution-markers = [
     "(python_full_version >= '3.12' and platform_machine != 'x86_64') or (python_full_version >= '3.12' and sys_platform != 'darwin')",
 ]
 dependencies = [
-    { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7e/74/66de6258867beb2ef08f35f9f2ac017a52cacd5081714d239ff1a442d458/scipy-1.18.1.tar.gz", hash = "sha256:52c4b7422442aba924d03ad4019852b08a92e64ea187b933135687bfe2747307", size = 30781235, upload-time = "2026-08-21T23:28:50.599Z" }
 wheels = [
@@ -1383,7 +1494,7 @@ name = "tqdm"
 version = "4.70.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0d/ea/b2a5bd54b28a324dae8211928b2d730b6547500342c7e6c6dea08bd0a485/tqdm-4.70.1.tar.gz", hash = "sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4", size = 171846, upload-time = "2026-09-11T07:25:16.601Z" }
 wheels = [
@@ -1459,29 +1570,14 @@ sync-defaults = [
 
 [[package]]
 name = "yadisk-backup"
-version = "3.0.1"
+version = "3.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "av", version = "17.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "av", version = "18.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "av", version = "19.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "fastapi" },
     { name = "markdown", version = "3.10.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "markdown", version = "3.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (platform_machine == 'x86_64' and sys_platform == 'darwin')" },
-    { name = "onnxruntime", version = "1.32.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and platform_machine != 'x86_64') or (python_full_version >= '3.11' and sys_platform != 'darwin')" },
-    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "pillow", version = "13.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "pillow-heif", version = "1.8.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "pillow-heif", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "markdown", version = "3.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
     { name = "python-dotenv" },
     { name = "requests" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "tenacity" },
     { name = "tqdm" },
     { name = "uvicorn" },
@@ -1491,37 +1587,70 @@ dependencies = [
 [package.optional-dependencies]
 gpu = [
     { name = "onnxruntime-directml", version = "1.23.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' and sys_platform == 'win32'" },
-    { name = "onnxruntime-directml", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and sys_platform == 'win32'" },
+    { name = "onnxruntime-directml", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and sys_platform == 'win32') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+]
+people = [
+    { name = "av", version = "17.1.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "av", version = "18.1.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "av", version = "19.0.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "numpy", version = "2.5.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-13-yadisk-backup-people') or (platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "onnxruntime", version = "1.32.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and platform_machine != 'x86_64' and extra == 'extra-13-yadisk-backup-people') or (python_full_version >= '3.11' and sys_platform != 'darwin' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "pillow", version = "13.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "pillow-heif", version = "1.8.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "pillow-heif", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.11.*' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and extra == 'extra-13-yadisk-backup-people') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+]
+people-legacy = [
+    { name = "av", version = "14.1.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "onnxruntime", version = "1.19.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "pillow", version = "12.3.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-13-yadisk-backup-people-legacy') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "pillow", version = "13.0.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and python_full_version < '3.13' and extra == 'extra-13-yadisk-backup-people-legacy') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "pillow-heif", version = "1.8.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-13-yadisk-backup-people-legacy') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "pillow-heif", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and python_full_version < '3.13' and extra == 'extra-13-yadisk-backup-people-legacy') or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "httpx", marker = "python_full_version < '3.11'" },
-    { name = "httpx2", marker = "python_full_version >= '3.11'" },
+    { name = "httpx2", marker = "python_full_version >= '3.11' or (extra == 'extra-13-yadisk-backup-people' and extra == 'extra-13-yadisk-backup-people-legacy')" },
     { name = "pytest" },
     { name = "ruff" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "av", specifier = ">=13.0.0" },
+    { name = "av", marker = "python_full_version < '3.13' and extra == 'people-legacy'", specifier = ">=13.0.0,<14.2.0" },
+    { name = "av", marker = "extra == 'people'", specifier = ">=13.0.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "markdown", specifier = ">=3.6" },
-    { name = "numpy", specifier = ">=1.26.0" },
-    { name = "onnxruntime", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'", specifier = ">=1.19.0" },
-    { name = "onnxruntime", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = ">=1.19.0,<1.24.0" },
+    { name = "numpy", marker = "python_full_version < '3.13' and extra == 'people-legacy'", specifier = ">=1.26.0,<2.3.0" },
+    { name = "numpy", marker = "extra == 'people'", specifier = ">=1.26.0" },
+    { name = "onnxruntime", marker = "python_full_version < '3.13' and extra == 'people-legacy'", specifier = "==1.19.2" },
+    { name = "onnxruntime", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin' and extra == 'people'", specifier = ">=1.19.0,<1.24.0" },
+    { name = "onnxruntime", marker = "(platform_machine != 'x86_64' and extra == 'people') or (sys_platform != 'darwin' and extra == 'people')", specifier = ">=1.19.0" },
     { name = "onnxruntime-directml", marker = "sys_platform == 'win32' and extra == 'gpu'", specifier = ">=1.19.0" },
-    { name = "pillow", specifier = ">=10.4.0" },
-    { name = "pillow-heif", specifier = ">=0.18.0" },
+    { name = "pillow", marker = "python_full_version < '3.13' and extra == 'people-legacy'", specifier = ">=10.4.0" },
+    { name = "pillow", marker = "extra == 'people'", specifier = ">=10.4.0" },
+    { name = "pillow-heif", marker = "python_full_version < '3.13' and extra == 'people-legacy'", specifier = ">=0.18.0" },
+    { name = "pillow-heif", marker = "extra == 'people'", specifier = ">=0.18.0" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "requests", specifier = ">=2.31.0" },
-    { name = "scipy", specifier = ">=1.13.0" },
+    { name = "scipy", marker = "python_full_version < '3.13' and extra == 'people-legacy'", specifier = ">=1.13.0,<1.16.0" },
+    { name = "scipy", marker = "extra == 'people'", specifier = ">=1.13.0" },
     { name = "tenacity", specifier = ">=8.2.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
     { name = "uvicorn", specifier = ">=0.32.0" },
     { name = "yadisk", extras = ["sync-defaults"], specifier = ">=3.4.0" },
 ]
-provides-extras = ["gpu"]
+provides-extras = ["people", "people-legacy", "gpu"]
 
 [package.metadata.requires-dev]
 dev = [

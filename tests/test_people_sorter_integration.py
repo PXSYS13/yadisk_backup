@@ -261,3 +261,37 @@ def test_age_bridge_premerge_birth_year_validation_and_undo_after_recluster(tmp_
     last_undo = c.get("/api/people/status").json()["last_undo"]
     assert last_undo is not None
     assert last_undo["action_type"] == "merge"
+
+
+def test_people_degraded_mode_when_optional_deps_missing(monkeypatch) -> None:
+    """Если extra people не установился (старая macOS / 32-bit Windows), webui продолжает работать,
+    /api/people/status спокойно сообщает available=False, а запускающие ручки возвращают 503."""
+    monkeypatch.setattr(people_mod, "PEOPLE_AVAILABLE", False)
+    monkeypatch.setattr(
+        people_mod,
+        "PEOPLE_UNAVAILABLE_REASON",
+        "Сортировка по людям недоступна: нет onnxruntime",
+    )
+    c = _client()
+
+    st = c.get("/api/people/status")
+    assert st.status_code == 200
+    body = st.json()
+    assert body["available"] is False
+    assert "onnxruntime" in body["unavailable_reason"]
+    assert body["running"] is False
+
+    assert c.get("/api/people/persons").json() == {"items": []}
+    assert c.get("/api/people/age-bridges").json() == {"items": []}
+    assert c.get("/api/people/runs").json() == {"items": []}
+
+    for method, url, payload in (
+        ("post", "/api/people/scan/start", {}),
+        ("post", "/api/people/cluster/run", {}),
+        ("post", "/api/people/settings", {"source_dir": ""}),
+        ("post", "/api/people/sort/start", {}),
+        ("post", "/api/people/plan/preview", {}),
+    ):
+        resp = getattr(c, method)(url, json=payload)
+        assert resp.status_code == 503, (url, resp.status_code, resp.text)
+        assert "onnxruntime" in resp.json()["detail"]

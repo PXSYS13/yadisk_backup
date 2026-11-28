@@ -205,13 +205,6 @@
     App.toast('Спасибо, что поддерживаете проект!', 'ok');
   });
 
-  // «Вышла версия X.Y.Z»: не мешает, пока нужно ваше действие; скрытая — до следующей версии
-  function updateNote(s, r, offline) {
-    const u = s.update;
-    if (offline || !u || r.action || App.updateHidden.get() === u.latest) return '';
-    return App.updateBanner(u, true);
-  }
-
   App.action('update-hide', (el) => {
     App.updateHidden.save(el.dataset.version);
     App.html(byId('home-update'), '');
@@ -256,7 +249,8 @@
       const offline = App.state.offline;
       const setup = isSetup(r);
       App.html(byId('home-banner'), offline ? '' : App.actionBanner(r.action, s));
-      App.html(byId('home-update'), updateNote(s, r, offline));
+      // «Вышла версия X.Y.Z» и кнопка «Обновить программу»: не мешает, пока нужно ваше действие
+      App.html(byId('home-update'), offline ? '' : App.updateBlock(s, true));
       byId('home-hero').className = `card hero state-${offline ? 'needs_action' : r.state || 'idle'}`;
       App.html(byId('home-pill'), pill(r, offline));
       App.html(byId('home-beat'), heartbeat(r, offline));

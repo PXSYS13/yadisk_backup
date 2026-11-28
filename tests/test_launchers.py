@@ -74,9 +74,31 @@ def test_helper_bats_find_the_uv_that_webui_bat_downloaded(name):
 
 def test_launchers_never_install_test_tools_for_people():
     """uv run ставит группу dev: pytest, ruff.exe, httpx2.exe — лишние exe у людей и лишние
-    поводы для антивируса. Лаунчеры запускают программу с --no-dev."""
-    assert '"%UV%" run --no-dev webui.py' in (ROOT / "webui.bat").read_text(encoding="ascii")
-    assert "exec uv run --no-dev webui.py" in (ROOT / "webui.sh").read_text(encoding="utf-8")
+    поводы для антивируса. Лаунчеры синхронизируют --no-dev (с 3-ступенчатым откатом:
+    people -> people-legacy -> базовое ядро) и запускают программу с --no-sync --no-dev."""
+    bat = (ROOT / "webui.bat").read_text(encoding="ascii")
+    sh = (ROOT / "webui.sh").read_text(encoding="utf-8")
+    assert '"%UV%" sync --locked --no-dev --extra people --python "%PY_VER%"' in bat
+    assert '"%UV%" sync --locked --no-dev --extra people-legacy --python 3.12' in bat
+    assert '"%UV%" sync --locked --no-dev --python "%PY_VER%"' in bat
+    assert '"%UV%" run --no-sync --no-dev --python "%RUN_PY%" webui.py' in bat
+    assert 'uv sync --locked --no-dev --extra people --python "$PY_VER"' in sh
+    assert "uv sync --locked --no-dev --extra people-legacy --python 3.12" in sh
+    assert 'uv sync --locked --no-dev --python "$PY_VER"' in sh
+    assert 'uv run --no-sync --no-dev --python "$RUN_PY" webui.py' in sh
+
+
+def test_launchers_loop_on_selfupdate_restart_code():
+    """Автообновление выходит с кодом 75 — лаунчеры переподнимают сервер и пересинхронизируют
+    зависимости, а в .bat запуск и проверка errorlevel лежат в одном составном блоке."""
+    bat = (ROOT / "webui.bat").read_text(encoding="ascii")
+    sh = (ROOT / "webui.sh").read_text(encoding="utf-8")
+    assert 'set "YADISK_RESTART_CODE=75"' in bat
+    assert ":yadisk_run" in bat and ":yadisk_stopped" in bat
+    assert "if errorlevel 75 if not errorlevel 76" in bat
+    assert "export YADISK_RESTART_CODE=75" in sh
+    assert "while :; do" in sh and '"$code" -eq 75' in sh
+    assert "exec uv run" not in sh
 
 
 @pytest.mark.skipif(not shutil.which("git"), reason="нужен git")
@@ -120,8 +142,9 @@ def test_python_version_pinned_and_bounded():
 
 
 def test_uv_lock_has_wheels_for_pinned_python_on_all_desktop_platforms():
-    """Для закреплённого Python каждый нативный пакет из uv.lock должен иметь готовый wheel
-    на Windows (x64/arm64), macOS (Apple Silicon и Intel) и Linux (x64/arm64)."""
+    """Базовое ядро не тянет тяжёлые ML/видео-пакеты (чтобы бэкап запускался даже на старой
+    macOS и 32-битной Windows), а в extra people для закреплённого Python каждый нативный пакет
+    имеет готовый wheel на Windows (x64/arm64), macOS (Apple Silicon и Intel) и Linux (x64/arm64)."""
     try:
         import tomllib
     except ModuleNotFoundError:
@@ -136,10 +159,17 @@ def test_uv_lock_has_wheels_for_pinned_python_on_all_desktop_platforms():
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
     root_pkg = next(p for p in lock["package"] if p["name"] == "yadisk-backup")
 
+    core_names = {d["name"] for d in root_pkg.get("dependencies", [])}
+    for heavy in ("onnxruntime", "av", "scipy", "numpy", "pillow-heif"):
+        assert heavy not in core_names, f"{heavy} должен быть в optional-dependencies.people, не в ядре"
+
+    people_deps = root_pkg.get("optional-dependencies", {}).get("people", [])
+    assert people_deps, "В uv.lock должен присутствовать extra people"
+
     by_name_ver = {(p["name"], p.get("version")): p for p in lock["package"]}
-    # Собираем нативные зависимости с их маркерами, действующими для закреплённого Python
+    # Собираем нативные зависимости из extra people, действующие для закреплённого Python
     native_deps: dict[str, list[tuple[str, dict]]] = {}
-    for dep in root_pkg.get("dependencies", []):
+    for dep in people_deps:
         name = dep["name"]
         ver = dep.get("version")
         marker = dep.get("marker", "")
@@ -155,7 +185,7 @@ def test_uv_lock_has_wheels_for_pinned_python_on_all_desktop_platforms():
             continue
         native_deps.setdefault(name, []).append((marker, pkg))
 
-    assert "onnxruntime" in native_deps, "onnxruntime должен присутствовать в uv.lock"
+    assert "onnxruntime" in native_deps, "onnxruntime должен присутствовать в extra people uv.lock"
 
     platforms = {
         "win_amd64": lambda p: "win_amd64" in p,
@@ -184,3 +214,33 @@ def test_uv_lock_has_wheels_for_pinned_python_on_all_desktop_platforms():
             if not any(wheel_matches(pkg, pred) for _, pkg in entries):
                 missing.append(f"{name} ({plat_name}, {cp_tag})")
     assert not missing, f"В uv.lock нет готовых wheel'ов для {pinned}: {', '.join(missing)}"
+
+    # Extra people-legacy: проверяем наличие macOS 11+ wheel (Intel и Apple Silicon) для cp312
+    legacy_deps = root_pkg.get("optional-dependencies", {}).get("people-legacy", [])
+    assert legacy_deps, "В uv.lock должен присутствовать extra people-legacy для старых macOS 11-13"
+    legacy_ort = [
+        by_name_ver[(d["name"], d.get("version"))]
+        for d in legacy_deps
+        if d["name"] == "onnxruntime" and (d["name"], d.get("version")) in by_name_ver
+    ]
+    assert legacy_ort, "onnxruntime должен быть в extra people-legacy"
+    ort_mac11 = [
+        w["url"]
+        for pkg in legacy_ort
+        for w in pkg.get("wheels", [])
+        if "cp312" in w["url"] and "macosx_11_0_universal2" in w["url"]
+    ]
+    assert ort_mac11, "people-legacy должен содержать macosx_11_0_universal2 wheel для cp312"
+
+    legacy_av = [
+        by_name_ver[(d["name"], d.get("version"))]
+        for d in legacy_deps
+        if d["name"] == "av" and (d["name"], d.get("version")) in by_name_ver
+    ]
+    assert legacy_av, "av должен быть в extra people-legacy"
+    for arch in ("macosx_11_0_x86_64", "macosx_11_0_arm64"):
+        assert any(
+            arch in w["url"] and ("cp312" in w["url"] or "abi3" in w["url"])
+            for pkg in legacy_av
+            for w in pkg.get("wheels", [])
+        ), f"people-legacy av должен содержать {arch} wheel для Python 3.12"

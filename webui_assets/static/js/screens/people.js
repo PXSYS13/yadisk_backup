@@ -476,8 +476,31 @@
     const running = !!st.running;
     const phase = st.phase || 'idle';
 
+    const unavailable = st.available === false;
     hydrateConfigFields(cfg);
-    paintHardwarePill(st.model);
+    if (unavailable) {
+      const pill = byId('ppl-hw-pill');
+      if (pill) {
+        pill.className = 'ppl-hw-pill warn';
+        App.text(pill, 'Модуль недоступен на этой ОС');
+      }
+    } else {
+      paintHardwarePill(st.model);
+    }
+
+    const unavailBanner = byId('ppl-unavail-banner');
+    if (unavailBanner) {
+      if (unavailable) {
+        unavailBanner.classList.remove('hidden');
+        App.text(
+          byId('ppl-unavail-text'),
+          st.unavailable_reason ||
+            'Дополнительные библиотеки распознавания лиц недоступны на этой системе. Бэкап Яндекс.Диска, Безлимит, ссылки и загрузка работают полностью.'
+        );
+      } else {
+        unavailBanner.classList.add('hidden');
+      }
+    }
 
     // Заметный баннер ошибки при наличии st.error
     const errBanner = byId('ppl-error-banner');
@@ -491,13 +514,14 @@
     }
 
     // Кнопки шага 1
-    byId('ppl-pick-src-btn').disabled = running;
-    byId('ppl-use-dl-btn').disabled = running;
-    byId('ppl-model-pack').disabled = running;
-    byId('ppl-prefer-gpu').disabled = running;
-    byId('ppl-scan-btn').disabled = running;
-    byId('ppl-cluster-btn').disabled = running || !(stats.faces_active > 0);
-    byId('ppl-reset-btn').disabled = running;
+    const locked = running || unavailable;
+    byId('ppl-pick-src-btn').disabled = locked;
+    byId('ppl-use-dl-btn').disabled = locked;
+    byId('ppl-model-pack').disabled = locked;
+    byId('ppl-prefer-gpu').disabled = locked;
+    byId('ppl-scan-btn').disabled = locked;
+    byId('ppl-cluster-btn').disabled = locked || !(stats.faces_active > 0);
+    byId('ppl-reset-btn').disabled = locked;
     byId('ppl-stop-btn').classList.toggle('hidden', !running);
 
     // Прогресс шага 1
@@ -1786,6 +1810,14 @@
             <span class="ppl-step-title">4. Сортировка и откат</span>
             <span class="ppl-step-badge num" id="ppl-badge-4"></span>
           </button>
+        </div>
+
+        <div id="ppl-unavail-banner" class="banner warn hidden" role="status">
+          <span class="b-icon">${App.icon('info')}</span>
+          <div class="grow">
+            <h3>Сортировка по людям недоступна на этой системе</h3>
+            <p id="ppl-unavail-text"></p>
+          </div>
         </div>
 
         <div id="ppl-error-banner" class="banner action hidden" role="alert">

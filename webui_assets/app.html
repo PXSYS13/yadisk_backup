@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<meta name="app-version" content="__APP_VERSION__">
 <title>Бэкап Яндекс.Диска</title>
 <script>
   // Тема — до отрисовки, чтобы не мигало: сохранённый выбор или тема системы
@@ -88,6 +89,13 @@
   </main>
 </div>
 <div id="dialog-root"></div>
+<div id="update-overlay" class="update-overlay hidden" role="status" aria-live="polite">
+  <div class="update-overlay-card">
+    <span class="upd-spin big" aria-hidden="true"></span>
+    <h3 id="update-overlay-title">Перезапускаю программу</h3>
+    <p id="update-overlay-text">Страница обновится сама через несколько секунд.</p>
+  </div>
+</div>
 <div id="toast" class="hidden" role="status" aria-live="polite"></div>
 <noscript>Для работы программы нужен JavaScript.</noscript>
 </body>

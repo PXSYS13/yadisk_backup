@@ -11,7 +11,7 @@ import time
 from fastapi import APIRouter
 
 from utils import APP_VERSION, DONATION_URL, LINKS_DIRNAME, TELEGRAM_CHANNEL, TELEGRAM_HANDLE, YOUTUBE_VIDEO_URL
-from webapp import access, config, diagnostics, paths, updates
+from webapp import access, config, diagnostics, paths, selfupdate, updates
 from webapp.demo import DEMO_STATES, demo_on, demo_rescue
 from webapp.folders import disk_folders_summary
 from webapp.links import demo_links, links_status
@@ -91,6 +91,21 @@ def api_status(demo: str | None = None):
         "free_space": free,
         "news": diagnostics.NEWS_LINKS,
         "exit_codes": {str(code): text for code, text in diagnostics.EXIT_EXPLAIN.items()},
-        # Вышла новая версия: {current, latest, url}, иначе None. GitHub спрашивается в фоне
-        "update": (updates.demo() if demo == "update" else None) if demo_data else updates.snapshot(),
+        # Вышла новая версия: {current, latest, url, install}, иначе None. GitHub спрашивается в фоне
+        "update": _update_block(demo if demo_data else None, cfg),
+        # Кнопка «Обновить программу»: как идёт обновление (webapp.selfupdate), иначе None
+        "update_job": selfupdate.demo_job(demo) if demo_data else selfupdate.job_status(),
+        # Эту версию только что поставило обновление: {from, to, at, backup} — первые 10 минут
+        "updated": (selfupdate.demo_updated() if demo == "updated" else None) if demo_data
+        else selfupdate.updated_info(),
     }
+
+
+def _update_block(demo: str | None, cfg: dict) -> dict | None:
+    """Новая версия на GitHub и можно ли поставить её кнопкой (install — webapp.selfupdate)."""
+    if demo is not None:
+        if demo not in ("update", "update_running", "update_manual", "update_failed"):
+            return None
+        return dict(updates.demo(), install=selfupdate.demo_install())
+    u = updates.snapshot()
+    return dict(u, install=selfupdate.install_info(cfg)) if u else None

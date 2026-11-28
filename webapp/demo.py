@@ -13,13 +13,16 @@ from webapp.queue_db import empty_db_stats
 from webapp.rescue_view import build_rescue_status
 
 DEMO_STATES = ("setup", "ready", "listing", "downloading", "low_space", "waiting", "token", "cookies",
-               "overdraft", "disk_full", "done", "done_partial", "stopped", "update")
+               "overdraft", "disk_full", "done", "done_partial", "stopped", "update", "update_running",
+               "update_manual", "update_failed", "updated")
 
 
 def demo_on(demo: str | None) -> bool:
     """Включён ли демо-режим: передан параметр demo и в окружении задан YADISK_DEMO=1."""
     return bool(demo) and os.environ.get("YADISK_DEMO") == "1"
-# update — как ready, и на GitHub «вышла» новая версия (/api/status.update — webapp.updates.demo)
+# update — как ready, и на GitHub «вышла» новая версия (/api/status.update — webapp.updates.demo);
+# update_running / update_manual / update_failed — шаги кнопки «Обновить программу»
+# (/api/status.update_job — webapp.selfupdate.demo_job); updated — первые минуты после обновления
 
 _DEMO_DISK_FILES = ("Документы/Договор аренды.pdf", "Фото/2023/Отпуск/IMG_2041.JPG",
                     "Фото/2023/Отпуск/IMG_2042.JPG", "Видео/День рождения.mp4", "Музыка/Плейлист.m3u")

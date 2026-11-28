@@ -65,6 +65,42 @@ if ! command -v uv >/dev/null 2>&1; then
     echo
 fi
 
+export YADISK_RESTART_CODE=75
+
 echo "[*] Starting via uv (first run downloads Python and dependencies, 1-2 min)..."
 echo
-exec uv run --no-dev webui.py
+
+while :; do
+    PY_VER="3.13"
+    if [ -f .python-version ]; then
+        ver_from_file="$(tr -d '[:space:]' < .python-version)"
+        if [ -n "$ver_from_file" ]; then
+            PY_VER="$ver_from_file"
+        fi
+    fi
+
+    RUN_PY="$PY_VER"
+    if ! uv sync --locked --no-dev --extra people --python "$PY_VER"; then
+        echo
+        echo "[!] Пробую совместимый набор сортировки по людям (для macOS 11-13 / старых систем)..."
+        echo
+        if uv sync --locked --no-dev --extra people-legacy --python 3.12; then
+            RUN_PY="3.12"
+        else
+            echo
+            echo "[!] Модуль сортировки по людям недоступен на этой системе — запускаю бэкап без него..."
+            echo
+            uv sync --locked --no-dev --python "$PY_VER"
+        fi
+    fi
+
+    code=0
+    uv run --no-sync --no-dev --python "$RUN_PY" webui.py || code=$?
+    if [ "$code" -eq 75 ]; then
+        echo
+        echo "[*] Обновление установлено, перезапускаю программу..."
+        echo
+        continue
+    fi
+    exit "$code"
+done

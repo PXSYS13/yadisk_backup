@@ -1,25 +1,18 @@
 [project]
 name = "yadisk-backup"
-version = "3.0.1"
+version = "3.1.0"
 description = "Бесплатная программа: бэкап Яндекс.Диска, загрузка фото и видео в Безлимит и офлайн-сортировка по людям и датам"
 readme = "README.md"
 # Верхняя граница <3.14: у onnxruntime нет wheel для 3.15 (и для Intel macOS выше 3.13 / 1.23.2);
 # CI проверяет 3.10 и 3.13, по умолчанию uv берёт 3.13 из .python-version.
 requires-python = ">=3.10,<3.14"
 license = { text = "MIT" }
+# Базовое ядро: лёгкие зависимости с wheel на всех версиях macOS, Windows (вкл. x86) и Linux.
 dependencies = [
-    "av>=13.0.0",
     "fastapi>=0.115.0",
     "markdown>=3.6",
-    "numpy>=1.26.0",
-    # onnxruntime 1.24+ убрал wheel для Intel Mac (macosx_x86_64); 1.23.2 последний с ним
-    "onnxruntime>=1.19.0,<1.24.0; sys_platform == 'darwin' and platform_machine == 'x86_64'",
-    "onnxruntime>=1.19.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
-    "pillow>=10.4.0",
-    "pillow-heif>=0.18.0",
     "python-dotenv>=1.2.3",
     "requests>=2.31.0",
-    "scipy>=1.13.0",
     "tenacity>=8.2.0",
     "tqdm>=4.66.0",
     "uvicorn>=0.32.0",
@@ -27,6 +20,28 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Нативные ML/видео-зависимости вкладки «По людям»: лаунчер ставит их автоматически,
+# а при отсутствии wheel под старую macOS пробует people-legacy (macOS 11+), затем базовое ядро.
+people = [
+    "av>=13.0.0",
+    "numpy>=1.26.0",
+    # onnxruntime 1.24+ убрал wheel для Intel Mac (macosx_x86_64); 1.23.2 последний с ним
+    "onnxruntime>=1.19.0,<1.24.0; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "onnxruntime>=1.19.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "pillow>=10.4.0",
+    "pillow-heif>=0.18.0",
+    "scipy>=1.13.0",
+]
+# Совместимый набор для старых macOS 11–13 (Intel и Apple Silicon):
+# onnxruntime 1.19.2 (macosx_11_0_universal2, Python <=3.12) и av 14.1.0 (macosx_11_0_x86_64 / arm64).
+people-legacy = [
+    "av>=13.0.0,<14.2.0; python_version < '3.13'",
+    "numpy>=1.26.0,<2.3.0; python_version < '3.13'",
+    "onnxruntime==1.19.2; python_version < '3.13'",
+    "pillow>=10.4.0; python_version < '3.13'",
+    "pillow-heif>=0.18.0; python_version < '3.13'",
+    "scipy>=1.13.0,<1.16.0; python_version < '3.13'",
+]
 gpu = [
     "onnxruntime-directml>=1.19.0; sys_platform == 'win32'",
 ]
@@ -42,6 +57,12 @@ dev = [
 
 [tool.uv]
 package = false
+conflicts = [
+    [
+        { extra = "people" },
+        { extra = "people-legacy" },
+    ],
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

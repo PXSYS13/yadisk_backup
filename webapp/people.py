@@ -16,37 +16,94 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from sorter import paths
-from sorter.clustering import (
-    find_age_bridge_candidates,
-    ignore_person_action,
-    list_person_faces_outlier_first,
-    merge_persons_action,
-    reject_age_pair_action,
-    reject_face_action,
-    rename_person_action,
-    split_faces_action,
-    undo_last_action,
-    year_from_ts,
-)
-from sorter.clustering.studio import _UNSET as _STUDIO_UNSET
-from sorter.organizer import SortOptions, build_sort_plan
-from sorter.state import SorterState
-from sorter.utils import (
-    is_path_inside,
-    is_symlink_or_junction,
-    path_key,
-    to_long_path,
-    validate_dir_safe,
-)
-import sorter.webapp.config as cfg_mod
-import sorter.webapp.manager as mgr_mod
+from webapp.tasks import tm
 
 log = logging.getLogger("webui.people")
 router = APIRouter(prefix="/api/people", tags=["people"])
 
-manager: mgr_mod.TaskManager = mgr_mod.manager
+PEOPLE_AVAILABLE: bool = True
+PEOPLE_UNAVAILABLE_REASON: str = ""
+
+try:
+    from sorter import paths
+    from sorter.clustering import (
+        find_age_bridge_candidates,
+        ignore_person_action,
+        list_person_faces_outlier_first,
+        merge_persons_action,
+        reject_age_pair_action,
+        reject_face_action,
+        rename_person_action,
+        split_faces_action,
+        undo_last_action,
+        year_from_ts,
+    )
+    from sorter.clustering.studio import _UNSET as _STUDIO_UNSET
+    from sorter.organizer import SortOptions, build_sort_plan
+    from sorter.state import SorterState
+    from sorter.utils import (
+        is_path_inside,
+        is_symlink_or_junction,
+        path_key,
+        to_long_path,
+        validate_dir_safe,
+    )
+    import sorter.webapp.config as cfg_mod
+    import sorter.webapp.manager as mgr_mod
+
+    manager: Any = mgr_mod.manager
+except ImportError as _imp_exc:
+    PEOPLE_AVAILABLE = False
+    _missing = getattr(_imp_exc, "name", "") or str(_imp_exc)
+    PEOPLE_UNAVAILABLE_REASON = (
+        "Сортировка по людям недоступна на этой системе: не установлены дополнительные "
+        f"библиотеки распознавания ({_missing}). Для этой вкладки нужна 64-битная ОС "
+        "с поддержкой ONNX Runtime (Windows x64/ARM64, macOS 14+ на Apple Silicon, "
+        "macOS 13+ на Intel, Linux glibc 2.28+). Бэкап Яндекс.Диска, Безлимит, "
+        "публичные ссылки и загрузка работают полностью."
+    )
+    log.warning("Модуль сортировки по людям отключён (нет зависимости %s)", _missing)
+    paths = None  # type: ignore[assignment]
+    cfg_mod = None  # type: ignore[assignment]
+    mgr_mod = None  # type: ignore[assignment]
+    manager = None
+
 _studio_lock = threading.RLock()
+
+
+def _require_people() -> None:
+    if not PEOPLE_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail=PEOPLE_UNAVAILABLE_REASON
+            or "Сортировка по людям недоступна на этой системе (нет библиотек распознавания).",
+        )
+
+
+def _check_not_frozen() -> None:
+    frozen = tm.frozen()
+    if frozen:
+        raise HTTPException(status_code=409, detail=frozen)
+
+
+def _unavailable_status_dict() -> dict[str, Any]:
+    return {
+        "available": False,
+        "unavailable_reason": PEOPLE_UNAVAILABLE_REASON
+        or "Сортировка по людям недоступна на этой системе.",
+        "running": False,
+        "task": None,
+        "phase": "idle",
+        "message": "Сортировка по людям недоступна на этой системе",
+        "error": None,
+        "progress": {"done": 0, "total": 0, "percent": 0.0, "current_file": ""},
+        "stats": {},
+        "config": {},
+        "model": {"ready": False, "providers": []},
+        "events": [],
+        "last_undo": None,
+        "age_bridge_count": 0,
+    }
 
 
 class SettingsPayload(BaseModel):
@@ -267,17 +324,21 @@ def _build_sort_options_from_payload(payload: PlanPreviewPayload) -> SortOptions
 
 
 def _ensure_not_running_for_studio() -> None:
+    _require_people()
     if manager.is_running():
         raise HTTPException(status_code=409, detail="Сначала остановите текущую операцию")
 
 
 @router.get("/status")
 def api_people_status():
-    return manager.status_dict()
+    if not PEOPLE_AVAILABLE:
+        return _unavailable_status_dict()
+    return {"available": True, **manager.status_dict()}
 
 
 @router.post("/settings")
 def api_people_settings(payload: SettingsPayload):
+    _require_people()
     updates = payload.model_dump(exclude_none=True)
     for field_name, label in (
         ("source_dir", "исходная папка"),
@@ -307,6 +368,7 @@ def api_people_settings(payload: SettingsPayload):
 
 @router.post("/folder/pick")
 def api_people_pick_folder(payload: FolderPickPayload | None = None):
+    _require_people()
     if manager.is_running():
         raise HTTPException(status_code=409, detail="Сначала остановите текущую операцию")
     field = payload.field if payload is not None else "source_dir"
@@ -339,6 +401,8 @@ def api_people_pick_folder(payload: FolderPickPayload | None = None):
 
 @router.post("/scan/start")
 def api_people_scan_start(payload: ScanStartPayload | None = None):
+    _require_people()
+    _check_not_frozen()
     req = payload if payload is not None else ScanStartPayload()
     src = (req.source_dir or "").strip() or str(cfg_mod.get_config().get("source_dir", ""))
     try:
@@ -357,6 +421,8 @@ def api_people_scan_start(payload: ScanStartPayload | None = None):
 
 @router.post("/cluster/run")
 def api_people_cluster_run():
+    _require_people()
+    _check_not_frozen()
     try:
         manager.start_cluster()
     except mgr_mod.TaskBusyError as exc:
@@ -366,6 +432,7 @@ def api_people_cluster_run():
 
 @router.post("/task/stop")
 def api_people_task_stop():
+    _require_people()
     return {"ok": True, "stopping": manager.stop()}
 
 
@@ -384,6 +451,8 @@ def api_people_reset():
 
 @router.get("/persons")
 def api_people_list_persons(include_ignored: Annotated[bool, Query()] = True):
+    if not PEOPLE_AVAILABLE:
+        return {"items": []}
     with SorterState(paths.DB_FILE) as state:
         persons = state.list_persons(include_ignored=include_ignored)
         protos_by_pid = _serialize_prototypes(state.list_prototypes())
@@ -396,6 +465,7 @@ def api_people_list_persons(include_ignored: Annotated[bool, Query()] = True):
 
 @router.get("/persons/{person_id}/faces")
 def api_people_person_faces(person_id: int):
+    _require_people()
     with SorterState(paths.DB_FILE) as state:
         person = _get_formatted_person(state, person_id)
         if person is None:
@@ -575,6 +645,8 @@ def api_people_reject_face(face_id: int, payload: RejectFacePayload | None = Non
 
 @router.get("/age-bridges")
 def api_people_age_bridges(top_k: Annotated[int, Query(ge=1, le=200)] = 25):
+    if not PEOPLE_AVAILABLE:
+        return {"items": []}
     with SorterState(paths.DB_FILE) as state:
         candidates = find_age_bridge_candidates(state, top_k=top_k)
     return {"items": [c.to_dict() for c in candidates]}
@@ -673,6 +745,7 @@ def api_people_studio_undo():
 
 @router.get("/faces/{face_id}/crop")
 def api_people_face_crop(face_id: int):
+    _require_people()
     with SorterState(paths.DB_FILE) as state:
         face = state.get_face(face_id)
     if face is None:
@@ -685,6 +758,7 @@ def api_people_face_crop(face_id: int):
 
 @router.get("/media/{media_id}/thumb")
 def api_people_media_thumb(media_id: int):
+    _require_people()
     with SorterState(paths.DB_FILE) as state:
         media = state.get_media(media_id)
     if media is None:
@@ -697,6 +771,7 @@ def api_people_media_thumb(media_id: int):
 
 @router.post("/plan/preview")
 def api_people_plan_preview(payload: PlanPreviewPayload | None = None):
+    _require_people()
     req = payload if payload is not None else PlanPreviewPayload()
     try:
         options = _build_sort_options_from_payload(req)
@@ -711,6 +786,8 @@ def api_people_plan_preview(payload: PlanPreviewPayload | None = None):
 
 @router.post("/sort/start")
 def api_people_sort_start(payload: SortStartPayload | None = None):
+    _require_people()
+    _check_not_frozen()
     req = payload if payload is not None else SortStartPayload()
     try:
         options = _build_sort_options_from_payload(req)
@@ -724,6 +801,8 @@ def api_people_sort_start(payload: SortStartPayload | None = None):
 
 @router.get("/runs")
 def api_people_list_runs():
+    if not PEOPLE_AVAILABLE:
+        return {"items": []}
     with SorterState(paths.DB_FILE) as state:
         manager.reconcile_stale_runs(state)
         items = state.list_sort_runs(limit=30)
@@ -732,6 +811,8 @@ def api_people_list_runs():
 
 @router.post("/runs/{run_id}/resume")
 def api_people_resume_run(run_id: int, payload: ResumeRunPayload | None = None):
+    _require_people()
+    _check_not_frozen()
     req = payload if payload is not None else ResumeRunPayload()
     try:
         manager.start_resume(run_id, allow_move=req.allow_move)
@@ -746,6 +827,8 @@ def api_people_resume_run(run_id: int, payload: ResumeRunPayload | None = None):
 
 @router.post("/runs/{run_id}/rollback")
 def api_people_rollback_run(run_id: int):
+    _require_people()
+    _check_not_frozen()
     try:
         manager.start_rollback(run_id)
     except LookupError as exc:

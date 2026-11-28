@@ -8,6 +8,8 @@
     screens: {},
     actions: {},
     demo: new URLSearchParams(location.search).get('demo'),
+    // Версия, с которой загружена страница: сервер назовёт другую — значит, программу обновили
+    version: ((typeof document.querySelector === 'function' && document.querySelector('meta[name="app-version"]')) || {}).content || '',
   };
   window.App = App;
 
@@ -371,7 +373,11 @@
         res = await App.api.get(url);
         if (again) continue;
         App.state.offline = !res.ok;
-        if (res.ok) App.state.status = res.data;
+        if (res.ok) {
+          App.state.status = res.data;
+          if (App.reloadIfUpdated(res.data)) return;
+        }
+        App.watchRestart(res.ok ? res.data : null);
         App.render();
       } while (again);
       // Метка в названии вкладки и уведомление о смене состояния (components.js);
@@ -384,6 +390,45 @@
     } finally {
       inFlight = false;
     }
+  };
+  // ── Программу обновили: страница перезагружается за новой версией. Пока сервер
+  //    перезапускается — понятный экран вместо «Программа не отвечает» ──
+  const restart = { since: 0, job: null };
+  App.reloadIfUpdated = (s) => {
+    const v = s && s.app_version;
+    if (!v || !App.version || v === App.version || App.demo) return false;
+    let tried = '';
+    try { tried = sessionStorage.getItem('yadisk-reloaded-for') || ''; } catch (e) { /* без хранилища */ }
+    if (tried === v) return false;  // уже перезагружались ради этой версии — по кругу не ходим
+    try { sessionStorage.setItem('yadisk-reloaded-for', v); } catch (e) { /* то же */ }
+    location.reload();
+    return true;
+  };
+  App.watchRestart = (s) => {
+    if (s) {
+      const job = s.update_job;
+      if (job && job.state === 'restarting') {
+        restart.job = job;
+        if (!restart.since) restart.since = Date.now();
+      } else {
+        restart.since = 0;
+      }
+    }
+    const el = App.byId('update-overlay');
+    if (!el) return;
+    const show = !s && restart.since > 0;
+    el.classList.toggle('hidden', !show);
+    if (!show) return;
+    // Полторы минуты без ответа — новая версия сама не поднялась
+    const late = Date.now() - restart.since > 90 * 1000;
+    const job = restart.job || {};
+    el.classList.toggle('late', late);
+    App.text(App.byId('update-overlay-title'), late ? 'Программа не запустилась сама' : 'Перезапускаю программу');
+    App.text(App.byId('update-overlay-text'), late
+      ? 'Если программа открылась в новой вкладке браузера, работайте в ней. Если нет — посмотрите в чёрное окно ' +
+        `программы, а если оно закрылось, запустите ${job.launcher || 'webui.bat'} снова: всё скачанное, ключ и ` +
+        'настройки на месте.'
+      : `Новая версия${job.to ? ` ${job.to}` : ''} установлена. Страница обновится сама через несколько секунд.`);
   };
   App.render = () => {
     const s = App.state.status;

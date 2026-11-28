@@ -20,9 +20,10 @@ def index():
     if not html_path.exists():
         return HTMLResponse("<h1>UI не установлен</h1>")
     html = html_path.read_text(encoding="utf-8")
-    # ?v=версия у статики — после обновления браузер не возьмёт старый JS из кэша
+    # ?v=версия у статики — после обновления браузер не возьмёт старый JS из кэша, а саму
+    # страницу не кешируем вовсе: после «Обновить программу» она перезагружается за новой версией
     return HTMLResponse(html.replace("__APP_VERSION__", APP_VERSION),
-                        headers={"Cache-Control": "no-cache"})
+                        headers={"Cache-Control": "no-store, no-cache"})
 
 
 @router.get("/donate")

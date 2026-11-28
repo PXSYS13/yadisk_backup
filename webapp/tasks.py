@@ -210,12 +210,40 @@ class TaskManager:
     def __init__(self):
         self._tasks: dict[str, Task] = {}  # ключ — название/слот
         self._lock = threading.Lock()
+        # Почему новые задачи сейчас запускать нельзя (идёт обновление программы), иначе None
+        self._frozen: str | None = None
+
+    def freeze(self, reason: str) -> list[str]:
+        """Запрещает запуск новых задач, если ни одна не идёт. Возвращает слоты живых задач.
+
+        Проверка и запрет — под той же блокировкой, что и start(): задача не проскочит
+        между «ничего не идёт» и «запускать нельзя».
+        """
+        with self._lock:
+            alive = [slot for slot, t in self._tasks.items() if t.alive()]
+            if not alive:
+                self._frozen = reason
+            return alive
+
+    def unfreeze(self) -> None:
+        with self._lock:
+            self._frozen = None
+
+    def frozen(self) -> str | None:
+        with self._lock:
+            return self._frozen
+
+    def alive_slots(self) -> list[str]:
+        with self._lock:
+            return [slot for slot, t in self._tasks.items() if t.alive()]
 
     def start(self, slot: str, script: str, args: list[str]) -> tuple[bool, str]:
         """slot — логическое имя ('disk', 'unlim_collect', 'unlim_w1', ...).
         Можно одновременно несколько задач в разных слотах.
         """
         with self._lock:
+            if self._frozen:
+                return False, self._frozen
             existing = self._tasks.get(slot)
             if existing and existing.alive():
                 return False, f"Уже идёт: {slot}"

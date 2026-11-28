@@ -27,9 +27,16 @@ from uploader.state import UploadState
 from uploader.utils import validate_source_dir_safe
 from uploader.webapp import config as up_cfg
 from uploader.webapp import manager as up_mgr
+from webapp.tasks import tm
 
 log = logging.getLogger("webui.upload_unlim")
 router = APIRouter(prefix="/api/upload", tags=["upload_unlim"])
+
+
+def _check_not_frozen() -> None:
+    frozen = tm.frozen()
+    if frozen:
+        raise HTTPException(status_code=409, detail=frozen)
 
 FileStatusFilter = Literal[
     "all",
@@ -147,6 +154,7 @@ def api_upload_pick_folder():
 
 @router.post("/scan")
 def api_upload_scan(payload: UploadScanPayload):
+    _check_not_frozen()
     src = (payload.source_dir or "").strip() or up_cfg.get_config().get("source_dir", "")
     try:
         clean = up_mgr.manager.start_scan(src)
@@ -160,6 +168,7 @@ def api_upload_scan(payload: UploadScanPayload):
 
 @router.post("/start")
 def api_upload_start(payload: UploadStartPayload):
+    _check_not_frozen()
     src = (payload.source_dir or "").strip() or up_cfg.get_config().get("source_dir", "")
     try:
         clean = up_mgr.manager.start_upload(
